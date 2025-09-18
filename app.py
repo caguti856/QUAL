@@ -11,8 +11,7 @@ KOBO_API_URL = f"https://kf.kobotoolbox.org/assets/atdspJQv7RBwjkmaVFRS43/submis
 
 KOBO_TOKEN = st.secrets["KOBO_TOKEN"]
 HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
-HF_API_TOKEN = st.secrets["HF_API_TOKEN"]  # Hugging Face Inference API token
-HF_HEADERS = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+
 
 # 2️⃣ SECTION MAP & RUBRICS
 # --------------------------
