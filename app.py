@@ -64,31 +64,53 @@ DEFAULT_RUBRIC = "3 – Transformative, 2 – Strategic, 1 – Compliant, 0 – 
 # Optional: customize rubric per section
 SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
 
+
 # --------------------------
-# 3️⃣ FETCH KOBO DATA
+# 2️⃣ FUNCTIONS
 # --------------------------
 @st.cache_data(ttl=300)
 def fetch_kobo_data():
     """Fetch submissions from KoboToolbox and return as a DataFrame."""
     try:
         response = requests.get(KOBO_API_URL, headers=HEADERS)
+        
+
+        # Raise an error if the request failed
         response.raise_for_status()
-        data = response.json()
-    except Exception as e:
+    except requests.RequestException as e:
         st.error(f"Failed to fetch data: {e}")
         return pd.DataFrame()
 
-    results = data.get("results", data if isinstance(data, list) else [])
+    # Try to parse JSON
+    try:
+        data = response.json()
+    except ValueError:
+        st.error(f"Failed to parse JSON. Response text (truncated):\n{response.text[:1000]}")
+        return pd.DataFrame()
+
+    # Determine if the data is a list (common for submissions endpoint)
+    if isinstance(data, list):
+        results = data
+    elif isinstance(data, dict):
+        results = data.get("results", [])
+    else:
+        st.error("Unexpected data format from Kobo API.")
+        return pd.DataFrame()
+
     if not results:
         st.warning("No submissions found yet.")
         return pd.DataFrame()
 
+    # Convert to DataFrame
     df = pd.DataFrame(results)
+
+    # Optional: preview first few rows in Streamlit
     st.write("Preview of fetched data:")
     st.dataframe(df.head())
-    return df
 
+    return df
 # --------------------------
+ #3️⃣ FLATTEN RESPONSES
 # 4️⃣ FLATTEN KOBO RESPONSES
 # --------------------------
 def flatten_kobo_responses(df):
