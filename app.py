@@ -19,7 +19,7 @@ def fetch_kobo_data():
     """Fetch submissions from KoboToolbox and return as a DataFrame."""
     try:
         response = requests.get(KOBO_API_URL, headers=HEADERS)
-        st.write(f"Status code: {response.status_code}")
+        
 
         # Raise an error if the request failed
         response.raise_for_status()
@@ -65,13 +65,4 @@ Next steps: add scoring logic + send results to Power BI.
 """)
 
 df = fetch_kobo_data()
-
-if not df.empty:
-    st.subheader("Raw Responses")
-    st.dataframe(df)
-
-    st.subheader("Summary")
-    st.write(df.describe(include="all"))
-else:
-    st.warning("No data yet or error fetching responses.")
 
