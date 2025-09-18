@@ -1,12 +1,11 @@
 import streamlit as st
 import requests
 import pandas as pd
-import time
-from transformers import pipeline
+
 import joblib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
+
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -133,13 +132,10 @@ def flatten_kobo_responses(df):
     return pd.DataFrame(rows)
 
 # --------------------------
-# 5️⃣ LOCAL AI SCORING
 @st.cache_resource
 def load_ml_models():
-    # Load your score prediction model
     clf = joblib.load("score_model.pkl")
     vectorizer = joblib.load("tfidf_vectorizer.pkl")
-    # Optional: Load theme extraction model
     theme_clf = joblib.load("theme_model.pkl")
     theme_vectorizer = joblib.load("theme_vectorizer.pkl")
     return clf, vectorizer, theme_clf, theme_vectorizer
@@ -147,36 +143,34 @@ def load_ml_models():
 clf, vectorizer, theme_clf, theme_vectorizer = load_ml_models()
 
 # --------------------------
-# 6️⃣ ML SCORING AND THEME EXTRACTION
+# 6️⃣ ML SCORING + THEME EXTRACTION
 # --------------------------
 def ml_score_and_theme(answers):
-    # Predict scores
-    X = vectorizer.transform(answers)
-    scores = clf.predict(X)
-    # Predict themes
+    X_score = vectorizer.transform(answers)
+    scores = clf.predict(X_score)
+    
     X_theme = theme_vectorizer.transform(answers)
     themes = theme_clf.predict(X_theme)
+    
     return scores, themes
 
 # --------------------------
-# 7️⃣ STREAMLIT APP (SCORING LOOP)
+# 7️⃣ STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo AI Dashboard (Fast ML Scoring)")
+st.title("📊 Kobo ML Dashboard (Fast Scoring & Themes)")
 
 df = fetch_kobo_data()
 if not df.empty:
-    st.subheader("Raw Responses")
-    st.dataframe(df.head())
-
     flat_df = flatten_kobo_responses(df)
+    st.subheader("Raw Flattened Responses")
+    st.dataframe(flat_df.head())
 
     st.subheader("Scoring with ML...")
-    batch_size = 50
     scored_list = []
+    batch_size = 50  # Adjust as needed for memory
 
     for i in range(0, len(flat_df), batch_size):
         batch = flat_df.iloc[i:i+batch_size]
-
         pred_scores, pred_themes = ml_score_and_theme(batch["Answer"].tolist())
 
         for score, theme, (_, row) in zip(pred_scores, pred_themes, batch.iterrows()):
