@@ -10,7 +10,7 @@ KOBO_TOKEN = os.getenv("KOBO_TOKEN")
 
 KOBO_FORM_ID = "atdspJQv7RBwjkmaVFRS43"  # e.g. "a1b2c3d4..." from Kobo form URL
 
-KOBO_API_URL = f"https://kf.kobotoolbox.org/api/v2/assets/{atdspJQv7RBwjkmaVFRS43}/data/"
+KOBO_API_URL = f"https://kf.kobotoolbox.org/api/v2/assets/atdspJQv7RBwjkmaVFRS43/data/"
 
 HEADERS = {
     "Authorization": f"Token {KOBO_TOKEN}"
@@ -51,3 +51,4 @@ if not df.empty:
     st.write(df.describe(include="all"))
 else:
     st.warning("No data yet or error fetching responses.")
+
