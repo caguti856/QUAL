@@ -1,5 +1,7 @@
+accelerate==1.10.1
 altair==5.5.0
 attrs==25.3.0
+bitsandbytes==0.47.0
 blinker==1.9.0
 cachetools==5.5.2
 certifi==2025.8.3
@@ -29,6 +31,7 @@ packaging==25.0
 pandas==2.3.2
 pillow==11.3.0
 protobuf==6.32.1
+psutil==7.1.0
 pyarrow==21.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
