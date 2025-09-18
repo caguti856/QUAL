@@ -6,7 +6,7 @@ import pandas as pd
 # 1️⃣ CONFIG
 # --------------------------
 KOBO_FORM_ID = "atdspJQv7RBwjkmaVFRS43"
-KOBO_API_URL = f"https://kf.kobotoolbox.org/api/v2/assets/{KOBO_FORM_ID}/submissions/?format=json"
+KOBO_API_URL = f"https://kf.kobotoolbox.org/assets/atdspJQv7RBwjkmaVFRS43/submissions/?format=json"
 
 KOBO_TOKEN = st.secrets["KOBO_TOKEN"]
 HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
@@ -58,3 +58,4 @@ if not df.empty:
     st.write(df.describe(include="all"))
 else:
     st.warning("No data yet or error fetching responses.")
+
