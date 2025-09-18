@@ -2,7 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 import os
-KOBO_TOKEN = os.getenv("KOBO_TOKEN")
+KOBO_TOKEN = st.secrets["KOBO_TOKEN"]
+
 # --------------------------
 # 1. CONFIG
 # --------------------------
