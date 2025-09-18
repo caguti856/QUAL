@@ -137,30 +137,38 @@ def load_model():
 
 model_pipeline = load_model()
 
-def hf_score_answer_local(answer, rubric, section):
-    if not answer or answer.strip() == "":
-        return pd.Series(["No response", "", section])
-    
-    prompt = f"""
+def hf_score_batch(answers, rubrics, sections):
+    prompts = []
+    for answer, rubric in zip(answers, rubrics):
+        if not answer or answer.strip() == "":
+            prompts.append("Candidate answer: [No response]")
+        else:
+            prompts.append(f"""
 Candidate answer: {answer}
 
 Rubric: {rubric}
 
 Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
-"""
-    try:
-        result = model_pipeline(prompt, max_length=200)[0]['generated_text']
-    except Exception as e:
-        return pd.Series(["Error", str(e), section])
-    
-    score = next((s for s in ["0","1","2","3"] if s in result), "?")
-    themes = ""
-    if "Themes:" in result:
-        themes = result.split("Themes:")[1].split("\n")[0].strip()
-    elif "themes:" in result:
-        themes = result.split("themes:")[1].split("\n")[0].strip()
-    
-    return pd.Series([score, themes, section])
+""")
+
+    results = model_pipeline(prompts, max_length=200)
+
+    scored = []
+    for res, ans, sec in zip(results, answers, sections):
+        result_text = res['generated_text']
+        score = next((s for s in ["0","1","2","3"] if s in result_text), "?")
+        themes = ""
+        if "Themes:" in result_text:
+            themes = result_text.split("Themes:")[1].split("\n")[0].strip()
+        elif "themes:" in result_text:
+            themes = result_text.split("themes:")[1].split("\n")[0].strip()
+
+        if not ans or ans.strip() == "":
+            score, themes = "No response", ""
+
+        scored.append((score, themes, sec))
+
+    return scored
 
 # --------------------------
 # 6️⃣ STREAMLIT APP
@@ -175,24 +183,29 @@ if not df.empty:
     flat_df = flatten_kobo_responses(df)
 
     st.subheader("Scoring with AI...")
-    scored_list = []
-    for idx, row in flat_df.iterrows():
-        qid = row['Question_ID']
+    batch_size = 10
+scored_list = []
+
+for i in range(0, len(flat_df), batch_size):
+    batch = flat_df.iloc[i:i+batch_size]
+    
+    sections = []
+    rubrics = []
+    for qid in batch["Question_ID"]:
         section_prefix = "_".join(qid.split("_")[:2]) + "_group"
         section_name = SECTION_MAP.get(section_prefix, section_prefix)
-        rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
+        sections.append(section_name)
+        rubrics.append(SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC))
 
-        score, themes, section = hf_score_answer_local(row['Answer'], rubric, section_name)
+    # Batch scoring
+    scored_batch = hf_score_batch(batch["Answer"].tolist(), rubrics, sections)
+
+    for (score, themes, sec), (_, row) in zip(scored_batch, batch.iterrows()):
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
-            "Section": section,
+            "Section": sec,
             "Question_ID": row["Question_ID"],
             "Answer": row["Answer"],
             "Score": score,
             "Themes": themes
         })
-        time.sleep(0.5)
-
-    scored_df = pd.DataFrame(scored_list)
-    st.subheader("✅ AI Scored & Themed Responses")
-    st.dataframe(scored_df)
