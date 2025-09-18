@@ -16,30 +16,45 @@ HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
 # --------------------------
 @st.cache_data(ttl=300)
 def fetch_kobo_data():
-    response = requests.get(KOBO_API_URL, headers=HEADERS)
-    st.write(f"Status code: {response.status_code}")
+    """Fetch submissions from KoboToolbox and return as a DataFrame."""
+    try:
+        response = requests.get(KOBO_API_URL, headers=HEADERS)
+        st.write(f"Status code: {response.status_code}")
 
+        # Raise an error if the request failed
+        response.raise_for_status()
+    except requests.RequestException as e:
+        st.error(f"Failed to fetch data: {e}")
+        return pd.DataFrame()
+
+    # Try to parse JSON
     try:
         data = response.json()
-    except ValueError as e:
-        st.error(f"Failed to parse JSON. Response text:\n{response.text[:1000]}")
+    except ValueError:
+        st.error(f"Failed to parse JSON. Response text (truncated):\n{response.text[:1000]}")
         return pd.DataFrame()
 
-    results = data.get("results") or []
+    # Determine if the data is a list (common for submissions endpoint)
+    if isinstance(data, list):
+        results = data
+    elif isinstance(data, dict):
+        results = data.get("results", [])
+    else:
+        st.error("Unexpected data format from Kobo API.")
+        return pd.DataFrame()
+
     if not results:
         st.warning("No submissions found yet.")
         return pd.DataFrame()
 
-    return pd.DataFrame(results)
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
 
-    # Check submissions
-    results = data.get("results") or []
-    if not results:
-        st.warning("No submissions found yet.")
-        return pd.DataFrame()
+    # Optional: preview first few rows in Streamlit
+    st.write("Preview of fetched data:")
+    st.dataframe(df.head())
 
-    return pd.DataFrame(results)
-
+    return df
 # --------------------------
 # 3️⃣ STREAMLIT APP
 # --------------------------
@@ -59,5 +74,4 @@ if not df.empty:
     st.write(df.describe(include="all"))
 else:
     st.warning("No data yet or error fetching responses.")
-
 
