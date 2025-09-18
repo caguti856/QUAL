@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+from transformers import pipeline
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -129,12 +130,18 @@ def flatten_kobo_responses(df):
     return pd.DataFrame(rows)
 
 # --------------------------
-# 5️⃣ HUGGING FACE SCORING
+# 5️⃣ LOCAL AI SCORING
 # --------------------------
-def hf_score_answer(answer, rubric, section):
+@st.cache_resource
+def load_model():
+    return pipeline("text2text-generation", model="google/flan-t5-small")
+
+model_pipeline = load_model()
+
+def hf_score_answer_local(answer, rubric, section):
     if not answer or answer.strip() == "":
         return pd.Series(["No response", "", section])
-
+    
     prompt = f"""
 Candidate answer: {answer}
 
@@ -142,29 +149,24 @@ Rubric: {rubric}
 
 Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
 """
-    api_url = "https://api-inference.huggingface.co/models/google/flan-t5-base"
     try:
-        response = requests.post(api_url, headers=HF_HEADERS, json={"inputs": prompt}, timeout=30)
-        response.raise_for_status()
-        result_text = response.json()[0]['generated_text']
+        result = model_pipeline(prompt, max_length=200)[0]['generated_text']
     except Exception as e:
         return pd.Series(["Error", str(e), section])
-
-    # parse score
-    score = next((s for s in ["0","1","2","3"] if s in result_text), "?")
-    # parse themes
+    
+    score = next((s for s in ["0","1","2","3"] if s in result), "?")
     themes = ""
-    if "Themes:" in result_text:
-        themes = result_text.split("Themes:")[1].split("\n")[0].strip()
-    elif "themes:" in result_text:
-        themes = result_text.split("themes:")[1].split("\n")[0].strip()
-
+    if "Themes:" in result:
+        themes = result.split("Themes:")[1].split("\n")[0].strip()
+    elif "themes:" in result:
+        themes = result.split("themes:")[1].split("\n")[0].strip()
+    
     return pd.Series([score, themes, section])
 
 # --------------------------
 # 6️⃣ STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo AI Dashboard")
+st.title("📊 Kobo AI Dashboard (Local Transformers)")
 
 df = fetch_kobo_data()
 if not df.empty:
@@ -177,12 +179,11 @@ if not df.empty:
     scored_list = []
     for idx, row in flat_df.iterrows():
         qid = row['Question_ID']
-        # Map Question ID to Section
         section_prefix = "_".join(qid.split("_")[:2]) + "_group"
         section_name = SECTION_MAP.get(section_prefix, section_prefix)
         rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
 
-        score, themes, section = hf_score_answer(row['Answer'], rubric, section_name)
+        score, themes, section = hf_score_answer_local(row['Answer'], rubric, section_name)
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
             "Section": section,
