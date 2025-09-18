@@ -2,8 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
-import joblib
-from transformers import pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -131,41 +131,46 @@ def flatten_kobo_responses(df):
 
 # --------------------------
 @st.cache_resource
-def load_model():
-    return pipeline("text2text-generation", model="google/flan-t5-small")
+def load_local_llm(model_name="chavinlo/alpaca-native-4bit"):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map="auto",
+        load_in_4bit=True
+    )
+    llm_pipeline = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_length=512
+    )
+    return llm_pipeline
 
-model_pipeline = load_model()
+model_pipeline = load_local_llm()
 
 # --------------------------
-# 5️⃣ Batch scoring function
+# 4️⃣ Batch Scoring Function
 # --------------------------
-def hf_score_batch(answers, rubrics, sections):
-    prompts = []
-    for answer, rubric in zip(answers, rubrics):
-        prompts.append(f"""
+def score_batch(answers, rubrics, sections):
+    scored = []
+    for answer, rubric, section in zip(answers, rubrics, sections):
+        prompt = f"""
 Candidate answer: {answer if answer.strip() else '[No response]'}
 Rubric: {rubric}
 Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
-""")
-    
-    results = model_pipeline(prompts, max_length=200)
-    
-    scored = []
-    for res, sec in zip(results, sections):
-        text = res['generated_text']
-        score = next((s for s in ["0","1","2","3"] if s in text), "?")
+"""
+        result = model_pipeline(prompt)[0]['generated_text']
+        score = next((s for s in ["0","1","2","3"] if s in result), "?")
         themes = ""
-        if "Themes:" in text:
-            themes = text.split("Themes:")[1].split("\n")[0].strip()
-        elif "themes:" in text:
-            themes = text.split("themes:")[1].split("\n")[0].strip()
-        scored.append((score, themes, sec))
+        if "Themes:" in result:
+            themes = result.split("Themes:")[1].split("\n")[0].strip()
+        scored.append((score, themes, section))
     return scored
 
 # --------------------------
-# 6️⃣ Streamlit app: scoring loop
+# 5️⃣ Streamlit App
 # --------------------------
-st.title("📊 Kobo AI Dashboard (Batch Transformers)")
+st.title("📊 Kobo Local AI Dashboard (Alpaca-LoRA)")
 
 df = fetch_kobo_data()
 if not df.empty:
@@ -173,21 +178,20 @@ if not df.empty:
     st.dataframe(df.head())
 
     flat_df = flatten_kobo_responses(df)
-    
-    st.subheader("Scoring with AI (Batch)...")
-    batch_size = 20  # adjust for speed/memory
+
+    st.subheader("Scoring with Local AI...")
+    batch_size = 20
     scored_list = []
 
     for i in range(0, len(flat_df), batch_size):
         batch = flat_df.iloc[i:i+batch_size]
-
         sections, rubrics = [], []
         for qid in batch["Question_ID"]:
             prefix = "_".join(qid.split("_")[:2]) + "_group"
             sections.append(SECTION_MAP.get(prefix, prefix))
             rubrics.append(SECTION_RUBRICS.get(SECTION_MAP.get(prefix, prefix), DEFAULT_RUBRIC))
-        
-        scored_batch = hf_score_batch(batch["Answer"].tolist(), rubrics, sections)
+
+        scored_batch = score_batch(batch["Answer"].tolist(), rubrics, sections)
         for (score, themes, sec), (_, row) in zip(scored_batch, batch.iterrows()):
             scored_list.append({
                 "Respondent_ID": row["Respondent_ID"],
@@ -197,7 +201,8 @@ if not df.empty:
                 "Score": score,
                 "Themes": themes
             })
-    
+        time.sleep(0.2)  # optional to avoid overload
+
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ AI Scored & Themed Responses")
     st.dataframe(scored_df)
