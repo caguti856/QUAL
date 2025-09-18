@@ -1,11 +1,8 @@
 import streamlit as st
 import requests
 import pandas as pd
-
-import joblib
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-
+import time
+from transformers import pipeline
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -133,60 +130,70 @@ def flatten_kobo_responses(df):
 
 # --------------------------
 @st.cache_resource
-def load_ml_models():
-    clf = joblib.load("score_model.pkl")
-    vectorizer = joblib.load("tfidf_vectorizer.pkl")
-    theme_clf = joblib.load("theme_model.pkl")
-    theme_vectorizer = joblib.load("theme_vectorizer.pkl")
-    return clf, vectorizer, theme_clf, theme_vectorizer
+def load_model():
+    return pipeline("text2text-generation", model="google/flan-t5-small")
 
-clf, vectorizer, theme_clf, theme_vectorizer = load_ml_models()
+model_pipeline = load_model()
 
-# --------------------------
-# 6️⃣ ML SCORING + THEME EXTRACTION
-# --------------------------
-def ml_score_and_theme(answers):
-    X_score = vectorizer.transform(answers)
-    scores = clf.predict(X_score)
+def hf_score_batch(answers, rubrics, sections):
+    prompts = []
+    for answer, rubric in zip(answers, rubrics):
+        prompts.append(f"""
+Candidate answer: {answer if answer.strip() else '[No response]'}
+Rubric: {rubric}
+Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
+""")
     
-    X_theme = theme_vectorizer.transform(answers)
-    themes = theme_clf.predict(X_theme)
+    results = model_pipeline(prompts, max_length=200)
     
-    return scores, themes
+    scored = []
+    for res, sec in zip(results, sections):
+        text = res['generated_text']
+        score = next((s for s in ["0","1","2","3"] if s in text), "?")
+        themes = ""
+        if "Themes:" in text:
+            themes = text.split("Themes:")[1].split("\n")[0].strip()
+        elif "themes:" in text:
+            themes = text.split("themes:")[1].split("\n")[0].strip()
+        scored.append((score, themes, sec))
+    return scored
 
 # --------------------------
-# 7️⃣ STREAMLIT APP
+# 5️⃣ STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo ML Dashboard (Fast Scoring & Themes)")
+st.title("📊 Kobo AI Dashboard (Batch Transformers)")
 
 df = fetch_kobo_data()
 if not df.empty:
-    flat_df = flatten_kobo_responses(df)
-    st.subheader("Raw Flattened Responses")
-    st.dataframe(flat_df.head())
+    st.subheader("Raw Responses")
+    st.dataframe(df.head())
 
-    st.subheader("Scoring with ML...")
+    flat_df = flatten_kobo_responses(df)
+    
+    st.subheader("Scoring with AI (Batch)...")
+    batch_size = 20  # adjust batch size for speed/memory
     scored_list = []
-    batch_size = 50  # Adjust as needed for memory
 
     for i in range(0, len(flat_df), batch_size):
         batch = flat_df.iloc[i:i+batch_size]
-        pred_scores, pred_themes = ml_score_and_theme(batch["Answer"].tolist())
 
-        for score, theme, (_, row) in zip(pred_scores, pred_themes, batch.iterrows()):
-            section_prefix = "_".join(row["Question_ID"].split("_")[:2]) + "_group"
-            section_name = SECTION_MAP.get(section_prefix, section_prefix)
-
+        sections, rubrics = [], []
+        for qid in batch["Question_ID"]:
+            prefix = "_".join(qid.split("_")[:2]) + "_group"
+            sections.append(SECTION_MAP.get(prefix, prefix))
+            rubrics.append(SECTION_RUBRICS.get(SECTION_MAP.get(prefix, prefix), DEFAULT_RUBRIC))
+        
+        scored_batch = hf_score_batch(batch["Answer"].tolist(), rubrics, sections)
+        for (score, themes, sec), (_, row) in zip(scored_batch, batch.iterrows()):
             scored_list.append({
                 "Respondent_ID": row["Respondent_ID"],
-                "Section": section_name,
+                "Section": sec,
                 "Question_ID": row["Question_ID"],
                 "Answer": row["Answer"],
                 "Score": score,
-                "Themes": theme
+                "Themes": themes
             })
-
+    
     scored_df = pd.DataFrame(scored_list)
-    st.subheader("✅ ML Scored & Themed Responses")
+    st.subheader("✅ AI Scored & Themed Responses")
     st.dataframe(scored_df)
-
