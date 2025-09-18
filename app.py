@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import joblib
 from transformers import pipeline
 # --------------------------
 # 1️⃣ CONFIG
@@ -135,6 +136,9 @@ def load_model():
 
 model_pipeline = load_model()
 
+# --------------------------
+# 5️⃣ Batch scoring function
+# --------------------------
 def hf_score_batch(answers, rubrics, sections):
     prompts = []
     for answer, rubric in zip(answers, rubrics):
@@ -159,7 +163,7 @@ Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-senten
     return scored
 
 # --------------------------
-# 5️⃣ STREAMLIT APP
+# 6️⃣ Streamlit app: scoring loop
 # --------------------------
 st.title("📊 Kobo AI Dashboard (Batch Transformers)")
 
@@ -171,7 +175,7 @@ if not df.empty:
     flat_df = flatten_kobo_responses(df)
     
     st.subheader("Scoring with AI (Batch)...")
-    batch_size = 20  # adjust batch size for speed/memory
+    batch_size = 20  # adjust for speed/memory
     scored_list = []
 
     for i in range(0, len(flat_df), batch_size):
