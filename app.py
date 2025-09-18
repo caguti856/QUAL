@@ -4,7 +4,7 @@ import pandas as pd
 
 import joblib
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+
 
 # --------------------------
 # 1️⃣ CONFIG
@@ -189,3 +189,4 @@ if not df.empty:
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ ML Scored & Themed Responses")
     st.dataframe(scored_df)
+
