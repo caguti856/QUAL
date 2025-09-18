@@ -140,7 +140,7 @@ Rubric: {rubric}
 
 Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
 """
-    api_url = "https://api-inference.huggingface.co/models/google/flan-t5-small"
+    api_url = "https://api-inference.huggingface.co/models/google/flan-t5-base"
     try:
         response = requests.post(api_url, headers=HF_HEADERS, json={"inputs": prompt}, timeout=30)
         response.raise_for_status()
