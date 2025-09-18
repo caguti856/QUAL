@@ -16,20 +16,21 @@ HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
 # --------------------------
 @st.cache_data(ttl=300)
 def fetch_kobo_data():
-    try:
-        response = requests.get(KOBO_API_URL, headers=HEADERS)
-        st.write(f"Status code: {response.status_code}")
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to fetch data from Kobo API: {e}")
-        return pd.DataFrame()
+    response = requests.get(KOBO_API_URL, headers=HEADERS)
+    st.write(f"Status code: {response.status_code}")
 
-    # Try to parse JSON safely
     try:
         data = response.json()
     except ValueError as e:
         st.error(f"Failed to parse JSON. Response text:\n{response.text[:1000]}")
         return pd.DataFrame()
+
+    results = data.get("results") or []
+    if not results:
+        st.warning("No submissions found yet.")
+        return pd.DataFrame()
+
+    return pd.DataFrame(results)
 
     # Check submissions
     results = data.get("results") or []
@@ -58,4 +59,5 @@ if not df.empty:
     st.write(df.describe(include="all"))
 else:
     st.warning("No data yet or error fetching responses.")
+
 
