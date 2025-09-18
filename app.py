@@ -13,11 +13,8 @@ HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
 HF_API_TOKEN = st.secrets["HF_API_TOKEN"]  # Hugging Face Inference API token
 HF_HEADERS = {"Authorization": f"Bearer {HF_API_TOKEN}"}
 
-# 2️⃣ RUBRICS FOR FIVE SECTIONS
+# 2️⃣ SECTION MAP & RUBRICS
 # --------------------------
-import pandas as pd
-
-# Mapping of questionnaire groups to your high-level sections
 SECTION_MAP = {
     "case1_stratpos_group": "Influencing",
     "case1_stakeholder_group": "Stakeholder Mapping & Engagement",
@@ -62,54 +59,37 @@ SECTION_MAP = {
     "case5_context_group": "Contextual Intelligence / Systems Thinking",
 }
 
+DEFAULT_RUBRIC = "3 – Transformative, 2 – Strategic, 1 – Compliant, 0 – Counterproductive"
 
+# Optional: customize rubric per section
+SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
 
 # --------------------------
-# 2️⃣ FUNCTIONS
+# 3️⃣ FETCH KOBO DATA
 # --------------------------
 @st.cache_data(ttl=300)
 def fetch_kobo_data():
     """Fetch submissions from KoboToolbox and return as a DataFrame."""
     try:
         response = requests.get(KOBO_API_URL, headers=HEADERS)
-        
-
-        # Raise an error if the request failed
         response.raise_for_status()
-    except requests.RequestException as e:
+        data = response.json()
+    except Exception as e:
         st.error(f"Failed to fetch data: {e}")
         return pd.DataFrame()
 
-    # Try to parse JSON
-    try:
-        data = response.json()
-    except ValueError:
-        st.error(f"Failed to parse JSON. Response text (truncated):\n{response.text[:1000]}")
-        return pd.DataFrame()
-
-    # Determine if the data is a list (common for submissions endpoint)
-    if isinstance(data, list):
-        results = data
-    elif isinstance(data, dict):
-        results = data.get("results", [])
-    else:
-        st.error("Unexpected data format from Kobo API.")
-        return pd.DataFrame()
-
+    results = data.get("results", data if isinstance(data, list) else [])
     if not results:
         st.warning("No submissions found yet.")
         return pd.DataFrame()
 
-    # Convert to DataFrame
     df = pd.DataFrame(results)
-
-    # Optional: preview first few rows in Streamlit
     st.write("Preview of fetched data:")
     st.dataframe(df.head())
-
     return df
+
 # --------------------------
- #3️⃣ FLATTEN RESPONSES
+# 4️⃣ FLATTEN KOBO RESPONSES
 # --------------------------
 def flatten_kobo_responses(df):
     rows = []
@@ -127,7 +107,7 @@ def flatten_kobo_responses(df):
     return pd.DataFrame(rows)
 
 # --------------------------
-# 4️⃣ HF SCORING FUNCTION
+# 5️⃣ HUGGING FACE SCORING
 # --------------------------
 def hf_score_answer(answer, rubric, section):
     if not answer or answer.strip() == "":
@@ -160,11 +140,11 @@ Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-senten
     return pd.Series([score, themes, section])
 
 # --------------------------
-# 5️⃣ STREAMLIT APP
+# 6️⃣ STREAMLIT APP
 # --------------------------
 st.title("📊 Kobo AI Dashboard")
-df = fetch_kobo_data()
 
+df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
     st.dataframe(df.head())
@@ -174,9 +154,12 @@ if not df.empty:
     st.subheader("Scoring with AI...")
     scored_list = []
     for idx, row in flat_df.iterrows():
-        # For demonstration, all sections use same rubric, replace with per-section rubric dict
-        rubric = "3 – Transformative, 2 – Strategic, 1 – Compliant, 0 – Counterproductive"
-        section_name = row['Question_ID'].split("_group")[0]  # crude section name mapping
+        qid = row['Question_ID']
+        # Map Question ID to Section
+        section_prefix = "_".join(qid.split("_")[:2]) + "_group"
+        section_name = SECTION_MAP.get(section_prefix, section_prefix)
+        rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
+
         score, themes, section = hf_score_answer(row['Answer'], rubric, section_name)
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
@@ -186,7 +169,7 @@ if not df.empty:
             "Score": score,
             "Themes": themes
         })
-        time.sleep(0.5)  # avoid HF free tier throttling
+        time.sleep(0.5)
 
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ AI Scored & Themed Responses")
