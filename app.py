@@ -1,9 +1,10 @@
 import streamlit as st
 import requests
 import pandas as pd
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from collections import Counter
 import time
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline,BitsAndBytesConfig
-
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -130,84 +131,70 @@ def flatten_kobo_responses(df):
     return pd.DataFrame(rows)
 
 # --------------------------
-@st.cache_resource
-def load_alpaca_model():
-    model_id = "TheBloke/Alpaca-7B-4bit"  # public 4-bit model
-    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True)
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=bnb_config,
-        device_map="auto"
-    )
-    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
-    return pipe
-
-model_pipeline = load_alpaca_model()
-
 # --------------------------
-# 5️⃣ BATCH SCORING FUNCTION
-# --------------------------
-def score_batch(answers, rubrics, sections):
-    prompts = []
-    for answer, rubric in zip(answers, rubrics):
-        prompts.append(f"""
-Candidate answer: {answer if answer.strip() else '[No response]'}
-Rubric: {rubric}
-Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
-""")
-    results = model_pipeline(prompts, max_length=200)
-    scored = []
-    for res, sec in zip(results, sections):
-        text = res['generated_text']
-        score = next((s for s in ["0","1","2","3"] if s in text), "?")
-        themes = ""
-        if "Themes:" in text:
-            themes = text.split("Themes:")[1].split("\n")[0].strip()
-        elif "themes:" in text:
-            themes = text.split("themes:")[1].split("\n")[0].strip()
-        scored.append((score, themes, sec))
-    return scored
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r"[^a-zA-Z0-9\s]", "", text)
+    return text
+
+RUBRIC_KEYWORDS = {
+    "3 – Transformative": ["innovative", "transformative", "impactful", "change", "improve"],
+    "2 – Strategic": ["strategic", "planned", "goal", "objective", "aligned"],
+    "1 – Compliant": ["followed instructions", "adhered", "standard", "compliant"],
+    "0 – Counterproductive": ["ignored", "failed", "mistake", "problem", "conflict"]
+}
+
+def score_answer(answer):
+    answer_lower = answer.lower()
+    for score, keywords in RUBRIC_KEYWORDS.items():
+        if any(k in answer_lower for k in keywords):
+            return score
+    return "2 – Strategic"  # default
+
+def extract_themes(answer, top_n=3):
+    words = preprocess_text(answer).split()
+    word_counts = Counter(words)
+    common = [w for w, c in word_counts.most_common(top_n)]
+    return ", ".join(common)
 
 # --------------------------
-# 6️⃣ STREAMLIT APP
+# 4️⃣ STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo AI Dashboard (Alpaca 4-bit)")
+st.title("📊 Kobo Qualitative Analysis Dashboard")
 
-# Fetch & flatten data
 df = fetch_kobo_data()
+
 if not df.empty:
     st.subheader("Raw Responses")
     st.dataframe(df.head())
 
-    flat_df = flatten_kobo_responses(df)
-    
-    st.subheader("Scoring with AI (Batch)...")
-    batch_size = 10
+    st.subheader("Scoring & Theme Extraction")
     scored_list = []
 
-    for i in range(0, len(flat_df), batch_size):
-        batch = flat_df.iloc[i:i+batch_size]
-
-        sections, rubrics = [], []
-        for qid in batch["Question_ID"]:
-            prefix = "_".join(qid.split("_")[:2]) + "_group"
-            sections.append(SECTION_MAP.get(prefix, prefix))
-            rubrics.append(SECTION_RUBRICS.get(SECTION_MAP.get(prefix, prefix), DEFAULT_RUBRIC))
+    for idx, row in df.iterrows():
+        qid = row["Question_ID"]
+        section_prefix = "_".join(qid.split("_")[:2]) + "_group"
+        section_name = SECTION_MAP.get(section_prefix, section_prefix)
+        rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
         
-        scored_batch = score_batch(batch["Answer"].tolist(), rubrics, sections)
-        for (score, themes, sec), (_, row) in zip(scored_batch, batch.iterrows()):
-            scored_list.append({
-                "Respondent_ID": row["Respondent_ID"],
-                "Section": sec,
-                "Question_ID": row["Question_ID"],
-                "Answer": row["Answer"],
-                "Score": score,
-                "Themes": themes
-            })
-        time.sleep(0.2)  # optional throttle
+        score = score_answer(row["Answer"])
+        themes = extract_themes(row["Answer"])
+        
+        scored_list.append({
+            "Respondent_ID": row["Respondent_ID"],
+            "Section": section_name,
+            "Question_ID": row["Question_ID"],
+            "Answer": row["Answer"],
+            "Score": score,
+            "Themes": themes
+        })
+        time.sleep(0.1)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
-    st.subheader("✅ AI Scored & Themed Responses")
+    st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
+
+    # Optional: summary by section
+    st.subheader("Section Summary")
+    section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
+    st.dataframe(section_summary)
