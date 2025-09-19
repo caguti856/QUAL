@@ -2,28 +2,29 @@ import streamlit as st
 import requests
 import pandas as pd
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
 from collections import Counter
 import time
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
 import numpy as np
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-# NLTK imports
-
-
 from nltk.tokenize import word_tokenize
 
+# --------------------------
+# 1️⃣ NLTK SETUP
+# --------------------------
+# Download NLTK resources only if not already downloaded
+for resource in ['punkt', 'stopwords', 'wordnet', 'omw-1.4']:
+    try:
+        nltk.data.find(f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}')
+    except LookupError:
+        nltk.download(resource)
 
-# Download NLTK data (run once)
-nltk.download('punkt')
-nltk.download('stopwords')
-nltk.download('wordnet')
-nltk.download('omw-1.4')
-# Ensure NLTK resources are downloaded
-
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -169,22 +170,17 @@ def score_answer(answer):
     for score, keywords in RUBRIC_KEYWORDS.items():
         if any(k in answer_lower for k in keywords):
             return score
-    return "2 – Strategic"
-
-# --------------------------
-# 🔹 NLTK-powered Theme Extraction
-# --------------------------
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
+    return "2 – Strategic"  # default
 
 def extract_themes(answer, top_n=3):
     words = word_tokenize(answer.lower())
-    filtered = [lemmatizer.lemmatize(w) for w in words if w.isalpha() and w not in stop_words]
-    common = [w for w, c in Counter(filtered).most_common(top_n)]
+    words = [lemmatizer.lemmatize(w) for w in words if w not in stop_words and w.isalpha()]
+    word_counts = Counter(words)
+    common = [w for w, c in word_counts.most_common(top_n)]
     return ", ".join(common)
 
 # --------------------------
-# 4️⃣ STREAMLIT APP
+# 5️⃣ STREAMLIT APP
 # --------------------------
 st.title("📊 Kobo Qualitative Analysis Dashboard")
 
@@ -215,7 +211,7 @@ if not df.empty:
             "Score": score,
             "Themes": themes
         })
-        time.sleep(0.05)
+        time.sleep(0.01)  # throttle
 
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ Scored & Themed Responses")
