@@ -5,6 +5,25 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from collections import Counter
 import time
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import CountVectorizer
+import numpy as np
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+# NLTK imports
+
+
+from nltk.tokenize import word_tokenize
+
+
+# Download NLTK data (run once)
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+# Ensure NLTK resources are downloaded
+
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -63,7 +82,11 @@ SECTION_MAP = {
 }
 
 
-DEFAULT_RUBRIC = "3 – Transformative, 2 – Strategic, 1 – Compliant, 0 – Counterproductive"
+DEFAULT_RUBRIC = DEFAULT_RUBRIC = {
+    "3 – Transformative": ["innovative", "transformative", "impactful", "change", "improve"],
+    "2 – Strategic": ["strategic", "planned", "goal", "objective", "aligned"],
+    "1 – Compliant": ["followed instructions", "adhered", "standard", "compliant"],
+    "0 – Counterproductive": ["ignored", "failed", "mistake", "problem", "conflict"]}
 
 # Optional: customize rubric per section
 SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
@@ -139,24 +162,25 @@ def preprocess_text(text):
     text = re.sub(r"[^a-zA-Z0-9\s]", "", text)
     return text
 
-RUBRIC_KEYWORDS = {
-    "3 – Transformative": ["innovative", "transformative", "impactful", "change", "improve"],
-    "2 – Strategic": ["strategic", "planned", "goal", "objective", "aligned"],
-    "1 – Compliant": ["followed instructions", "adhered", "standard", "compliant"],
-    "0 – Counterproductive": ["ignored", "failed", "mistake", "problem", "conflict"]
-}
+RUBRIC_KEYWORDS = DEFAULT_RUBRIC
 
 def score_answer(answer):
     answer_lower = answer.lower()
     for score, keywords in RUBRIC_KEYWORDS.items():
         if any(k in answer_lower for k in keywords):
             return score
-    return "2 – Strategic"  # default
+    return "2 – Strategic"
+
+# --------------------------
+# 🔹 NLTK-powered Theme Extraction
+# --------------------------
+stop_words = set(stopwords.words('english'))
+lemmatizer = WordNetLemmatizer()
 
 def extract_themes(answer, top_n=3):
-    words = preprocess_text(answer).split()
-    word_counts = Counter(words)
-    common = [w for w, c in word_counts.most_common(top_n)]
+    words = word_tokenize(answer.lower())
+    filtered = [lemmatizer.lemmatize(w) for w in words if w.isalpha() and w not in stop_words]
+    common = [w for w, c in Counter(filtered).most_common(top_n)]
     return ", ".join(common)
 
 # --------------------------
@@ -165,22 +189,38 @@ def extract_themes(answer, top_n=3):
 st.title("📊 Kobo Qualitative Analysis Dashboard")
 
 df = fetch_kobo_data()
-if df.empty:
-    st.warning("No data found.")
-else:
+if not df.empty:
+    st.subheader("Raw Responses")
+    st.dataframe(df.head())
+
     flat_df = flatten_kobo_responses(df)
-    flat_df["Score"] = flat_df["Answer"].apply(score_answer)
-    flat_df["Themes"] = flat_df["Answer"].apply(extract_themes)
 
-    # Dynamically create section name from question ID prefix
-    flat_df["Section"] = flat_df["Question_ID"].apply(lambda qid: "_".join(qid.split("_")[:3]))
+    st.subheader("Scoring & Theme Extraction")
+    scored_list = []
 
-    # Final summary: counts per section
-    summary_df = flat_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
-    summary_df = summary_df[["0 – Counterproductive", "1 – Compliant", "2 – Strategic", "3 – Transformative"]].fillna(0)
+    for idx, row in flat_df.iterrows():
+        qid = row["Question_ID"]
+        section_prefix = "_".join(qid.split("_")[:2]) + "_group"
+        section_name = SECTION_MAP.get(section_prefix, section_prefix)
+        rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
 
-    st.subheader("✅ Scored & Themed Responses (Full Detail)")
-    st.dataframe(flat_df)
+        score = score_answer(row["Answer"])
+        themes = extract_themes(row["Answer"])
 
-    st.subheader("✅ Final Summary by Section")
-    st.dataframe(summary_df)
+        scored_list.append({
+            "Respondent_ID": row["Respondent_ID"],
+            "Section": section_name,
+            "Question_ID": qid,
+            "Answer": row["Answer"],
+            "Score": score,
+            "Themes": themes
+        })
+        time.sleep(0.05)
+
+    scored_df = pd.DataFrame(scored_list)
+    st.subheader("✅ Scored & Themed Responses")
+    st.dataframe(scored_df)
+
+    st.subheader("Section Summary")
+    section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
+    st.dataframe(section_summary)
