@@ -210,6 +210,7 @@ def push_to_powerbi(df):
 st.title("📊 Kobo Qualitative Analysis Dashboard with Power BI Push")
 
 # Fetch and process Kobo data
+# Fetch and process Kobo data
 df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
@@ -232,12 +233,11 @@ if not df.empty:
             "Respondent_ID": row.get("Respondent_ID", f"resp_{idx}"),
             "Section": section_name if section_name else "Unknown Section",
             "Question_ID": qid,
-            "Answer": row.get("Answer", ""),
             "Score": score,
             "Themes": themes
         }
 
-        scored_list.append(scored_row)  # ✅ Make sure rows are collected
+        scored_list.append(scored_row)  # ✅ collect rows
         time.sleep(0.01)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
@@ -254,4 +254,5 @@ if not df.empty:
     # Section summary
     if not scored_df.empty and "Section" in scored_df.columns and "Score" in scored_df.columns:
         section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
-        st.subheader("Section")
+        st.subheader("Section Summary")
+        st.dataframe(section_summary)
