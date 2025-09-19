@@ -192,25 +192,24 @@ def extract_themes_with_weights(answer, top_n=3):
     ]
     return ", ".join(top_themes_with_weights)
 
-def truncate_fields(row):
-    return {k: str(v)[:MAX_LEN] for k, v in row.items()}
-
 def push_to_powerbi(df):
-    payload = df.to_dict(orient="records")
+    """Push DataFrame rows to Power BI push dataset"""
+    data_json = df.to_dict(orient="records")
     try:
-        response = requests.post(POWERBI_PUSH_URL, json=payload)
-        if response.status_code == 200:
-            st.success("✅ Data pushed successfully to Power BI")
+        response = requests.post(POWERBI_PUSH_URL, json=data_json)
+        if response.status_code in [200, 202]:
+            st.success("✅ Data successfully pushed to Power BI!")
         else:
-            st.error(f"❌ Failed to push data: {response.status_code} {response.text}")
+            st.error(f"Failed to push data to Power BI: {response.status_code} {response.text}")
     except Exception as e:
-        st.error(f"❌ Error pushing to Power BI: {e}")
+        st.error(f"Error pushing to Power BI: {e}")
 
 # --------------------------
-# 5️⃣ STREAMLIT APP
+# STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo Qualitative Analysis Dashboard")
+st.title("📊 Kobo Qualitative Analysis Dashboard with Power BI Push")
 
+# Fetch and process Kobo data
 df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
@@ -237,3 +236,17 @@ if not df.empty:
             "Score": score,
             "Themes": themes
         }
+
+        time.sleep(0.01)  # throttle optional
+
+    scored_df = pd.DataFrame(scored_list)
+    st.subheader("✅ Scored & Themed Responses")
+    st.dataframe(scored_df)
+
+    # Push to Power BI
+    push_to_powerbi(scored_df)
+
+    # Section summary
+    st.subheader("Section Summary")
+    section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
+    st.dataframe(section_summary)
