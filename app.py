@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline,BitsAndBytesConfig
 
 # --------------------------
 # 1️⃣ CONFIG
@@ -131,66 +131,71 @@ def flatten_kobo_responses(df):
 
 # --------------------------
 @st.cache_resource
-def load_local_llm(model_name="chavinlo/alpaca-native-4bit"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+def load_alpaca_model():
+    model_id = "TheBloke/Alpaca-7B-4bit"  # public 4-bit model
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True)
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        load_in_4bit=True
+        model_id,
+        quantization_config=bnb_config,
+        device_map="auto"
     )
-    llm_pipeline = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_length=512
-    )
-    return llm_pipeline
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+    return pipe
 
-model_pipeline = load_local_llm()
+model_pipeline = load_alpaca_model()
 
 # --------------------------
-# 4️⃣ Batch Scoring Function
+# 5️⃣ BATCH SCORING FUNCTION
 # --------------------------
 def score_batch(answers, rubrics, sections):
-    scored = []
-    for answer, rubric, section in zip(answers, rubrics, sections):
-        prompt = f"""
+    prompts = []
+    for answer, rubric in zip(answers, rubrics):
+        prompts.append(f"""
 Candidate answer: {answer if answer.strip() else '[No response]'}
 Rubric: {rubric}
 Task: Summarize key behaviors, extract themes, suggest a score (0-3), one-sentence justification.
-"""
-        result = model_pipeline(prompt)[0]['generated_text']
-        score = next((s for s in ["0","1","2","3"] if s in result), "?")
+""")
+    results = model_pipeline(prompts, max_length=200)
+    scored = []
+    for res, sec in zip(results, sections):
+        text = res['generated_text']
+        score = next((s for s in ["0","1","2","3"] if s in text), "?")
         themes = ""
-        if "Themes:" in result:
-            themes = result.split("Themes:")[1].split("\n")[0].strip()
-        scored.append((score, themes, section))
+        if "Themes:" in text:
+            themes = text.split("Themes:")[1].split("\n")[0].strip()
+        elif "themes:" in text:
+            themes = text.split("themes:")[1].split("\n")[0].strip()
+        scored.append((score, themes, sec))
     return scored
 
 # --------------------------
-# 5️⃣ Streamlit App
+# 6️⃣ STREAMLIT APP
 # --------------------------
-st.title("📊 Kobo Local AI Dashboard (Alpaca-LoRA)")
+st.title("📊 Kobo AI Dashboard (Alpaca 4-bit)")
 
+# Fetch & flatten data
 df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
     st.dataframe(df.head())
 
     flat_df = flatten_kobo_responses(df)
-
-    st.subheader("Scoring with Local AI...")
-    batch_size = 20
+    
+    st.subheader("Scoring with AI (Batch)...")
+    batch_size = 10
     scored_list = []
 
     for i in range(0, len(flat_df), batch_size):
         batch = flat_df.iloc[i:i+batch_size]
+
         sections, rubrics = [], []
         for qid in batch["Question_ID"]:
             prefix = "_".join(qid.split("_")[:2]) + "_group"
             sections.append(SECTION_MAP.get(prefix, prefix))
             rubrics.append(SECTION_RUBRICS.get(SECTION_MAP.get(prefix, prefix), DEFAULT_RUBRIC))
-
+        
         scored_batch = score_batch(batch["Answer"].tolist(), rubrics, sections)
         for (score, themes, sec), (_, row) in zip(scored_batch, batch.iterrows()):
             scored_list.append({
@@ -201,7 +206,7 @@ if not df.empty:
                 "Score": score,
                 "Themes": themes
             })
-        time.sleep(0.2)  # optional to avoid overload
+        time.sleep(0.2)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ AI Scored & Themed Responses")
