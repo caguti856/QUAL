@@ -17,13 +17,14 @@ HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
 
 # 2️⃣ SECTION MAP & RUBRICS
 # --------------------------
+# Map Question_ID prefixes to Competency / Attribute
 SECTION_MAP = {
-    "case1_stratpos_group": "Influencing",
-    "case1_stakeholder_group": "Stakeholder Mapping & Engagement",
-    "case1_evidence_group": "Evidence-Informed Advocacy",
+    "case1_stratpos_group": "Strategic Positioning & Donor Fluency",
+    "case1_stakeholder_group": "Power-Aware Stakeholder Mapping",
+    "case1_evidence_group": "Evidence-Led Learning",
     "case1_comm_group": "Communication, Framing & Messaging",
     "case1_risk_group": "Risk Awareness & Mitigation",
-    "case1_coalition_group": "Coalition Building & Collaborative Action",
+    "case1_coalition_group": "Coalition Governance & Convening",
     "case1_adaptive_group": "Adaptive Tactics & Channel Selection",
     "case1_integrity_group": "Integrity & Values-Based Influencing",
     
@@ -60,6 +61,7 @@ SECTION_MAP = {
     "case5_innovation_group": "Innovation & Experimentation",
     "case5_context_group": "Contextual Intelligence / Systems Thinking",
 }
+
 
 DEFAULT_RUBRIC = "3 – Transformative, 2 – Strategic, 1 – Compliant, 0 – Counterproductive"
 
@@ -163,39 +165,22 @@ def extract_themes(answer, top_n=3):
 st.title("📊 Kobo Qualitative Analysis Dashboard")
 
 df = fetch_kobo_data()
-if not df.empty:
-    st.subheader("Raw Responses")
-    st.dataframe(df.head())
-
+if df.empty:
+    st.warning("No data found.")
+else:
     flat_df = flatten_kobo_responses(df)
+    flat_df["Score"] = flat_df["Answer"].apply(score_answer)
+    flat_df["Themes"] = flat_df["Answer"].apply(extract_themes)
 
-    st.subheader("Scoring & Theme Extraction")
-    scored_list = []
+    # Dynamically create section name from question ID prefix
+    flat_df["Section"] = flat_df["Question_ID"].apply(lambda qid: "_".join(qid.split("_")[:3]))
 
-    for idx, row in flat_df.iterrows():
-        qid = row["Question_ID"]
-        section_prefix = "_".join(qid.split("_")[:2]) + "_group"
-        section_name = SECTION_MAP.get(section_prefix, section_prefix)
-        rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
+    # Final summary: counts per section
+    summary_df = flat_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
+    summary_df = summary_df[["0 – Counterproductive", "1 – Compliant", "2 – Strategic", "3 – Transformative"]].fillna(0)
 
-        score = score_answer(row["Answer"])
-        themes = extract_themes(row["Answer"])
+    st.subheader("✅ Scored & Themed Responses (Full Detail)")
+    st.dataframe(flat_df)
 
-        scored_list.append({
-            "Respondent_ID": row["Respondent_ID"],
-            "Section": section_name,
-            "Question_ID": qid,
-            "Answer": row["Answer"],
-            "Score": score,
-            "Themes": themes
-        })
-        time.sleep(0.05)  # optional throttle
-
-    scored_df = pd.DataFrame(scored_list)
-    st.subheader("✅ Scored & Themed Responses")
-    st.dataframe(scored_df)
-
-    # Optional: summary by section
-    st.subheader("Section Summary")
-    section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
-    st.dataframe(section_summary)
+    st.subheader("✅ Final Summary by Section")
+    st.dataframe(summary_df)
