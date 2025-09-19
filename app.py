@@ -174,21 +174,21 @@ RUBRIC_KEYWORDS = DEFAULT_RUBRIC
 
 def score_answer(answer):
     answer_lower = answer.lower()
-    for score, keywords in RUBRIC_KEYWORDS.items():
+    for score, keywords in DEFAULT_RUBRIC.items():
         if any(k in answer_lower for k in keywords):
             return score
     return "2 – Strategic"  # default
 
-def extract_themes(answer, top_n=3):
-    """Return top_n semantic themes for a given answer."""
+def extract_themes_with_weights(answer, top_n=3):
     if not answer or answer.strip() == "":
         return ""
-    
     answer_embedding = model.encode(answer, convert_to_tensor=True)
     similarities = util.cos_sim(answer_embedding, theme_embeddings)[0]
-    top_indices = similarities.topk(k=top_n).indices
-    top_themes = [theme_keys[idx] for idx in top_indices]
-    return ", ".join(top_themes)
+    top_similarities, top_indices = similarities.topk(k=top_n)
+    top_themes_with_weights = [
+        f"{theme_keys[idx]} ({top_similarities[i].item():.2f})" for i, idx in enumerate(top_indices)
+    ]
+    return ", ".join(top_themes_with_weights)
 
 # --------------------------
 # 6️⃣ STREAMLIT APP
@@ -212,7 +212,7 @@ if not df.empty:
         rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
 
         score = score_answer(row["Answer"])
-        themes = extract_themes(row["Answer"])  # semantic themes
+        themes = extract_themes_with_weights(row["Answer"])  # NEW: semantic themes + weights
 
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
