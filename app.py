@@ -4,17 +4,12 @@ import pandas as pd
 import re
 from collections import Counter
 import time
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import CountVectorizer
 import numpy as np
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import torch
-# NEW: Sentence Transformers for semantic theme extraction
 from sentence_transformers import SentenceTransformer, util
-
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -71,26 +66,29 @@ SECTION_MAP = {
 }
 
 
-DEFAULT_RUBRIC = DEFAULT_RUBRIC = {
+DEFAULT_RUBRIC = {
     "3 – Transformative": ["innovative", "transformative", "impactful", "change", "improve"],
     "2 – Strategic": ["strategic", "planned", "goal", "objective", "aligned"],
     "1 – Compliant": ["followed instructions", "adhered", "standard", "compliant"],
-    "0 – Counterproductive": ["ignored", "failed", "mistake", "problem", "conflict"]}
+    "0 – Counterproductive": ["ignored", "failed", "mistake", "problem", "conflict"]
+}
 
-# Optional: customize rubric per section
 SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
 
+# --------------------------
 # 3️⃣ NLTK SETUP
 # --------------------------
+nltk.download('stopwords')
+nltk.download('wordnet')
+
 lemmatizer = WordNetLemmatizer()
 stop_words = set(stopwords.words("english"))
 
-
-
+# --------------------------
 # 4️⃣ SEMANTIC THEME SETUP
 # --------------------------
 device = torch.device("cpu")  # force CPU
-model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+model = SentenceTransformer('all-MiniLM-L6-v2')  # device handled later
 
 THEMES = {
     "Strategic": "strategic planning, decision making, stakeholder engagement",
@@ -101,57 +99,36 @@ THEMES = {
 }
 
 theme_texts = list(THEMES.values())
-theme_embeddings = model.encode(theme_texts, convert_to_tensor=True, device=device)
+theme_embeddings = model.encode(theme_texts, convert_to_tensor=True).to(device)
 theme_keys = list(THEMES.keys())
 
 # --------------------------
-# 2️⃣ FUNCTIONS
+# 5️⃣ FUNCTIONS
 # --------------------------
 @st.cache_data(ttl=300)
 def fetch_kobo_data():
     """Fetch submissions from KoboToolbox and return as a DataFrame."""
     try:
         response = requests.get(KOBO_API_URL, headers=HEADERS)
-        
-
-        # Raise an error if the request failed
         response.raise_for_status()
+        data = response.json()
     except requests.RequestException as e:
         st.error(f"Failed to fetch data: {e}")
         return pd.DataFrame()
-
-    # Try to parse JSON
-    try:
-        data = response.json()
     except ValueError:
         st.error(f"Failed to parse JSON. Response text (truncated):\n{response.text[:1000]}")
         return pd.DataFrame()
 
-    # Determine if the data is a list (common for submissions endpoint)
-    if isinstance(data, list):
-        results = data
-    elif isinstance(data, dict):
-        results = data.get("results", [])
-    else:
-        st.error("Unexpected data format from Kobo API.")
-        return pd.DataFrame()
-
+    results = data if isinstance(data, list) else data.get("results", [])
     if not results:
         st.warning("No submissions found yet.")
         return pd.DataFrame()
 
-    # Convert to DataFrame
     df = pd.DataFrame(results)
-
-    # Optional: preview first few rows in Streamlit
     st.write("Preview of fetched data:")
     st.dataframe(df.head())
-
     return df
-# --------------------------
- #3️⃣ FLATTEN RESPONSES
-# 4️⃣ FLATTEN KOBO RESPONSES
-# --------------------------
+
 def flatten_kobo_responses(df):
     rows = []
     for idx, row in df.iterrows():
@@ -159,7 +136,7 @@ def flatten_kobo_responses(df):
         for col in df.columns:
             if col.startswith("case"):
                 answer = row[col]
-                if pd.notna(answer) and answer.strip() != "":
+                if pd.notna(answer) and isinstance(answer, str) and answer.strip() != "":
                     rows.append({
                         "Respondent_ID": respondent_id,
                         "Question_ID": col,
@@ -167,26 +144,26 @@ def flatten_kobo_responses(df):
                     })
     return pd.DataFrame(rows)
 
-# --------------------------
-# --------------------------
 def preprocess_text(text):
+    if not isinstance(text, str):
+        return ""
     text = text.lower()
     text = re.sub(r"[^a-zA-Z0-9\s]", "", text)
     return text
 
-RUBRIC_KEYWORDS = DEFAULT_RUBRIC
-
 def score_answer(answer):
+    if not isinstance(answer, str) or not answer:
+        return "2 – Strategic"
     answer_lower = answer.lower()
     for score, keywords in DEFAULT_RUBRIC.items():
         if any(k in answer_lower for k in keywords):
             return score
-    return "2 – Strategic"  # default
+    return "2 – Strategic"
 
 def extract_themes_with_weights(answer, top_n=3):
-    if not answer or answer.strip() == "":
+    if not isinstance(answer, str) or not answer.strip():
         return ""
-    answer_embedding = model.encode(answer, convert_to_tensor=True)
+    answer_embedding = model.encode(answer, convert_to_tensor=True).to(device)
     similarities = util.cos_sim(answer_embedding, theme_embeddings)[0]
     top_similarities, top_indices = similarities.topk(k=top_n)
     top_themes_with_weights = [
@@ -196,6 +173,11 @@ def extract_themes_with_weights(answer, top_n=3):
 
 def push_to_powerbi(df):
     """Push DataFrame rows to Power BI push dataset"""
+    # Truncate string fields to MAX_LEN
+    for col in ["Themes", "Score", "Section", "Question_ID"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str[:MAX_LEN]
+
     data_json = df.to_dict(orient="records")
     try:
         response = requests.post(POWERBI_PUSH_URL, json=data_json)
@@ -207,11 +189,10 @@ def push_to_powerbi(df):
         st.error(f"Error pushing to Power BI: {e}")
 
 # --------------------------
-# STREAMLIT APP
+# 6️⃣ STREAMLIT APP
 # --------------------------
 st.title("📊 Kobo Qualitative Analysis Dashboard with Power BI Push")
 
-# Fetch and process Kobo data
 df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
@@ -227,8 +208,9 @@ if not df.empty:
         section_prefix = "_".join(qid.split("_")[:2]) + "_group"
         section_name = SECTION_MAP.get(section_prefix, section_prefix)
 
-        score = score_answer(row.get("Answer", ""))
-        themes = extract_themes_with_weights(row.get("Answer", ""))
+        answer_text = row.get("Answer", "")
+        score = score_answer(answer_text)
+        themes = extract_themes_with_weights(answer_text)
 
         scored_row = {
             "Respondent_ID": row.get("Respondent_ID", f"resp_{idx}"),
@@ -237,20 +219,16 @@ if not df.empty:
             "Score": score,
             "Themes": themes
         }
-
         scored_list.append(scored_row)
-        time.sleep(0.01)
+        time.sleep(0.01)  # optional small delay
 
     scored_df = pd.DataFrame(scored_list)
 
     st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
 
-    # Push to Power BI (without 'Answer' field)
-    try:
-        push_to_powerbi(scored_df)
-    except Exception as e:
-        st.error(f"Failed to push data to Power BI: {e}")
+    # Push to Power BI
+    push_to_powerbi(scored_df)
 
     # Section summary
     if not scored_df.empty and "Section" in scored_df.columns and "Score" in scored_df.columns:
