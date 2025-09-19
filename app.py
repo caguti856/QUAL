@@ -229,24 +229,29 @@ if not df.empty:
         themes = extract_themes_with_weights(row["Answer"])
 
         scored_row = {
-            "Respondent_ID": row["Respondent_ID"],
-            "Section": section_name,
+            "Respondent_ID": row.get("Respondent_ID", f"resp_{idx}"),
+            "Section": section_name if section_name else "Unknown Section",
             "Question_ID": qid,
-            "Answer": row["Answer"],
+            "Answer": row.get("Answer", ""),
             "Score": score,
             "Themes": themes
         }
 
-        time.sleep(0.01)  # throttle optional
+        scored_list.append(scored_row)  # ✅ Make sure rows are collected
+        time.sleep(0.01)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
+
     st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
 
     # Push to Power BI
-    push_to_powerbi(scored_df)
+    try:
+        push_to_powerbi(scored_df)
+    except Exception as e:
+        st.error(f"Failed to push data to Power BI: {e}")
 
     # Section summary
-    st.subheader("Section Summary")
-    section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
-    st.dataframe(section_summary)
+    if not scored_df.empty and "Section" in scored_df.columns and "Score" in scored_df.columns:
+        section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
+        st.subheader("Section")
