@@ -11,20 +11,7 @@ import numpy as np
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from nltk.tokenize import word_tokenize
 
-# --------------------------
-# 1️⃣ NLTK SETUP
-# --------------------------
-# Download NLTK resources only if not already downloaded
-for resource in ['punkt', 'stopwords', 'wordnet', 'omw-1.4']:
-    try:
-        nltk.data.find(f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}')
-    except LookupError:
-        nltk.download(resource)
-
-lemmatizer = WordNetLemmatizer()
-stop_words = set(stopwords.words('english'))
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -47,7 +34,6 @@ SECTION_MAP = {
     "case1_coalition_group": "Coalition Governance & Convening",
     "case1_adaptive_group": "Adaptive Tactics & Channel Selection",
     "case1_integrity_group": "Integrity & Values-Based Influencing",
-    
     "case2_strategic_group": "Advisory Skills",
     "case2_credibility_group": "Credibility & Trustworthiness",
     "case2_comm_group": "Effective Communication & Influence",
@@ -56,15 +42,13 @@ SECTION_MAP = {
     "case2_impact_group": "Ensuring Relevance & Impact",
     "case2_solution_group": "Solution Orientation & Adaptability",
     "case2_capacity_group": "Capacity Strengthening & Empowerment Support",
-    
     "case3_vision_group": "Strategic Thought Leadership",
     "case3_innovation_group": "Innovation & Insight",
     "case3_execution_group": "Execution Planning",
     "case3_collab_group": "Cross-Functional Collaboration",
     "case3_discipline_group": "Follow-Through Discipline",
     "case3_learning_group": "Learning-Driven Adjustment",
-    "case3_results_group": "Result-Oriented Decision-Making",
-    
+    "case3_results_group": "Result-Oriented Decision-Making", 
     "case4_positioning_group": "Strategic Positioning & Donor Fluency",
     "case4_stakeholders_group": "Power-Aware Stakeholder Mapping",
     "case4_allyship_group": "Equitable Allyship & Local Fronting",
@@ -72,8 +56,7 @@ SECTION_MAP = {
     "case4_messaging_group": "Community-Centered Messaging",
     "case4_evidence_group": "Evidence-Led Learning",
     "case4_influence_group": "Influence Without Authority",
-    "case4_risk_group": "Risk Management & Adaptive Communication",
-    
+    "case4_risk_group": "Risk Management & Adaptive Communication",  
     "case5_learning_group": "Learning Agility",
     "case5_feedback_group": "Feedback Seeking & Responsiveness",
     "case5_resilience_group": "Resilience & Adaptability",
@@ -92,7 +75,10 @@ DEFAULT_RUBRIC = DEFAULT_RUBRIC = {
 # Optional: customize rubric per section
 SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
 
-
+# 3️⃣ NLTK SETUP
+# --------------------------
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words("english"))
 # --------------------------
 # 2️⃣ FUNCTIONS
 # --------------------------
@@ -173,7 +159,8 @@ def score_answer(answer):
     return "2 – Strategic"  # default
 
 def extract_themes(answer, top_n=3):
-    words = word_tokenize(answer.lower())
+    text = preprocess_text(answer)
+    words = text.split()  # simple split instead of word_tokenize
     words = [lemmatizer.lemmatize(w) for w in words if w not in stop_words and w.isalpha()]
     word_counts = Counter(words)
     common = [w for w, c in word_counts.most_common(top_n)]
@@ -211,12 +198,13 @@ if not df.empty:
             "Score": score,
             "Themes": themes
         })
-        time.sleep(0.01)  # throttle
+        time.sleep(0.01)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
 
+    # Optional: summary by section
     st.subheader("Section Summary")
     section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
     st.dataframe(section_summary)
