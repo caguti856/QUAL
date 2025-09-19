@@ -12,6 +12,9 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
+# NEW: Sentence Transformers for semantic theme extraction
+from sentence_transformers import SentenceTransformer, util
+
 # --------------------------
 # 1️⃣ CONFIG
 # --------------------------
@@ -79,6 +82,24 @@ SECTION_RUBRICS = {sec: DEFAULT_RUBRIC for sec in SECTION_MAP.values()}
 # --------------------------
 lemmatizer = WordNetLemmatizer()
 stop_words = set(stopwords.words("english"))
+
+
+
+# 4️⃣ SEMANTIC THEME SETUP
+# --------------------------
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+THEMES = {
+    "Strategic": "strategic planning, decision making, stakeholder engagement",
+    "Risk": "risk assessment, mitigation, safety, operational risk",
+    "Communication": "messaging, transparency, framing, influence",
+    "Evidence": "data analysis, research, metrics, evaluation",
+    "Collaboration": "teamwork, partnership, coordination, joint action"
+}
+
+theme_texts = list(THEMES.values())
+theme_embeddings = model.encode(theme_texts, convert_to_tensor=True)
+theme_keys = list(THEMES.keys())
 # --------------------------
 # 2️⃣ FUNCTIONS
 # --------------------------
@@ -159,15 +180,18 @@ def score_answer(answer):
     return "2 – Strategic"  # default
 
 def extract_themes(answer, top_n=3):
-    text = preprocess_text(answer)
-    words = text.split()  # simple split instead of word_tokenize
-    words = [lemmatizer.lemmatize(w) for w in words if w not in stop_words and w.isalpha()]
-    word_counts = Counter(words)
-    common = [w for w, c in word_counts.most_common(top_n)]
-    return ", ".join(common)
+    """Return top_n semantic themes for a given answer."""
+    if not answer or answer.strip() == "":
+        return ""
+    
+    answer_embedding = model.encode(answer, convert_to_tensor=True)
+    similarities = util.cos_sim(answer_embedding, theme_embeddings)[0]
+    top_indices = similarities.topk(k=top_n).indices
+    top_themes = [theme_keys[idx] for idx in top_indices]
+    return ", ".join(top_themes)
 
 # --------------------------
-# 5️⃣ STREAMLIT APP
+# 6️⃣ STREAMLIT APP
 # --------------------------
 st.title("📊 Kobo Qualitative Analysis Dashboard")
 
@@ -188,7 +212,7 @@ if not df.empty:
         rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
 
         score = score_answer(row["Answer"])
-        themes = extract_themes(row["Answer"])
+        themes = extract_themes(row["Answer"])  # semantic themes
 
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
@@ -204,7 +228,6 @@ if not df.empty:
     st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
 
-    # Optional: summary by section
     st.subheader("Section Summary")
     section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
     st.dataframe(section_summary)
