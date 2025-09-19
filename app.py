@@ -163,32 +163,33 @@ def extract_themes(answer, top_n=3):
 st.title("📊 Kobo Qualitative Analysis Dashboard")
 
 df = fetch_kobo_data()
-
 if not df.empty:
     st.subheader("Raw Responses")
     st.dataframe(df.head())
 
+    flat_df = flatten_kobo_responses(df)
+
     st.subheader("Scoring & Theme Extraction")
     scored_list = []
 
-    for idx, row in df.iterrows():
+    for idx, row in flat_df.iterrows():
         qid = row["Question_ID"]
         section_prefix = "_".join(qid.split("_")[:2]) + "_group"
         section_name = SECTION_MAP.get(section_prefix, section_prefix)
         rubric = SECTION_RUBRICS.get(section_name, DEFAULT_RUBRIC)
-        
+
         score = score_answer(row["Answer"])
         themes = extract_themes(row["Answer"])
-        
+
         scored_list.append({
             "Respondent_ID": row["Respondent_ID"],
             "Section": section_name,
-            "Question_ID": row["Question_ID"],
+            "Question_ID": qid,
             "Answer": row["Answer"],
             "Score": score,
             "Themes": themes
         })
-        time.sleep(0.1)  # optional throttle
+        time.sleep(0.05)  # optional throttle
 
     scored_df = pd.DataFrame(scored_list)
     st.subheader("✅ Scored & Themed Responses")
