@@ -2,18 +2,12 @@ import streamlit as st
 import requests
 import pandas as pd
 import re
-from collections import Counter
 import time
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import CountVectorizer
-import numpy as np
-import nltk
-from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-
-# NEW: Sentence Transformers for semantic theme extraction
+from nltk.corpus import stopwords
 from sentence_transformers import SentenceTransformer, util
+
+
 
 # --------------------------
 # 1️⃣ CONFIG
@@ -26,7 +20,7 @@ HEADERS = {"Authorization": f"Token {KOBO_TOKEN}"}
 
 # Power BI Push Dataset URL
 POWERBI_PUSH_URL = st.secrets["POWERBI_PUSH_URL"]  
-MAX_LEN = 4000  # Power BI string limit
+
 # 2️⃣ SECTION MAP & RUBRICS
 # --------------------------
 # Map Question_ID prefixes to Competency / Attribute
@@ -89,7 +83,8 @@ stop_words = set(stopwords.words("english"))
 
 # 4️⃣ SEMANTIC THEME SETUP
 # --------------------------
-model = SentenceTransformer('all-MiniLM-L6-v2')
+device = "cpu"  # Force CPU
+model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
 
 THEMES = {
     "Strategic": "strategic planning, decision making, stakeholder engagement",
@@ -193,66 +188,55 @@ def extract_themes_with_weights(answer, top_n=3):
     return ", ".join(top_themes_with_weights)
 
 def push_to_powerbi(df):
-    """Push DataFrame rows to Power BI push dataset"""
+    """Push DataFrame rows to Power BI push dataset (Answer field removed)"""
     data_json = df.to_dict(orient="records")
     try:
         response = requests.post(POWERBI_PUSH_URL, json=data_json)
         if response.status_code in [200, 202]:
             st.success("✅ Data successfully pushed to Power BI!")
         else:
-            st.error(f"Failed to push data to Power BI: {response.status_code} {response.text}")
+            st.error(f"Failed to push to Power BI: {response.status_code} {response.text}")
     except Exception as e:
         st.error(f"Error pushing to Power BI: {e}")
 
 # --------------------------
-# STREAMLIT APP
+# 5️⃣ STREAMLIT APP
 # --------------------------
 st.title("📊 Kobo Qualitative Analysis Dashboard with Power BI Push")
 
-# Fetch and process Kobo data
-# Fetch and process Kobo data
 df = fetch_kobo_data()
 if not df.empty:
     st.subheader("Raw Responses")
     st.dataframe(df.head())
 
     flat_df = flatten_kobo_responses(df)
-
     st.subheader("Scoring & Theme Extraction")
-    scored_list = []
 
+    scored_list = []
     for idx, row in flat_df.iterrows():
         qid = row["Question_ID"]
         section_prefix = "_".join(qid.split("_")[:2]) + "_group"
         section_name = SECTION_MAP.get(section_prefix, section_prefix)
 
-        score = score_answer(row["Answer"])
-        themes = extract_themes_with_weights(row["Answer"])
-
         scored_row = {
             "Respondent_ID": row.get("Respondent_ID", f"resp_{idx}"),
             "Section": section_name if section_name else "Unknown Section",
             "Question_ID": qid,
-            "Score": score,
-            "Themes": themes
+            "Score": score_answer(row["Answer"]),
+            "Themes": extract_themes_with_weights(row["Answer"])
         }
-
-        scored_list.append(scored_row)  # ✅ collect rows
-        time.sleep(0.01)  # optional throttle
+        scored_list.append(scored_row)
+        time.sleep(0.01)
 
     scored_df = pd.DataFrame(scored_list)
-
     st.subheader("✅ Scored & Themed Responses")
     st.dataframe(scored_df)
 
     # Push to Power BI
-    try:
-        push_to_powerbi(scored_df)
-    except Exception as e:
-        st.error(f"Failed to push data to Power BI: {e}")
+    push_to_powerbi(scored_df)
 
     # Section summary
-    if not scored_df.empty and "Section" in scored_df.columns and "Score" in scored_df.columns:
+    if not scored_df.empty:
         section_summary = scored_df.groupby("Section")["Score"].value_counts().unstack(fill_value=0)
         st.subheader("Section Summary")
         st.dataframe(section_summary)
