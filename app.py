@@ -108,13 +108,7 @@ def fetch_kobo_dataframe():
             break
     return pd.DataFrame()
 
-def load_table_any(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
-    else:
-        return pd.read_excel(path)
+
 
 def load_mapping_from_filelike(file_or_df) -> pd.DataFrame:
     if isinstance(file_or_df, pd.DataFrame):
@@ -428,20 +422,17 @@ st.title("📊 Advisory Scoring: Kobo → Scored Excel (and Power BI)")
 st.sidebar.subheader("Inputs")
 use_datasets = st.sidebar.toggle("Use DATASETS folder", value=True)
 
-if use_datasets:
-    mapping = load_table_any(DEFAULT_MAPPING_PATH)
-    exemplars = read_jsonl_path(DEFAULT_EXEMPLARS_PATH)
+
+mapping_file   = st.sidebar.file_uploader("Upload mapping.csv (or .xlsx)", type=["csv","xlsx"])
+exemplars_file = st.sidebar.file_uploader("Upload exemplars JSONL", type=["jsonl"])
+if mapping_file is not None:
+     mapping = load_mapping_from_filelike(mapping_file)
 else:
-    mapping_file   = st.sidebar.file_uploader("Upload mapping.csv (or .xlsx)", type=["csv","xlsx"])
-    exemplars_file = st.sidebar.file_uploader("Upload exemplars JSONL", type=["jsonl"])
-    if mapping_file is not None:
-        mapping = load_mapping_from_filelike(mapping_file)
-    else:
-        mapping = pd.DataFrame()
-    if exemplars_file is not None:
-        exemplars = read_jsonl_filelike(exemplars_file)
-    else:
-        exemplars = []
+    mapping = pd.DataFrame()
+if exemplars_file is not None:
+    exemplars = read_jsonl_filelike(exemplars_file)
+else:
+    exemplars = []
 
 run_btn = st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True)
 
