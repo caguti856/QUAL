@@ -22,7 +22,7 @@ def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 DATASETS_DIR = Path("DATASETS")
-MAP_PATH     = DATASETS_DIR / "mapping.sv"   # <- your filename (no extension)
+MAP_PATH     = DATASETS_DIR / "mapping.csv"   # <- your filename (no extension)
 EX_PATH      = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
