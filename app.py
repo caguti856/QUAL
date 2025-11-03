@@ -142,6 +142,80 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
+# QUESTION_ID → KOBO COLUMN RESOLVER (critical)
+# ==============================
+# Map your question_id prefixes to Kobo section prefixes
+QID_PREFIX_TO_SECTION = {
+    "SAT": "A1",  # Strategic & analytical thinking
+    "CT":  "A2",  # Credibility & trustworthiness
+    "ECI": "A3",  # Effective communication & influence
+    "CSF": "A4",  # Client & stakeholder focus
+    "FCP": "A5",  # Fostering collaboration & partnership
+    "ERI": "A6",  # Ensuring relevance & impact
+    "SOA": "A7",  # Solution orientation & adaptability
+    "CSE": "A8",  # Capacity strengthening & empowerment support
+}
+
+QNUM_RX = re.compile(r"_Q(\d+)$")
+
+def build_kobo_base_from_qid(question_id: str) -> str | None:
+    """
+    SAT_Q1 -> A1_1 -> Advisory/A1_Section/A1_1
+    """
+    if not question_id:
+        return None
+    qid = question_id.strip().upper()
+    m = QNUM_RX.search(qid)
+    if not m:
+        return None
+    qn = m.group(1)
+    prefix = qid.split("_Q")[0]
+    if prefix not in QID_PREFIX_TO_SECTION:
+        return None
+    section = QID_PREFIX_TO_SECTION[prefix]  # e.g., A1
+    return f"Advisory/{section}_Section/{section}_{qn}"
+
+def expand_possible_kobo_columns(base: str) -> list[str]:
+    """
+    Likely variants that show up across different Kobo exports.
+    """
+    if not base:
+        return []
+    return [
+        base,
+        f"{base} :: Answer (text)",
+        f"{base} :: English (en)",
+        f"{base} - English (en)",
+        f"{base}_labels",
+        f"{base}_label",
+    ]
+
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+    """
+    1) Use question_id → base Kobo path (preferred)
+    2) Try common variants
+    3) Fuzzy-match with prompt_hint if still not found
+    """
+    base = build_kobo_base_from_qid(question_id)
+    if base:
+        if base in df_cols:
+            return base
+        for v in expand_possible_kobo_columns(base):
+            if v in df_cols:
+                return v
+        for c in df_cols:
+            if c.startswith(base):
+                return c
+
+    hint = clean(prompt_hint or "")
+    if hint:
+        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
+        for col, score, _ in hits:
+            if score >= 85:
+                return col
+    return None
+
+# ==============================
 # EMBEDDINGS / CENTROIDS
 # ==============================
 @st.cache_resource(show_spinner=False)
@@ -159,7 +233,7 @@ def build_centroids(exemplars: list[dict]):
         score = int(e.get("score",0))
         text  = clean(e.get("text",""))
         attr  = clean(e.get("attribute",""))
-        if not qid and not qtext: 
+        if not qid and not qtext:
             continue
         key = qid if qid else qtext
         if key not in by_qkey:
@@ -219,58 +293,21 @@ def embed_cached(text: str):
     return vec
 
 # ==============================
-# COLUMN RESOLUTION (critical fix)
-# ==============================
-def build_resolution_map(df: pd.DataFrame, mapping: pd.DataFrame) -> tuple[dict, list]:
-    df_cols = list(df.columns)
-    df_norm = {c: normalize_col_name(c) for c in df_cols}
-    norm_to_orig = {}
-    for orig, norm in df_norm.items():
-        norm_to_orig.setdefault(norm, []).append(orig)
-    all_norms = list(norm_to_orig.keys())
-
-    def resolve_one(wanted: str) -> str | None:
-        # exact
-        if wanted in df_cols: return wanted
-        w_norm = normalize_col_name(wanted)
-        if w_norm in norm_to_orig: return norm_to_orig[w_norm][0]
-        # contains/startswith
-        for n in all_norms:
-            if n.startswith(w_norm) or w_norm.startswith(n):
-                return norm_to_orig[n][0]
-        # fuzzy
-        match = process.extractOne(w_norm, all_norms, scorer=fuzz.token_set_ratio)
-        if match and match[1] >= 90:
-            return norm_to_orig[match[0]][0]
-        return None
-
-    resolved, unresolved = {}, []
-    for col in mapping["column"]:
-        hit = resolve_one(col)
-        if hit: resolved[col] = hit
-        else:   unresolved.append(col)
-    return resolved, unresolved
-
-# ==============================
 # SCORING
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
                     by_qkey, question_texts):
-    # 1) map mapping["column"] -> df columns (robust)
-    resolved_map, unresolved = build_resolution_map(df, mapping)
 
-    # diagnostics panel
-    with st.expander("🔎 Column resolution details", expanded=False):
-        if resolved_map:
-            st.write("Resolved mapping → Kobo columns (sample):")
-            st.dataframe(pd.DataFrame(list(resolved_map.items()), columns=["mapping.column","kobo.column"]).head(50))
-        if unresolved:
-            st.warning(f"{len(unresolved)} mapping columns not found in Kobo data. They will be skipped.")
-            st.write(unresolved[:50])
+    df_cols = list(df.columns)
 
-    # 2) detect Staff ID & times
-    staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id"), None)
+    # show quick peek of likely advisory columns
+    with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
+        sample_cols = [c for c in df_cols if "/A" in c or "Advisory/" in c or c.startswith("A")]
+        st.write(sample_cols[:80])
+
+    # Staff ID / time fields
+    staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id" or c.strip().lower()=="staff_id"), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
@@ -285,22 +322,34 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # 3) iterate rows and score
+    # Pre-resolve Kobo columns for each mapping row using question_id (critical change)
+    resolved_for_qid = {}
+    missing_map_rows = []
+    for r in all_mapping:
+        qid   = r["question_id"]
+        qhint = r.get("prompt_hint","")
+        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+        if hit:
+            resolved_for_qid[qid] = hit
+        else:
+            missing_map_rows.append((qid, qhint))
+
+    with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
+        if resolved_for_qid:
+            show = list(resolved_for_qid.items())[:60]
+            st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
+        if missing_map_rows:
+            st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers (showing up to 30).")
+            st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
+
+    # Row-wise scoring
     for i, resp in df.iterrows():
-        # Collect answers using resolved columns
-        needed_pairs = [(r["column"], resolved_map.get(r["column"])) for r in all_mapping if resolved_map.get(r["column"]) in df.columns]
-        raw_answers  = {mcol: clean(resp.get(dfcol, "")) for (mcol, dfcol) in needed_pairs}
-
-        # warm embedding cache (unique answers in this row)
-        uniq_texts = list({t for t in raw_answers.values() if t})
-        for t in uniq_texts: _ = embed_cached(t)
-
         out = {}
         # ID
         if pd.notna(dt_series.iloc[i]):
             out["ID"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
         else:
-            out["ID"] = str(resp.get(date_col, resp.index))
+            out["ID"] = str(i)
         # Staff ID
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
         # Duration
@@ -309,17 +358,32 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         per_attr = {}
         ai_flags = []
 
+        # warm embedding cache for this row
+        # collect answers first
+        tmp_answers = {}
         for r in all_mapping:
-            mcol, qid, attr, qhint = r["column"], r["question_id"], r["attribute"], r.get("prompt_hint","")
-            dfcol = resolved_map.get(mcol)
-            if not dfcol: 
-                continue  # skip unmapped
-            ans = raw_answers.get(mcol, "")
+            qid = r["question_id"]
+            dfcol = resolved_for_qid.get(qid)
+            if dfcol and dfcol in df.columns:
+                tmp_answers[qid] = clean(resp.get(dfcol, ""))
+        for t in set(tmp_answers.values()):
+            if t: _ = embed_cached(t)
+
+        for r in all_mapping:
+            qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
+            dfcol = resolved_for_qid.get(qid)
+            if not dfcol or dfcol not in df.columns:
+                continue
+
+            ans = clean(resp.get(dfcol, ""))
+            if not ans:
+                continue
             ai_flags.append(looks_ai_like(ans))
             vec = embed_cached(ans)
 
-            # resolve qkey: question_id → else fuzzy by prompt
+            # resolve exemplar key for this question
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
+
             sc = None
             if vec is not None:
                 # question-level
@@ -347,7 +411,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             # figure Qn index
             qn = None
-            if "_Q" in qid:
+            if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
                 except: qn = None
             if qn not in (1,2,3,4):
@@ -363,13 +427,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[rubric_key] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing cells to keep structure
+        # fill missing structure
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # per-attribute averages & ranks + overall
+        # per-attribute averages & overall
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -383,7 +447,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[f"{attr}_RANK"]      = BANDS[band]
 
         out["Overall Total (0–24)"] = overall_total
-        out["Overall Rank"] = next((label for label, lo, hi in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
         out["AI_suspected"] = bool(any(ai_flags))
         rows_out.append(out)
 
@@ -484,4 +548,4 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
             else:  st.error(f"Failed to push: {msg}")
 
 st.markdown("---")
-st.caption("Resolves mapping columns to Kobo fields (normalize + fuzzy), then scores via SBERT centroids for each question, with attribute & global fallbacks.")
+st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.")
