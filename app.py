@@ -302,20 +302,84 @@ def push_to_powerbi(df: pd.DataFrame) -> tuple[bool, str]:
 # ==============================
 # STREAMLIT UI
 # ==============================
+# ==============================
+# STREAMLIT UI: FETCH + SCORE
+# ==============================
 st.title("📊 Advisory Scoring: Kobo → Excel + Power BI")
 
 if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+    # --- load mapping & exemplars ---
     mapping = load_mapping_from_path(MAPPING_PATH)
     exemplars = read_jsonl_path(EX_PATH)
     q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
 
+    # --- fetch Kobo data ---
     df = fetch_kobo_dataframe()
     if df.empty:
         st.warning("No Kobo submissions found.")
         st.stop()
-    st.caption("Fetched sample:")
+
+    # --- normalize Kobo columns to lower + underscores ---
+    df.columns = [c.lower().replace("/", "_").replace(" ", "_") for c in df.columns]
+
+    # --- build auto mapping from Kobo columns → question_id ---
+    # You can expand this dict if your Kobo columns grow
+    kobo_to_qid = {
+        'advisory_a1_section_a1_1': 'SAT_Q1',
+        'advisory_a1_section_a1_2': 'SAT_Q2',
+        'advisory_a1_section_a1_3': 'SAT_Q3',
+        'advisory_a1_section_a1_4': 'SAT_Q4',
+        'advisory_credibility_trustworthiness_a2_1': 'CT_Q1',
+        'advisory_credibility_trustworthiness_a2_2': 'CT_Q2',
+        'advisory_credibility_trustworthiness_a2_3': 'CT_Q3',
+        'advisory_credibility_trustworthiness_a2_4': 'CT_Q4',
+        'advisory_effective_a3_1': 'ECI_Q1',
+        'advisory_effective_a3_2': 'ECI_Q2',
+        'advisory_effective_a3_3': 'ECI_Q3',
+        'advisory_effective_a3_4': 'ECI_Q4',
+        'advisory_client_a4_1': 'CSF_Q1',
+        'advisory_client_a4_2': 'CSF_Q2',
+        'advisory_client_a4_3': 'CSF_Q3',
+        'advisory_client_a4_4': 'CSF_Q4',
+        'advisory_fostering_a5_1': 'FCP_Q1',
+        'advisory_fostering_a5_2': 'FCP_Q2',
+        'advisory_fostering_a5_3': 'FCP_Q3',
+        'advisory_fostering_a5_4': 'FCP_Q4',
+        'advisory_ensuring_a6_1': 'ERI_Q1',
+        'advisory_ensuring_a6_2': 'ERI_Q2',
+        'advisory_ensuring_a6_3': 'ERI_Q3',
+        'advisory_ensuring_a6_4': 'ERI_Q4',
+        'advisory_solution_a7_1': 'SOA_Q1',
+        'advisory_solution_a7_2': 'SOA_Q2',
+        'advisory_solution_a7_3': 'SOA_Q3',
+        'advisory_solution_a7_4': 'SOA_Q4',
+        'advisory_capacity_a8_1': 'CSE_Q1',
+        'advisory_capacity_a8_2': 'CSE_Q2',
+        'advisory_capacity_a8_3': 'CSE_Q3',
+        'advisory_capacity_a8_4': 'CSE_Q4',
+    }
+
+    # rename Kobo columns to question_id
+    df.rename(columns=kobo_to_qid, inplace=True)
+
+    # --- create Staff ID + Duration columns ---
+    if "staff_id" in df.columns:
+        df["Staff ID"] = df["staff_id"].astype(str)
+    elif "type_participant" in df.columns:
+        df["Staff ID"] = df["type_participant"].astype(str)
+    else:
+        df["Staff ID"] = ""
+
+    if "start" in df.columns and "end" in df.columns:
+        df["Duration_min"] = ((pd.to_datetime(df["end"], errors="coerce") -
+                               pd.to_datetime(df["start"], errors="coerce")).dt.total_seconds() / 60.0).round(2)
+    else:
+        df["Duration_min"] = np.nan
+
+    st.caption("Fetched sample (columns renamed to question_id):")
     st.dataframe(df.head(), use_container_width=True)
 
+    # --- score dataframe ---
     with st.spinner("Scoring responses..."):
         scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
     st.success("✅ Scoring complete.")
@@ -330,7 +394,7 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
         use_container_width=True
     )
 
-    # Mandatory Power BI push
+    # push to Power BI
     ok, msg = push_to_powerbi(scored_df)
     if ok:
         st.success("📤 Pushed scored data to Power BI successfully.")
