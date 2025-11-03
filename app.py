@@ -4,25 +4,23 @@ st.set_page_config(page_title="Advisory Scoring (Kobo → Excel/Power BI)", layo
 import os, json, re, unicodedata, io, time
 from datetime import datetime
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import requests
-
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
 
 # -----------------------------
 # CONFIG / CONSTANTS
 # -----------------------------
-KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
-KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
+KOBO_BASE     = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
+KOBO_ASSET_ID = st.secrets.get("KOBO_ASSET_ID", "")  # e.g. aSYXhRYB...
+KOBO_TOKEN    = st.secrets.get("KOBO_TOKEN", "")
 POWERBI_PUSH_URL = st.secrets.get("POWERBI_PUSH_URL", "")
 
-KOBO_API_URL = (
-    f"https://kf.kobotoolbox.org/assets/{KOBO_ASSET_ID}/submissions/?format=json"
-    if KOBO_ASSET_ID else ""
-)
+def kobo_url(asset_uid: str, kind: str = "submissions"):
+    # kind: "submissions" or "data"
+    return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 DATASETS_DIR = Path("DATASETS")
 DEFAULT_MAPPING_PATH   = DATASETS_DIR / "mapping.csv"
@@ -76,18 +74,38 @@ def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
 # LOADERS
 # -----------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_kobo() -> pd.DataFrame:
-    if not KOBO_API_URL or not KOBO_TOKEN:
+def fetch_kobo_dataframe() -> pd.DataFrame:
+    if not KOBO_ASSET_ID or not KOBO_TOKEN:
+        st.warning("Set KOBO_ASSET_ID and KOBO_TOKEN in st.secrets.")
         return pd.DataFrame()
+
     headers = {"Authorization": f"Token {KOBO_TOKEN}"}
-    r = requests.get(KOBO_API_URL, headers=headers, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    results = data if isinstance(data, list) else data.get("results", [])
-    df = pd.DataFrame(results)
-    if not df.empty:
-        df.columns = [str(c).strip() for c in df.columns]
-    return df
+    for kind in ("submissions", "data"):
+        url = kobo_url(KOBO_ASSET_ID, kind)
+        try:
+            r = requests.get(url, headers=headers, timeout=60)
+            if r.status_code == 404:
+                continue  # try the other endpoint
+            r.raise_for_status()
+            payload = r.json()
+            results = payload if isinstance(payload, list) else payload.get("results", [])
+            if not results and "results" not in payload:
+                results = payload  # some tenants return a bare array
+            return pd.DataFrame(results)
+        except requests.HTTPError:
+            if r.status_code in (401, 403):
+                st.error("Kobo auth failed: check KOBO_TOKEN and tenant (KOBO_BASE).")
+                return pd.DataFrame()
+            if r.status_code == 404:
+                continue
+            st.error(f"Kobo error {r.status_code}: {r.text[:300]}")
+            return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Failed to fetch Kobo data: {e}")
+            return pd.DataFrame()
+
+    st.error("Could not fetch data. Check KOBO_BASE, KOBO_ASSET_ID, and token permissions.")
+    return pd.DataFrame()
 
 def load_mapping_from_filelike(file_or_df) -> pd.DataFrame:
     if isinstance(file_or_df, pd.DataFrame):
@@ -154,7 +172,7 @@ def build_centroids(exemplars: list[dict]):
         score = int(e.get("score",0))
         text  = clean(e.get("text",""))
         attr  = clean(e.get("attribute",""))
-        if not qid and not qtext: 
+        if not qid and not qtext:
             continue
         key = qid if qid else qtext
         if key not in by_qkey:
@@ -238,7 +256,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, centroids, by_qkey,
             _ = [embed_cached(t) for t in uniq_texts]  # warm cache
 
         out = {}
-        # ID: date-time if parseable; else raw
+        # ID (date-time if parseable; else raw)
         if pd.notna(dt_series.iloc[i]):
             out["ID"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
         else:
@@ -252,7 +270,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, centroids, by_qkey,
 
         for r in all_mapping:
             col, qid, attr, qhint = r["column"], r["question_id"], r["attribute"], r.get("prompt_hint","")
-            if col not in df.columns: 
+            if col not in df.columns:
                 continue
             ans = raw_answers.get(col, "")
             ai_flags.append(looks_ai_like(ans))
@@ -262,7 +280,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, centroids, by_qkey,
                 continue
 
             sc = score_answer(ans, qkey, centroids)
-            if sc is None: 
+            if sc is None:
                 continue
 
             qn = None
@@ -301,7 +319,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, centroids, by_qkey,
 
     res_df = pd.DataFrame(rows_out)
 
-    # enforce exact column order
+    # exact column order
     def order_cols(cols):
         ordered = ["ID","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
@@ -389,11 +407,7 @@ if run_btn:
         centroids, by_qkey, question_texts = build_centroids(exemplars)
 
     with st.spinner("Fetching Kobo submissions..."):
-        try:
-            df = fetch_kobo()
-        except Exception as e:
-            st.error(f"Failed to fetch Kobo data: {e}")
-            st.stop()
+        df = fetch_kobo_dataframe()
 
     if df.empty:
         st.warning("No Kobo submissions found.")
