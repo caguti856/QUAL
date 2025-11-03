@@ -669,7 +669,8 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
 
     st.success("✅ Scoring complete.")
     st.dataframe(scored_df.head(50), use_container_width=True)
-
+    # 🔐 keep it for the Power BI button (survives reruns)
+    st.session_state["scored_df"] = scored_df
     st.download_button(
         "⬇️ Download Excel",
         data=to_excel_bytes(scored_df),
@@ -678,11 +679,17 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
         use_container_width=True
     )
 
-    # ---- outside the scoring button block ----
-    # ---- outside the scoring button block ----
+    
+# ---- outside the scoring button block ----
 if POWERBI_PUSH_URL:
     if "scored_df" in st.session_state:
         st.subheader("Publish")
+        with st.expander("Power BI diagnostics", expanded=False):
+            st.write({
+                "rows_ready": len(st.session_state["scored_df"]),
+                "url_has_/rows": "/rows" in POWERBI_PUSH_URL.lower(),
+                "sample_cols": list(st.session_state["scored_df"].columns)[:8],
+            })
         if st.button("📤 Push to Power BI", key="push_to_pbi", use_container_width=True):
             ok, msg = push_to_powerbi(st.session_state["scored_df"])
             if ok:
