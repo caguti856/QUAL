@@ -1,9 +1,10 @@
+# app.py
 import streamlit as st
 st.set_page_config(page_title="Advisory Scoring (Kobo → Excel/Power BI)", layout="wide")
 
 import json, re, unicodedata
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
@@ -18,8 +19,11 @@ KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 POWERBI_PUSH_URL = st.secrets.get("POWERBI_PUSH_URL", "")
 
+def kobo_url(asset_uid: str, kind: str = "submissions"):
+    return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
+
 DATASETS_DIR = Path("DATASETS")
-MAPPING_PATH = DATASETS_DIR / "mapping.csv"
+MAPPING_PATH     = DATASETS_DIR / "mapping.csv"  # make sure this exists
 EX_PATH      = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
 ORDERED_ATTRS = [
@@ -76,26 +80,42 @@ def load_mapping_from_path(path):
 def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
-@st.cache_data(ttl=300)
+# ==============================
+# LOADERS (no upload UI)
+# ==============================
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_kobo_dataframe() -> pd.DataFrame:
     if not KOBO_ASSET_ID or not KOBO_TOKEN:
         return pd.DataFrame()
 
     headers = {"Authorization": f"Token {KOBO_TOKEN}"}
-    url = kobo_url(KOBO_ASSET_ID, "submissions")
-    try:
-        r = requests.get(url, headers=headers, timeout=60)
-        r.raise_for_status()
-        payload = r.json()
-        results = payload if isinstance(payload, list) else payload.get("results", [])
-        df = pd.DataFrame(results)
-        if not df.empty:
-            df.columns = [str(c).strip() for c in df.columns]
-        return df
-    except Exception as e:
-        st.error(f"Failed to fetch Kobo data: {e}")
-        return pd.DataFrame()
-
+    for kind in ("submissions", "data"):
+        url = kobo_url(KOBO_ASSET_ID, kind)
+        try:
+            r = requests.get(url, headers=headers, timeout=60)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            payload = r.json()
+            results = payload if isinstance(payload, list) else payload.get("results", [])
+            if not results and "results" not in payload:
+                results = payload
+            df = pd.DataFrame(results)
+            if not df.empty:
+                df.columns = [str(c).strip() for c in df.columns]
+            return df
+        except requests.HTTPError:
+            if r.status_code in (401, 403):
+                st.error("Kobo auth failed: check KOBO_TOKEN / tenant.")
+                return pd.DataFrame()
+            if r.status_code == 404:
+                continue
+            st.error(f"Kobo error {r.status_code}: {r.text[:300]}")
+            return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Failed to fetch Kobo data: {e}")
+            return pd.DataFrame()
+    return pd.DataFrame()
 # ==============================
 # SEMANTIC CENTROIDS
 # ==============================
