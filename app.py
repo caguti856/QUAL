@@ -589,73 +589,49 @@ def _chunk(iterable, n):
     for i in range(0, len(iterable), n):
         yield iterable[i:i+n]
 
-GSHEETS_SPREADSHEET_KEY = st.secrets.get("GSHEETS_SPREADSHEET_KEY", "")
-GSHEETS_WORKSHEET_NAME  = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory Scores")
+GS_SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# Authenticate and connect to Google Sheets
-def connect_to_gsheet(creds_json, spreadsheet_name, sheet_name):
-    scope = ["https://spreadsheets.google.com/feeds", 
-             'https://www.googleapis.com/auth/spreadsheets',
-             "https://www.googleapis.com/auth/drive.file", 
-             "https://www.googleapis.com/auth/drive"]
-    
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_json, scope)
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open(spreadsheet_name)  
-    return spreadsheet.worksheet(sheet_name)  # Access specific sheet by name
+def _get_sa_dict_from_secrets() -> dict:
+    if "gcp_service_account" not in st.secrets:
+        raise ValueError("Add [gcp_service_account] to .streamlit/secrets.toml")
+    sa = dict(st.secrets["gcp_service_account"])
+    # fix escaped newlines
+    if isinstance(sa.get("private_key"), str):
+        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+    return sa
 
-# Google Sheet credentials and details
-SPREADSHEET_NAME = 'Streamlit'
-SHEET_NAME = 'Sheet1'
-CREDENTIALS_FILE = './credentials.json'
+@st.cache_resource(show_spinner=False)
+def _gs_client():
+    sa_dict = _get_sa_dict_from_secrets()
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_dict, GS_SCOPE)
+    return gspread.authorize(creds)
 
-# Connect to the Google Sheet
-sheet_by_name = connect_to_gsheet(CREDENTIALS_FILE, SPREADSHEET_NAME, sheet_name=SHEET_NAME)
+def _open_ws_by_name():
+    ss_name = st.secrets.get("SPREADSHEET_NAME")
+    ws_name = st.secrets.get("SHEET_NAME")
+    if not ss_name or not ws_name:
+        raise ValueError("Set SPREADSHEET_NAME and SHEET_NAME in secrets.toml")
+    gc = _gs_client()
+    sh = gc.open(ss_name)  # open by NAME; use gc.open_by_key(...) if you prefer
+    try:
+        return sh.worksheet(ws_name)
+    except gspread.exceptions.WorksheetNotFound:
+        return sh.add_worksheet(title=ws_name, rows="1000", cols="200")
 
-st.title("Simple Data Entry using Streamlit")
-
-# Read Data from Google Sheets
-def read_data():
-    data = sheet_by_name.get_all_records()  # Get all records from Google Sheet
-    return pd.DataFrame(data)
-
-# Add Data to Google Sheets
-def add_data(row):
-    sheet_by_name.append_row(row)  # Append the row to the Google Sheet
-
-def _load_sa_info():
-    """
-    Load service account info from secrets. Supports:
-      - st.secrets["gsheets_service_account"] as a nested table (AttrDict/dict)
-      - st.secrets["GSHEETS_SERVICE_ACCOUNT"] as a JSON string
-    """
-    obj = None
-
-    # Preferred: nested table
-    if "gsheets_service_account" in st.secrets:
-        # AttrDict -> normal dict
-        obj = dict(st.secrets["gsheets_service_account"])
-
-    # Fallback: single JSON string
-    elif "GSHEETS_SERVICE_ACCOUNT" in st.secrets:
-        raw = st.secrets["GSHEETS_SERVICE_ACCOUNT"]
-        if isinstance(raw, str):
-            obj = json.loads(raw)  # now a dict
-        else:
-            # user pasted a dict-like value; just coerce
-            obj = dict(raw)
-
-    if not obj:
-        raise ValueError("No service account found. Add either [gsheets_service_account] or GSHEETS_SERVICE_ACCOUNT in secrets.")
-
-    # Ensure private_key newline format is correct
-    if "private_key" in obj and isinstance(obj["private_key"], str):
-        obj["private_key"] = obj["private_key"].replace("\\n", "\n")
-
-    return obj
-
-
-
+def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    try:
+        ws = _open_ws_by_name()
+        values = [df.columns.astype(str).tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
+        ws.clear()
+        ws.update(values)
+        return True, f"Uploaded {len(df)} rows to '{st.secrets['SPREADSHEET_NAME']}/{st.secrets['SHEET_NAME']}' ✅"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 # ==============================
 # UI
@@ -706,60 +682,8 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-# ==============================
-# GOOGLE SHEETS (simple, by NAME)
-# ==============================
 
-
-GS_SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive",
-]
-
-def _get_sa_dict_from_secrets() -> dict:
-    if "gcp_service_account" not in st.secrets:
-        raise ValueError("Add [gcp_service_account] to .streamlit/secrets.toml")
-    sa = dict(st.secrets["gcp_service_account"])
-    # fix escaped newlines if needed
-    if isinstance(sa.get("private_key"), str):
-        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-    return sa
-
-@st.cache_resource(show_spinner=False)
-def _gs_client():
-    sa_dict = _get_sa_dict_from_secrets()
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_dict, GS_SCOPE)
-    return gspread.authorize(creds)
-
-def _open_ws_by_name():
-    ss_name = st.secrets.get("SPREADSHEET_NAME")
-    ws_name = st.secrets.get("SHEET_NAME")
-    if not ss_name or not ws_name:
-        raise ValueError("Set SPREADSHEET_NAME and SHEET_NAME in secrets.toml")
-    gc = _gs_client()
-    sh = gc.open(ss_name)  # open by NAME
-    try:
-        return sh.worksheet(ws_name)
-    except gspread.exceptions.WorksheetNotFound:
-        return sh.add_worksheet(title=ws_name, rows="1000", cols="200")
-
-def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    try:
-        ws = _open_ws_by_name()
-        # convert df -> values (header + rows), avoid NaN
-        values = [df.columns.astype(str).tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
-        ws.clear()
-        ws.update(values)
-        return True, f"Uploaded {len(df)} rows to '{st.secrets['SPREADSHEET_NAME']}/{st.secrets['SHEET_NAME']}' ✅"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
-
-    
-
-# Push to Google Sheets (visible only if we have creds + a scored df)
-
+# Push to Google Sheets (after scoring)
 if "scored_df" in st.session_state:
     with st.expander("Google Sheets export", expanded=True):
         st.write("Spreadsheet:", st.secrets.get("SPREADSHEET_NAME", "⚠️ not set"))
@@ -767,6 +691,7 @@ if "scored_df" in st.session_state:
         if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
             ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
             st.success(msg) if ok else st.error(msg)
+
 
 st.markdown("---")
 st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.") 
