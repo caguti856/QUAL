@@ -365,7 +365,11 @@ def score_dataframe(df: pd.DataFrame,
                 out[f"{attr}_RANK"] = BANDS[band]
 
         out["Overall Total (0–24)"] = overall_total
-        out["Overall Rank"] = next((label for label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi)
+        out["Overall Rank"] = next(
+    (label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi),
+    ""
+)
+
         out["AI_suspected"] = bool(any(ai_flags))
         rows_out.append(out)
 
