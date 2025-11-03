@@ -589,7 +589,68 @@ def _chunk(iterable, n):
     for i in range(0, len(iterable), n):
         yield iterable[i:i+n]
 
+GSHEETS_SPREADSHEET_KEY = st.secrets.get("GSHEETS_SPREADSHEET_KEY", "")
+GSHEETS_WORKSHEET_NAME  = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory Scores")
 
+def _load_sa_info():
+    """
+    Load service account info from secrets. Supports:
+      - st.secrets["gsheets_service_account"] as a nested table (AttrDict/dict)
+      - st.secrets["GSHEETS_SERVICE_ACCOUNT"] as a JSON string
+    """
+    obj = None
+
+    # Preferred: nested table
+    if "gsheets_service_account" in st.secrets:
+        # AttrDict -> normal dict
+        obj = dict(st.secrets["gsheets_service_account"])
+
+    # Fallback: single JSON string
+    elif "GSHEETS_SERVICE_ACCOUNT" in st.secrets:
+        raw = st.secrets["GSHEETS_SERVICE_ACCOUNT"]
+        if isinstance(raw, str):
+            obj = json.loads(raw)  # now a dict
+        else:
+            # user pasted a dict-like value; just coerce
+            obj = dict(raw)
+
+    if not obj:
+        raise ValueError("No service account found. Add either [gsheets_service_account] or GSHEETS_SERVICE_ACCOUNT in secrets.")
+
+    # Ensure private_key newline format is correct
+    if "private_key" in obj and isinstance(obj["private_key"], str):
+        obj["private_key"] = obj["private_key"].replace("\\n", "\n")
+
+    return obj
+
+@st.cache_resource(show_spinner=False)
+def get_gspread_client():
+    info = _load_sa_info()
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+def upload_df_to_gsheets(df: pd.DataFrame, spreadsheet_key: str, worksheet_name: str) -> tuple[bool, str]:
+    if not spreadsheet_key:
+        return False, "GSHEETS_SPREADSHEET_KEY is empty."
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_key(spreadsheet_key)
+        try:
+            ws = sh.worksheet(worksheet_name)
+            ws.clear()
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title=worksheet_name, rows="100", cols="26")
+
+        # Write dataframe (with headers)
+        set_with_dataframe(ws, df, include_index=False, include_column_header=True, resize=True)
+        return True, f"Wrote {len(df)} rows to '{worksheet_name}'."
+    except Exception as e:
+        return False, f"Sheets error: {e}. Make sure the spreadsheet is shared with the service account email."
 def push_df_to_gsheet(df: pd.DataFrame,
                       spreadsheet_key: str,
                       worksheet_name: str = "Scores",
@@ -686,22 +747,17 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
 
     
 # ---- outside the scoring button block ----
-st.markdown("### 📤 Publish")
-
+# Push to Google Sheets (visible only if we have creds + a scored df)
 if "scored_df" in st.session_state:
-    ws_default = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Scores")
-    ws_name = st.text_input("Worksheet name", value=ws_default)
-
-    if st.button("🟢 Push to Google Sheets", use_container_width=True):
-        ok, msg = push_df_to_gsheet(
-            st.session_state["scored_df"],
-            spreadsheet_key=st.secrets.get("GSHEETS_SPREADSHEET_KEY", ""),
-            worksheet_name=ws_name,
-            clear_before_write=True
-        )
-        st.success(msg) if ok else st.error(msg)
+    with st.expander("Google Sheets export", expanded=True):
+        st.write("Spreadsheet key:", GSHEETS_SPREADSHEET_KEY or "⚠️ not set in secrets")
+        st.write("Worksheet name:", GSHEETS_WORKSHEET_NAME)
+        if st.button("📤 Send to Google Sheets", use_container_width=True):
+            ok, msg = upload_df_to_gsheets(st.session_state["scored_df"], GSHEETS_SPREADSHEET_KEY, GSHEETS_WORKSHEET_NAME)
+            st.success(msg) if ok else st.error(msg)
 else:
-    st.info("Run “🚀 Fetch Kobo & Score” first, then publish here.")
+    st.info("Run “🚀 Fetch Kobo & Score” first, then you can send to Google Sheets.")
+
 
 
 
