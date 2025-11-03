@@ -1,7 +1,9 @@
 # app.py
 import streamlit as st
 st.set_page_config(page_title="Advisory Scoring (Kobo → Excel/Power BI)", layout="wide")
-
+import gspread
+from gspread_dataframe import set_with_dataframe
+from google.oauth2.service_account import Credentials
 import json, re, unicodedata
 from pathlib import Path
 from datetime import datetime
@@ -17,7 +19,7 @@ from rapidfuzz import fuzz, process
 KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
-POWERBI_PUSH_URL = st.secrets.get("POWERBI_PUSH_URL", "")
+
 
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
@@ -588,45 +590,48 @@ def _chunk(iterable, n):
         yield iterable[i:i+n]
 
 
-def push_to_powerbi(df: pd.DataFrame) -> tuple[bool, str]:
-    if not POWERBI_PUSH_URL:
-        return False, "POWERBI_PUSH_URL not set in secrets."
+def push_df_to_gsheet(df: pd.DataFrame,
+                      spreadsheet_key: str,
+                      worksheet_name: str = "Scores",
+                      clear_before_write: bool = True) -> tuple[bool, str]:
+    # 1) read service account json from secrets
+    try:
+        sa_json = st.secrets["GSHEETS_SERVICE_ACCOUNT"]
+        sa_info = json.loads(sa_json)
+    except KeyError:
+        return False, "GSHEETS_SERVICE_ACCOUNT is missing in secrets."
+    except Exception as e:
+        return False, f"Invalid service account JSON: {e}"
 
-    # clean & choose payload shape
-    send_df = _sanitize_for_pbi(df)
-    rows = send_df.to_dict(orient="records")
-    wrap_rows = _detect_rows_wrapper(POWERBI_PUSH_URL)
-
-    headers = {"Content-Type": "application/json"}
-    # Power BI limits: prefer smaller chunks; 10k rows is the API hard cap,
-    # but chunk smaller to avoid 413/timeout for big rows.
-    MAX_ROWS = 5000
+    if not spreadsheet_key:
+        return False, "GSHEETS_SPREADSHEET_KEY is missing."
 
     try:
-        # If tiny, try one-shot first
-        payload = {"rows": rows} if wrap_rows else rows
-        r = requests.post(POWERBI_PUSH_URL, json=payload, headers=headers, timeout=60)
-        if r.status_code in (200, 202):
-            return True, "Success"
-        # If it failed due to size or shape, try chunking
-        if r.status_code in (408, 413, 414, 415, 429, 500, 503):
-            pass  # fall through to chunked path
-        else:
-            return False, f"{r.status_code} {r.text[:500]}"
+        # 2) build credentials & open
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(spreadsheet_key)
 
-        # chunked push
-        for batch in _chunk(rows, MAX_ROWS):
-            payload = {"rows": batch} if wrap_rows else batch
-            r2 = requests.post(POWERBI_PUSH_URL, json=payload, headers=headers, timeout=60)
-            if r2.status_code not in (200, 202):
-                return False, f"Chunk failed: {r2.status_code} {r2.text[:500]}"
+        # 3) get/create the worksheet
+        try:
+            ws = sh.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=worksheet_name, rows="100", cols="26")
 
-        return True, "Success (chunked)"
+        # 4) write the dataframe
+        if clear_before_write:
+            ws.clear()
 
-    except requests.Timeout:
-        return False, "Request timed out (increase timeout or reduce batch size)."
+        set_with_dataframe(ws, df, include_index=False, include_column_header=True, resize=True)
+        return True, f"Wrote {len(df)} rows to '{worksheet_name}'."
+    except gspread.exceptions.APIError as e:
+        return False, f"Google API error: {e}"
     except Exception as e:
-        return False, f"Exception: {e}"
+        return False, f"Unexpected error: {e}"
 
 
 # ==============================
@@ -681,25 +686,23 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
 
     
 # ---- outside the scoring button block ----
-if POWERBI_PUSH_URL:
-    if "scored_df" in st.session_state:
-        st.subheader("Publish")
-        with st.expander("Power BI diagnostics", expanded=False):
-            st.write({
-                "rows_ready": len(st.session_state["scored_df"]),
-                "url_has_/rows": "/rows" in POWERBI_PUSH_URL.lower(),
-                "sample_cols": list(st.session_state["scored_df"].columns)[:8],
-            })
-        if st.button("📤 Push to Power BI", key="push_to_pbi", use_container_width=True):
-            ok, msg = push_to_powerbi(st.session_state["scored_df"])
-            if ok:
-                st.success("Pushed to Power BI.")
-            else:
-                st.error(f"Failed to push: {msg}")
-    else:
-        st.info("Run “🚀 Fetch Kobo & Score” first to enable the Power BI push.")
+st.markdown("### 📤 Publish")
+
+if "scored_df" in st.session_state:
+    ws_default = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Scores")
+    ws_name = st.text_input("Worksheet name", value=ws_default)
+
+    if st.button("🟢 Push to Google Sheets", use_container_width=True):
+        ok, msg = push_df_to_gsheet(
+            st.session_state["scored_df"],
+            spreadsheet_key=st.secrets.get("GSHEETS_SPREADSHEET_KEY", ""),
+            worksheet_name=ws_name,
+            clear_before_write=True
+        )
+        st.success(msg) if ok else st.error(msg)
 else:
-    st.caption("POWERBI_PUSH_URL is not set in secrets, so the push button is hidden.")
+    st.info("Run “🚀 Fetch Kobo & Score” first, then publish here.")
+
 
 
 st.markdown("---")
