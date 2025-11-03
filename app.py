@@ -23,7 +23,7 @@ def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 DATASETS_DIR = Path("DATASETS")
-MAP_PATH     = DATASETS_DIR / "mapping_csv"  # your file (no extension). Recommend: rename to mapping.csv
+MAP_PATH     = DATASETS_DIR / "mapping.csv"  # your file (no extension). Recommend: rename to mapping.csv
 EX_PATH      = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
 ORDERED_ATTRS = [
@@ -465,3 +465,4 @@ if run_btn:
             ok, msg = push_to_powerbi(scored_df)
             if ok: st.success("Pushed to Power BI.")
             else:  st.error(f"Failed to push: {msg}")
+
