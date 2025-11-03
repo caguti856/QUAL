@@ -546,20 +546,88 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     return bio.getvalue()
 
+def _sanitize_for_pbi(df: pd.DataFrame) -> pd.DataFrame:
+    # Power BI chokes on NaN and very long strings; ensure str cols are trimmed and NaN -> None
+    out = df.copy()
+
+    # Convert numpy types and NaN to Python/None-friendly values
+    def _clean_cell(v):
+        if pd.isna(v):
+            return None
+        if isinstance(v, (np.bool_,)):  # convert numpy bools
+            return bool(v)
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            # Power BI accepts floats; keep them, but ensure not NaN (handled above)
+            return float(v)
+        # strings: trim overly long values (PBI has row & cell limits)
+        s = str(v)
+        return s[:4000]
+
+    for c in out.columns:
+        out[c] = out[c].map(_clean_cell)
+
+    # Power BI is fine with various column names, but just in case, strip control chars
+    safe_cols = []
+    for c in out.columns:
+        name = re.sub(r"[\x00-\x1f]+", "", str(c)).strip()
+        safe_cols.append(name[:120])  # keep names sane
+    out.columns = safe_cols
+
+    return out
+
+
+def _detect_rows_wrapper(url: str) -> bool:
+    # If your URL already ends with /rows or ?key=…/rows etc., Power BI expects {"rows": [...]}
+    return "/rows" in url.lower()
+
+
+def _chunk(iterable, n):
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i+n]
+
+
 def push_to_powerbi(df: pd.DataFrame) -> tuple[bool, str]:
     if not POWERBI_PUSH_URL:
         return False, "POWERBI_PUSH_URL not set in secrets."
-    send_df = df.copy()
-    for c in send_df.columns:
-        if send_df[c].dtype == object:
-            send_df[c] = send_df[c].astype(str).str.slice(0, 4000)
+
+    # clean & choose payload shape
+    send_df = _sanitize_for_pbi(df)
+    rows = send_df.to_dict(orient="records")
+    wrap_rows = _detect_rows_wrapper(POWERBI_PUSH_URL)
+
+    headers = {"Content-Type": "application/json"}
+    # Power BI limits: prefer smaller chunks; 10k rows is the API hard cap,
+    # but chunk smaller to avoid 413/timeout for big rows.
+    MAX_ROWS = 5000
+
     try:
-        r = requests.post(POWERBI_PUSH_URL, json=send_df.to_dict(orient="records"), timeout=60)
+        # If tiny, try one-shot first
+        payload = {"rows": rows} if wrap_rows else rows
+        r = requests.post(POWERBI_PUSH_URL, json=payload, headers=headers, timeout=60)
         if r.status_code in (200, 202):
             return True, "Success"
-        return False, f"{r.status_code} {r.text[:300]}"
+        # If it failed due to size or shape, try chunking
+        if r.status_code in (408, 413, 414, 415, 429, 500, 503):
+            pass  # fall through to chunked path
+        else:
+            return False, f"{r.status_code} {r.text[:500]}"
+
+        # chunked push
+        for batch in _chunk(rows, MAX_ROWS):
+            payload = {"rows": batch} if wrap_rows else batch
+            r2 = requests.post(POWERBI_PUSH_URL, json=payload, headers=headers, timeout=60)
+            if r2.status_code not in (200, 202):
+                return False, f"Chunk failed: {r2.status_code} {r2.text[:500]}"
+
+        return True, "Success (chunked)"
+
+    except requests.Timeout:
+        return False, "Request timed out (increase timeout or reduce batch size)."
     except Exception as e:
-        return False, str(e)
+        return False, f"Exception: {e}"
+
 
 # ==============================
 # UI
@@ -610,11 +678,13 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
         use_container_width=True
     )
 
-    if POWERBI_PUSH_URL:
-        if st.button("📤 Push to Power BI", use_container_width=True):
-            ok, msg = push_to_powerbi(scored_df)
-            if ok: st.success("Pushed to Power BI.")
-            else:  st.error(f"Failed to push: {msg}")
+    # ---- outside the scoring button block ----
+if POWERBI_PUSH_URL and "scored_df" in st.session_state:
+    if st.button("📤 Push to Power BI", key="push_to_pbi", use_container_width=True):
+        ok, msg = push_to_powerbi(st.session_state["scored_df"])
+        if ok: st.success("Pushed to Power BI.")
+        else:  st.error(f"Failed to push: {msg}")
+
 
 st.markdown("---")
 st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.")
