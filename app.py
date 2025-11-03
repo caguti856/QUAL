@@ -679,11 +679,20 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
     )
 
     # ---- outside the scoring button block ----
-    if POWERBI_PUSH_URL and "scored_df" in st.session_state:
+    # ---- outside the scoring button block ----
+if POWERBI_PUSH_URL:
+    if "scored_df" in st.session_state:
+        st.subheader("Publish")
         if st.button("📤 Push to Power BI", key="push_to_pbi", use_container_width=True):
             ok, msg = push_to_powerbi(st.session_state["scored_df"])
-            if ok: st.success("Pushed to Power BI.")
-            else:  st.error(f"Failed to push: {msg}")
+            if ok:
+                st.success("Pushed to Power BI.")
+            else:
+                st.error(f"Failed to push: {msg}")
+    else:
+        st.info("Run “🚀 Fetch Kobo & Score” first to enable the Power BI push.")
+else:
+    st.caption("POWERBI_PUSH_URL is not set in secrets, so the push button is hidden.")
 
 
 st.markdown("---")
