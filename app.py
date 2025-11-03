@@ -601,60 +601,77 @@ GS_SCOPE = [
 ]
 
 def _get_sa_dict_from_secrets() -> dict:
-    if "gcp_service_account" not in st.secrets:
-        raise ValueError("Add [gcp_service_account] to .streamlit/secrets.toml")
-    sa = dict(st.secrets["gcp_service_account"])
+    """Load GCP service account from Streamlit secrets."""
+    sa = st.secrets.get("gcp_service_account")
+    if not sa:
+        raise ValueError(
+            "❌ GCP service account not found in secrets. "
+            "Add [gcp_service_account] to .streamlit/secrets.toml"
+        )
+    sa = dict(sa)
+    # Fix escaped newlines
     if isinstance(sa.get("private_key"), str):
         sa["private_key"] = sa["private_key"].replace("\\n", "\n")
     return sa
 
 @st.cache_resource(show_spinner=False)
 def _gs_client():
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        _get_sa_dict_from_secrets(), GS_SCOPE
-    )
+    """Authorize gspread client using service account."""
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(_get_sa_dict_from_secrets(), GS_SCOPE)
     return gspread.authorize(creds)
 
-def _open_ws_by_name():
+def _open_ws_by_name() -> gspread.Worksheet:
+    """Open or create the target worksheet using secrets."""
     ss_name = st.secrets.get("SPREADSHEET_NAME")
     ws_name = st.secrets.get("SHEET_NAME")
+
     if not ss_name or not ws_name:
-        raise ValueError("Set SPREADSHEET_NAME and SHEET_NAME in secrets.toml")
+        raise ValueError(
+            "❌ SPREADSHEET_NAME or SHEET_NAME not set in secrets.toml"
+        )
 
     gc = _gs_client()
-    sh = gc.open(ss_name)
     try:
-        return sh.worksheet(ws_name)
-    except gspread.exceptions.WorksheetNotFound:
-        return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
+        sh = gc.open(ss_name)
+    except gspread.SpreadsheetNotFound:
+        raise ValueError(f"❌ Spreadsheet '{ss_name}' not found. Check Google Drive or secrets.")
+
+    try:
+        ws = sh.worksheet(ws_name)
+    except gspread.WorksheetNotFound:
+        st.warning(f"Worksheet '{ws_name}' not found. Creating new worksheet...")
+        ws = sh.add_worksheet(title=ws_name, rows="20000", cols="200")
+
+    return ws
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     """
-    Appends only — never clears sheet.
-    Creates header row automatically if sheet is empty.
+    Append DataFrame to Google Sheet.
+    Creates header if sheet is empty.
     Converts NaN → "" for Sheets compatibility.
     """
     try:
         ws = _open_ws_by_name()
 
-        # Check if sheet already has data
         existing_data = ws.get_all_values()
-        is_empty_sheet = len(existing_data) == 0
+        is_empty = len(existing_data) == 0
 
         # Prepare values
         header = df.columns.astype(str).tolist()
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
 
-        # If empty file → write header first
-        if is_empty_sheet:
+        if is_empty:
             ws.append_row(header)
 
-        # Append in one batch
-        ws.append_rows(values)
+        # Append in batches of 1000 rows (Sheets API limit)
+        batch_size = 1000
+        for chunk in [values[i:i+batch_size] for i in range(0, len(values), batch_size)]:
+            ws.append_rows(chunk, value_input_option="USER_ENTERED")
 
         return True, f"✅ Appended {len(df)} rows to '{st.secrets['SPREADSHEET_NAME']}/{st.secrets['SHEET_NAME']}'"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+
 
 # ==============================
 # UI
