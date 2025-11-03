@@ -1,0 +1,33 @@
+column,question_id,attribute,match_score
+"Walk us through your first 2–3 moves to realign UNICEF, GEDA, and donors around a MEAL approach that reduces burden yet protects outcome learning. What trade-offs do you make and why?”",SAT_Q1,Strategic & analytical thinking,99.7
+"How would you help GEDA examine the LGBTQ+ advocacy pivot, mapping community, donor, and mission risks versus opportunities? Describe the analysis frame you’d use",SAT_Q2,Strategic & analytical thinking,99.7
+"Design a 90-day reset plan: desired outcomes, decision points, and signals you’d track to know the partnership is back on course",SAT_Q3,Strategic & analytical thinking,99.6
+"What assumptions in your original advisory approach failed here, and how would you test and update them?",SAT_Q4,Strategic & analytical thinking,100.0
+How would you acknowledge the misinterpretation of your MEAL guidance to both UNICEF and GEDA without shifting blame and repair trust?,CT_Q1,Credibility & trustworthiness,99.3
+"Draft the opening of the conversation where you own your part, clarify intent, and invite joint sense-making",CT_Q2,Credibility & trustworthiness,99.5
+"What information would you share transparently, and what (if any) would you keep confidential? Why?",CT_Q3,Credibility & trustworthiness,100.0
+How will you demonstrate reliability in the weeks after the apology?,CT_Q4,Credibility & trustworthiness,100.0
+"Describe how you’d facilitate a reflection session with GEDA to surface fatigue, misunderstandings, and preferences for future communication.",ECI_Q1,Effective communication & influence,100.0
+Re-explain your MEAL intent in plain language and with one visual what would you say and show?,ECI_Q2,Effective communication & influence,98.9
+"How would you adapt your style for a partner that ‘works relationally’ rather than technically, while still influencing toward outcomes?",ECI_Q3,Effective communication & influence,100.0
+Give a concrete example of a question you’d ask that invites dissent safely.,ECI_Q4,Effective communication & influence,100.0
+"If you spent a day with GEDA’s field team, what would you look for to understand their realities—and how would those insights change the MEAL/advocacy plan?",CSF_Q1,Client & stakeholder focus,100.0
+How would you balance GEDA’s identity and strategy with donor sensitivities without silencing local priorities?,CSF_Q2,Client & stakeholder focus,100.0
+Describe a decision where you would explicitly put GEDA’s users/communities first—and how you’d explain that to UNICEF.,CSF_Q3,Client & stakeholder focus,100.0
+What early wins would you co-create with district teams to reduce burden and rebuild momentum?,CSF_Q4,Client & stakeholder focus,100.0
+"Design the agenda for a partnership reset meeting that surfaces tensions, resets principles, and clarifies behaviors for both sides.",FCP_Q1,Fostering collaboration & partnership,100.0
+How would you invite GEDA to co-define ‘how we work’ norms that honor their grassroots identity?”,FCP_Q2,Fostering collaboration & partnership,99.5
+What signals would tell you that collaboration is authentic not just polite?,FCP_Q3,Fostering collaboration & partnership,98.7
+"If GEDA stays disengaged, what graduated steps would you take before considering a handover?",FCP_Q4,Fostering collaboration & partnership,100.0
+"Co-create (at a high level) a lighter, context-relevant MEAL tool with GEDA: which 5–8 indicators, who collects what, and how do you ensure the data gets used?",ERI_Q1,Ensuring relevance & impact,100.0
+How will you test usability in the field within two weeks—and what will you change based on feedback?”,ERI_Q2,Ensuring relevance & impact,99.5
+"Describe how you’d link this lighter MEAL to outcome learning (agency, norm shifts) without overwhelming teams.",ERI_Q3,Ensuring relevance & impact,100.0
+What would you stop tracking immediately and why?,ERI_Q4,Ensuring relevance & impact,100.0
+"Outline a pilot that trials GEDA’s Excel reporting alongside UNICEF’s compliance needs. Who’s involved, what’s the test, and how do you prepare for an audit?",SOA_Q1,Solution orientation & adaptability,100.0
+How would you engage UNICEF compliance/HQ early to legitimize the pilot and reduce downstream risk?,SOA_Q2,Solution orientation & adaptability,100.0
+"If the pilot shows GEDA’s template outperforms the standard, how would you argue for adaptation/updating the global format?",SOA_Q3,Solution orientation & adaptability,100.0
+Where is the line between prudent flexibility and unacceptable variance?,SOA_Q4,Solution orientation & adaptability,100.0
+"Turn GEDA’s finance and MEAL adaptations into peer learning: what platform, format, and guardrails would you set so partners learn from each other safely?",CSE_Q1,Capacity strengthening & empowerment support,100.0
+How would you co-design capacity support that builds judgment (not just compliance) for politically sensitive advocacy?,CSE_Q2,Capacity strengthening & empowerment support,100.0
+What capabilities will GEDA need to sustain these changes without you—and how will you transfer them?,CSE_Q3,Capacity strengthening & empowerment support,100.0
+Describe how you’d measure empowerment outcomes in this partnership over the next six months.,CSE_Q4,Capacity strengthening & empowerment support,100.0
