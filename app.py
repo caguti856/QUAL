@@ -144,6 +144,7 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # QUESTION_ID → KOBO COLUMN RESOLVER (critical)
 # ==============================
+# Map your question_id prefixes to Kobo section prefixes
 QID_PREFIX_TO_SECTION = {
     "SAT": "A1",  # Strategic & analytical thinking
     "CT":  "A2",  # Credibility & trustworthiness
@@ -155,7 +156,7 @@ QID_PREFIX_TO_SECTION = {
     "CSE": "A8",  # Capacity strengthening & empowerment support
 }
 
-QNUM_RX = re.compile(r"_Q(\d+)$", re.I)
+QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def build_kobo_base_from_qid(question_id: str) -> str | None:
     """
@@ -175,6 +176,9 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     return f"Advisory/{section}_Section/{section}_{qn}"
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
+    """
+    Likely variants that show up across different Kobo exports.
+    """
     if not base:
         return []
     return [
@@ -186,23 +190,98 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
         f"{base}_label",
     ]
 
+# --- put this near your other helpers ---
+def _score_kobo_header(col: str, token: str) -> int:
+    """
+    Heuristic score for how well a Kobo header 'col' matches 'token' (e.g., 'A1_5').
+    Higher is better. This lets us tolerate different groupings/labels.
+    """
+    c = col.lower()
+    t = token.lower()
+
+    # exact token
+    if c == t:
+        return 100
+
+    score = 0
+    # strong: path ends with /token
+    if c.endswith("/" + t):
+        score = max(score, 95)
+    # contains clear segment /token/
+    if f"/{t}/" in c:
+        score = max(score, 92)
+    # contains token with separator (very common)
+    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c:
+        score = max(score, 90)
+    # base contains token anywhere
+    if t in c:
+        score = max(score, 80)
+
+    # little bonuses if it looks like label/text columns we want
+    if "english" in c or "label" in c:   # human-readable labels
+        score += 3
+    if "answer (text)" in c or "answer_text" in c or "text" in c:
+        score += 2
+
+    # small preference for paths that look advisory-ish
+    if "advisory/" in c or "/a" in c:
+        score += 1
+
+    return score
+
+# --- REPLACE your resolve_kobo_column_for_mapping with this one ---
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    base = build_kobo_base_from_qid(question_id)
+    """
+    Robust resolver:
+      1) derive token from question_id (e.g., SAT_Q5 -> 'A1_5')
+      2) score ALL headers with heuristics and pick the best
+      3) if nothing passes a safe threshold, fuzzy on prompt_hint
+    """
+    base = build_kobo_base_from_qid(question_id)  # Advisory/A1_Section/A1_5 (maybe right, maybe not)
+    # regardless of base, compute the essential token 'A1_5'
+    token = None
+    if question_id:
+        qid = question_id.strip().upper()
+        m = QNUM_RX.search(qid)
+        if m:
+            qn = m.group(1)
+            prefix = qid.split("_Q")[0]
+            sect = QID_PREFIX_TO_SECTION.get(prefix)
+            if sect:
+                token = f"{sect}_{qn}"
+
+    # 1) fast path: exact base matches (keep your old wins)
+    if base and base in df_cols:
+        return base
     if base:
-        if base in df_cols:
-            return base
         for v in expand_possible_kobo_columns(base):
             if v in df_cols:
                 return v
         for c in df_cols:
             if c.startswith(base):
                 return c
+
+    # 2) heuristic scan over ALL headers using the token
+    if token:
+        best_col = None
+        best_score = 0
+        for col in df_cols:
+            s = _score_kobo_header(col, token)
+            if s > best_score:
+                best_score = s
+                best_col = col
+        # choose if confident enough
+        if best_col and best_score >= 82:
+            return best_col
+
+    # 3) final fallback: fuzzy on prompt_hint against headers
     hint = clean(prompt_hint or "")
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
         for col, score, _ in hits:
-            if score >= 85:
+            if score >= 88:
                 return col
+
     return None
 
 # ==============================
@@ -283,40 +362,21 @@ def embed_cached(text: str):
     return vec
 
 # ==============================
-# NEW: discover Q numbers dynamically from mapping
-# ==============================
-def collect_attr_qns(mapping: pd.DataFrame) -> dict[str, list[int]]:
-    """From mapping.csv, collect the set of Q numbers per attribute (e.g. SAT_Q1, SAT_Q5 → [1,5])."""
-    attr_qns: dict[str, set[int]] = {}
-    for r in mapping.to_dict(orient="records"):
-        attr = r.get("attribute","")
-        qid  = (r.get("question_id","") or "").strip()
-        if not attr or not qid:
-            continue
-        m = QNUM_RX.search(qid)
-        if not m:
-            continue
-        qn = int(m.group(1))
-        attr_qns.setdefault(attr, set()).add(qn)
-    return {a: sorted(list(qs)) for a, qs in attr_qns.items()}
-
-# ==============================
 # SCORING
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
-                    by_qkey, question_texts,
-                    attr_qns_from_mapping: dict[str, list[int]]):
+                    by_qkey, question_texts):
 
     df_cols = list(df.columns)
 
-    # quick peek of advisory-like columns
+    # show quick peek of likely advisory columns
     with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
         sample_cols = [c for c in df_cols if "/A" in c or "Advisory/" in c or c.startswith("A")]
         st.write(sample_cols[:80])
 
     # Staff ID / time fields
-    staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id")), None)
+    staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id" or c.strip().lower()=="staff_id"), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
@@ -331,7 +391,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # Pre-resolve Kobo columns for each mapping row using question_id
+    # Pre-resolve Kobo columns for each mapping row using question_id (critical change)
     resolved_for_qid = {}
     missing_map_rows = []
     for r in all_mapping:
@@ -345,7 +405,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
         if resolved_for_qid:
-            show = list(resolved_for_qid.items())[:80]
+            show = list(resolved_for_qid.items())[:60]
             st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
         if missing_map_rows:
             st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers (showing up to 30).")
@@ -368,6 +428,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         ai_flags = []
 
         # warm embedding cache for this row
+        # collect answers first
         tmp_answers = {}
         for r in all_mapping:
             qid = r["question_id"]
@@ -417,16 +478,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
 
-            # figure Qn index (ANY integer, not limited to 1..4)
+            # figure Qn index
             qn = None
-            m_q = QNUM_RX.search(qid or "")
-            if m_q:
-                try:
-                    qn = int(m_q.group(1))
-                except:
-                    qn = None
-            if qn is None:
-                continue  # can't place it without a number
+            if "_Q" in (qid or ""):
+                try: qn = int(qid.split("_Q")[-1])
+                except: qn = None
+            if qn not in (1,2,3,4):
+                continue
 
             score_key  = f"{attr}_Qn{qn}"
             rubric_key = f"{attr}_Rubric_Qn{qn}"
@@ -438,18 +496,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[rubric_key] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing structure dynamically (use mapping-declared Qns + any created this row)
+        # fill missing structure
         for attr in ORDERED_ATTRS:
-            qns = list(attr_qns_from_mapping.get(attr, []))
-            existing_qns = []
-            for k in out.keys():
-                if k.startswith(attr + "_Qn"):
-                    m2 = re.search(r"_Qn(\d+)$", k)
-                    if m2:
-                        existing_qns.append(int(m2.group(1)))
-            for q in sorted(set(qns + existing_qns)):
-                out.setdefault(f"{attr}_Qn{q}", "")
-                out.setdefault(f"{attr}_Rubric_Qn{q}", "")
+            for qn in (1,2,3,4):
+                out.setdefault(f"{attr}_Qn{qn}", "")
+                out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
         # per-attribute averages & overall
         overall_total = 0
@@ -470,20 +521,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
-
-    # dynamic column order (discover all Qn's actually present)
+    
+    # order columns exactly
     def order_cols(cols):
         ordered = ["ID","Staff ID","Duration_min"]
-        # per-question by discovered Qns
         for attr in ORDERED_ATTRS:
-            qns = sorted(set(
-                int(re.search(r"_Qn(\d+)$", c).group(1))
-                for c in cols
-                if c.startswith(attr + "_Qn") and re.search(r"_Qn(\d+)$", c)
-            ))
-            for qn in qns:
+            for qn in (1,2,3,4):
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
-        # per-attribute summary
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
         ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
@@ -552,16 +596,8 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
     st.caption("Fetched sample:")
     st.dataframe(df.head(), use_container_width=True)
 
-    # NEW: collect Qn’s from mapping for dynamic structure
-    attr_qns_from_mapping = collect_attr_qns(mapping)
-
     with st.spinner("Scoring responses..."):
-        scored_df = score_dataframe(
-            df, mapping,
-            q_centroids, attr_centroids, global_centroids,
-            by_qkey, question_texts,
-            attr_qns_from_mapping
-        )
+        scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
     st.success("✅ Scoring complete.")
     st.dataframe(scored_df.head(50), use_container_width=True)
@@ -581,4 +617,4 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
             else:  st.error(f"Failed to push: {msg}")
 
 st.markdown("---")
-st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), supports ANY Q number per attribute, then scores via SBERT centroids with attribute & global fallbacks.")
+st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.")
