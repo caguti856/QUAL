@@ -28,7 +28,7 @@ KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping1.csv"
-EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.jsonl"
+EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
 
 FUZZY_THRESHOLD = 80
