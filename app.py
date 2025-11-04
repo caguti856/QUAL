@@ -2,7 +2,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="DATA LENS", page_icon="ASIGMA.png", layout="wide")
+st.set_page_config(page_title="Thematic Analytics",  layout="wide")
 
 # === PAGES (make sure advisory.py exists in the same folder or is importable)
 import advisory  # must define advisory.main()
@@ -16,7 +16,7 @@ COVER_HTML = """
       Powerful tools for data cleaning, database management, and insightful analytics.
     </p>
   </div>
-  <footer style="font-size:.85rem; color:#777; margin-top:1rem;">© 2025 DataLens. All rights reserved.</footer>
+  <footer style="font-size:.85rem; color:#777; margin-top:1rem;">© Thematic Analytics CARE UGANDA. All rights reserved.</footer>
 </div>
 """
 
