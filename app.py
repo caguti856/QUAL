@@ -593,6 +593,7 @@ def _chunk(iterable, n):
 # 📂 GOOGLE SHEETS — Append Mode (no overwrites)
 # ============================================================
 
+# ===== Google Sheets (open by key) =====
 GS_SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -601,76 +602,55 @@ GS_SCOPE = [
 ]
 
 def _get_sa_dict_from_secrets() -> dict:
-    """Load GCP service account from Streamlit secrets."""
     sa = st.secrets.get("gcp_service_account")
     if not sa:
-        raise ValueError(
-            "❌ GCP service account not found in secrets. "
-            "Add [gcp_service_account] to .streamlit/secrets.toml"
-        )
+        raise ValueError("gcp_service_account missing in secrets.")
     sa = dict(sa)
-    # Fix escaped newlines
     if isinstance(sa.get("private_key"), str):
         sa["private_key"] = sa["private_key"].replace("\\n", "\n")
     return sa
 
 @st.cache_resource(show_spinner=False)
 def _gs_client():
-    """Authorize gspread client using service account."""
     creds = ServiceAccountCredentials.from_json_keyfile_dict(_get_sa_dict_from_secrets(), GS_SCOPE)
     return gspread.authorize(creds)
 
-def _open_ws_by_name() -> gspread.Worksheet:
-    """Open or create the target worksheet using secrets."""
-    ss_name = st.secrets.get("SPREADSHEET_NAME")
-    ws_name = st.secrets.get("SHEET_NAME")
-
-    if not ss_name or not ws_name:
-        raise ValueError(
-            "❌ SPREADSHEET_NAME or SHEET_NAME not set in secrets.toml"
-        )
-
+def _open_ws_by_key() -> gspread.Worksheet:
+    key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
+    ws_name = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1")
+    if not key:
+        raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
     gc = _gs_client()
     try:
-        sh = gc.open(ss_name)
+        sh = gc.open_by_key(key)           # ✅ open by key (not by name)
     except gspread.SpreadsheetNotFound:
-        raise ValueError(f"❌ Spreadsheet '{ss_name}' not found. Check Google Drive or secrets.")
-
+        raise ValueError(f"Spreadsheet with key '{key}' not found or not shared with the service account.")
     try:
-        ws = sh.worksheet(ws_name)
+        return sh.worksheet(ws_name)
     except gspread.WorksheetNotFound:
-        st.warning(f"Worksheet '{ws_name}' not found. Creating new worksheet...")
-        ws = sh.add_worksheet(title=ws_name, rows="20000", cols="200")
-
-    return ws
+        st.warning(f"Worksheet '{ws_name}' not found. Creating it…")
+        return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Append DataFrame to Google Sheet.
-    Creates header if sheet is empty.
-    Converts NaN → "" for Sheets compatibility.
-    """
     try:
-        ws = _open_ws_by_name()
+        ws = _open_ws_by_key()
+        existing = ws.get_all_values()
+        is_empty = len(existing) == 0
 
-        existing_data = ws.get_all_values()
-        is_empty = len(existing_data) == 0
-
-        # Prepare values
         header = df.columns.astype(str).tolist()
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
 
         if is_empty:
             ws.append_row(header)
+        # append in chunks
+        batch = 1000
+        for i in range(0, len(values), batch):
+            ws.append_rows(values[i:i+batch], value_input_option="USER_ENTERED")
 
-        # Append in batches of 1000 rows (Sheets API limit)
-        batch_size = 1000
-        for chunk in [values[i:i+batch_size] for i in range(0, len(values), batch_size)]:
-            ws.append_rows(chunk, value_input_option="USER_ENTERED")
-
-        return True, f"✅ Appended {len(df)} rows to '{st.secrets['SPREADSHEET_NAME']}/{st.secrets['SHEET_NAME']}'"
+        return True, f"✅ Appended {len(df)} rows to '{st.secrets['GSHEETS_WORKSHEET_NAME']}'"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+
 
 
 # ==============================
@@ -726,19 +706,11 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
 # Push to Google Sheets (after scoring)
 if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
     with st.expander("Google Sheets export", expanded=True):
-        spreadsheet_name = st.secrets.get("SPREADSHEET_NAME", None)
-        worksheet_name = st.secrets.get("SHEET_NAME", None)
-
-        st.write("Spreadsheet:", spreadsheet_name or "⚠️ Not set")
-        st.write("Worksheet:", worksheet_name or "⚠️ Not set")
-
-        disabled = spreadsheet_name is None or worksheet_name is None
-
-        if st.button("📤 Send scored table to Google Sheets", use_container_width=True, disabled=disabled):
+        st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
+        st.write("Worksheet name:", st.secrets.get("GSHEETS_WORKSHEET_NAME") or "⚠️ Not set")
+        if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
             ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
             st.success(msg) if ok else st.error(msg)
-
-
 
 st.markdown("---")
 st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.") 
