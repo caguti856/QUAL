@@ -1,6 +1,5 @@
-# app.py
+# advisory.py  ← FIXED to expose main() and not call set_page_config here
 import streamlit as st
-st.set_page_config(page_title="Advisory Scoring (Kobo → Excel / Google Sheets)", layout="wide")
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -13,7 +12,6 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
-
 
 # ==============================
 # CONSTANTS / PATHS
@@ -75,7 +73,6 @@ AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re
 def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
 
 def kobo_url(asset_uid: str, kind: str = "submissions"):
-    # kind ∈ {"submissions", "data"}
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 def normalize_col_name(s: str) -> str:
@@ -86,11 +83,8 @@ def normalize_col_name(s: str) -> str:
     return s
 
 def show_status(ok: bool, msg: str) -> None:
-    """Render status without leaking DeltaGenerator objects."""
-    if ok:
-        st.success(msg)
-    else:
-        st.error(msg)
+    if ok: st.success(msg)
+    else:  st.error(msg)
 
 # ==============================
 # LOADERS
@@ -152,22 +146,21 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# QUESTION_ID → KOBO COLUMN RESOLVER (critical)
+# QUESTION_ID → KOBO COLUMN RESOLVER
 # ==============================
 QID_PREFIX_TO_SECTION = {
-    "SAT": "A1",  # Strategic & analytical thinking
-    "CT":  "A2",  # Credibility & trustworthiness
-    "ECI": "A3",  # Effective communication & influence
-    "CSF": "A4",  # Client & stakeholder focus
-    "FCP": "A5",  # Fostering collaboration & partnership
-    "ERI": "A6",  # Ensuring relevance & impact
-    "SOA": "A7",  # Solution orientation & adaptability
-    "CSE": "A8",  # Capacity strengthening & empowerment support
+    "SAT": "A1",
+    "CT":  "A2",
+    "ECI": "A3",
+    "CSF": "A4",
+    "FCP": "A5",
+    "ERI": "A6",
+    "SOA": "A7",
+    "CSE": "A8",
 }
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def build_kobo_base_from_qid(question_id: str) -> str | None:
-    """SAT_Q1 -> A1_1 -> Advisory/A1_Section/A1_1"""
     if not question_id:
         return None
     qid = question_id.strip().upper()
@@ -194,7 +187,6 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
     ]
 
 def _score_kobo_header(col: str, token: str) -> int:
-    """Heuristic score for mapping headers like 'A1_5' across varied exports."""
     c = col.lower()
     t = token.lower()
     if c == t:
@@ -202,8 +194,7 @@ def _score_kobo_header(col: str, token: str) -> int:
     score = 0
     if c.endswith("/" + t): score = max(score, 95)
     if f"/{t}/" in c:       score = max(score, 92)
-    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c:
-        score = max(score, 90)
+    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: score = max(score, 90)
     if t in c:              score = max(score, 80)
     if "english" in c or "label" in c: score += 3
     if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
@@ -211,11 +202,6 @@ def _score_kobo_header(col: str, token: str) -> int:
     return score
 
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    """
-    1) token from question_id (SAT_Q5 -> A1_5)
-    2) score headers, pick best
-    3) fallback fuzzy on prompt_hint
-    """
     base = build_kobo_base_from_qid(question_id)
     token = None
     if question_id:
@@ -227,7 +213,6 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
             sect = QID_PREFIX_TO_SECTION.get(prefix)
             if sect:
                 token = f"{sect}_{qn}"
-
     if base and base in df_cols:
         return base
     if base:
@@ -235,7 +220,6 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
             if v in df_cols: return v
         for c in df_cols:
             if c.startswith(base): return c
-
     if token:
         best_col, best_score = None, 0
         for col in df_cols:
@@ -244,7 +228,6 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
                 best_score, best_col = s, col
         if best_col and best_score >= 82:
             return best_col
-
     hint = clean(prompt_hint or "")
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
@@ -494,13 +477,12 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ==============================
 # Google Sheets (clean)
 # ==============================
-# ===== Google Sheets: make "Advisory" the default sheet =====
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")  # <- default to "Advisory"
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
@@ -527,7 +509,7 @@ def gs_client():
 
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
-    ws_name = DEFAULT_WS_NAME                          # <- use Advisory by default
+    ws_name = DEFAULT_WS_NAME
     if not key:
         raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
     gc = gs_client()
@@ -553,119 +535,92 @@ def _chunk(iterable, n):
         yield iterable[i:i+n]
 
 def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
-    """Freeze first row + auto-resize columns. Why: readability."""
+    try: ws.freeze(rows=1)
+    except Exception: pass
     try:
-        ws.freeze(rows=1)
-    except Exception:
-        pass
-    try:
-        # Auto-resize columns A:col_end
         col_end = _to_a1_col(cols)
         ws.spreadsheet.batch_update({
             "requests": [{
                 "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": ws.id,
-                        "dimension": "COLUMNS",
-                        "startIndex": 0,             # A
-                        "endIndex": cols             # exclusive
-                    }
+                    "dimensions": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": cols}
                 }
             }]
         })
-    except Exception:
-        pass
+    except Exception: pass
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    """Write header + data to the 'Advisory' sheet (create if missing)."""
     try:
         ws = _open_ws_by_key()
-
         header = df.columns.astype(str).tolist()
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
         all_rows = [header] + values
-
-        # clear sheet then write in large chunks
         ws.clear()
         col_end = _to_a1_col(len(header))
-        ROWS_PER_CHUNK = 10000
-
-        data_payload = []
-        start_row = 1
-        for rows in _chunk(all_rows, ROWS_PER_CHUNK):
+        data_payload, start_row = [], 1
+        for rows in _chunk(all_rows, 10000):
             end_row = start_row + len(rows) - 1
             a1_range = f"'{ws.title}'!A{start_row}:{col_end}{end_row}"
             data_payload.append({"range": a1_range, "values": rows})
             start_row = end_row + 1
-
-        ws.spreadsheet.values_batch_update(
-            body={"valueInputOption": "USER_ENTERED", "data": data_payload}
-        )
-
+        ws.spreadsheet.values_batch_update(body={"valueInputOption":"USER_ENTERED","data":data_payload})
         _post_write_formatting(ws, len(header))
         return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
 
-
-
-
 # ==============================
-# UI
+# PAGE ENTRYPOINT
 # ==============================
-st.title("📊 Advisory Scoring: Kobo → Scored Excel / Google Sheets")
+def main():
+    st.title("📊 Advisory Scoring: Kobo → Scored Excel / Google Sheets")
 
-if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
-    try:
-        mapping = load_mapping_from_path(MAPPING_PATH)
-    except Exception as e:
-        st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
-        st.stop()
-
-    try:
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars:
-            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+        try:
+            mapping = load_mapping_from_path(MAPPING_PATH)
+        except Exception as e:
+            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
             st.stop()
-    except Exception as e:
-        st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
-        st.stop()
 
-    with st.spinner("Building semantic centroids..."):
-        q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+        try:
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+                st.stop()
+        except Exception as e:
+            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
+            st.stop()
 
-    with st.spinner("Fetching Kobo submissions..."):
-        df = fetch_kobo_dataframe()
+        with st.spinner("Building semantic centroids..."):
+            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
 
-    if df.empty:
-        st.warning("No Kobo submissions found.")
-        st.stop()
+        with st.spinner("Fetching Kobo submissions..."):
+            df = fetch_kobo_dataframe()
 
-    st.caption("Fetched sample:")
-    st.dataframe(df.head(), use_container_width=True)
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            st.stop()
 
-    with st.spinner("Scoring responses..."):
-        scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
+        st.caption("Fetched sample:")
+        st.dataframe(df.head(), use_container_width=True)
 
-    st.success("✅ Scoring complete.")
-    st.dataframe(scored_df.head(50), use_container_width=True)
-    st.session_state["scored_df"] = scored_df
-    st.download_button(
-        "⬇️ Download Excel",
-        data=to_excel_bytes(scored_df),
-        file_name="Advisory_Scoring.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
+        with st.spinner("Scoring responses..."):
+            scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
-# UI snippet (update labels to show the target sheet)
-if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
-    with st.expander("Google Sheets export", expanded=True):
-        st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-        st.write("Worksheet name:", DEFAULT_WS_NAME)
-        if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
-            ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-            show_status(ok, msg)
+        st.success("✅ Scoring complete.")
+        st.dataframe(scored_df.head(50), use_container_width=True)
+        st.session_state["scored_df"] = scored_df
+        st.download_button(
+            "⬇️ Download Excel",
+            data=to_excel_bytes(scored_df),
+            file_name="Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
-st.markdown("---")
-st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.")
+    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
+        with st.expander("Google Sheets export", expanded=True):
+            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
+            st.write("Worksheet name:", DEFAULT_WS_NAME)
+            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
+                ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
+                show_status(ok, msg)
