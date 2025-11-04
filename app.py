@@ -1,8 +1,10 @@
 # app.py
 import streamlit as st
 st.set_page_config(page_title="Advisory Scoring (Kobo → Excel/Power BI)", layout="wide")
+
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+
 import json, re, unicodedata
 from pathlib import Path
 from datetime import datetime
@@ -589,40 +591,44 @@ def _chunk(iterable, n):
     for i in range(0, len(iterable), n):
         yield iterable[i:i+n]
 
-# ============================================================
-# 📂 GOOGLE SHEETS — Append Mode (no overwrites)
-# ============================================================
-
 # ===== Google Sheets (open by key) =====
-GS_SCOPE = [
-    "https://spreadsheets.google.com/feeds",
+
+SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
 ]
 
-def _get_sa_dict_from_secrets() -> dict:
-    sa = st.secrets.get("gcp_service_account")
-    if not sa:
-        raise ValueError("gcp_service_account missing in secrets.")
-    sa = dict(sa)
-    if isinstance(sa.get("private_key"), str):
-        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-    return sa
-
 @st.cache_resource(show_spinner=False)
-def _gs_client():
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(_get_sa_dict_from_secrets(), GS_SCOPE)
-    return gspread.authorize(creds)
+def gs_client():
+    sa = dict(st.secrets["gcp_service_account"])  # table in secrets.toml
+    # (optional) if your private_key has literal \n, google-auth accepts it as-is
+    return gspread.authorize(Credentials.from_service_account_info(sa, scopes=SCOPES))
+
+def test_gsheets():
+    try:
+        client = gs_client()
+        sh = client.open_by_key(st.secrets["GSHEETS_SPREADSHEET_KEY"])
+        try:
+            ws = sh.worksheet(st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1"))
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1"),
+                                  rows="100", cols="10")
+        ws.update('A1', 'hello from streamlit')
+        st.success("✅ Google Sheets auth + write OK")
+    except Exception as e:
+        st.error(f"❌ Test failed: {type(e).__name__}: {e}")
+
+if st.button("Run Google Sheets test"):
+    test_gsheets()
 
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
     ws_name = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1")
     if not key:
         raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
-    gc = _gs_client()
+    gc = gs_client()  # <- use the defined function
     try:
-        sh = gc.open_by_key(key)           # ✅ open by key (not by name)
+        sh = gc.open_by_key(key)
     except gspread.SpreadsheetNotFound:
         raise ValueError(f"Spreadsheet with key '{key}' not found or not shared with the service account.")
     try:
@@ -642,14 +648,13 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 
         if is_empty:
             ws.append_row(header)
-        # append in chunks
-        batch = 1000
-        for i in range(0, len(values), batch):
-            ws.append_rows(values[i:i+batch], value_input_option="USER_ENTERED")
+        for i in range(0, len(values), 1000):
+            ws.append_rows(values[i:i+1000], value_input_option="USER_ENTERED")
 
-        return True, f"✅ Appended {len(df)} rows to '{st.secrets['GSHEETS_WORKSHEET_NAME']}'"
+        return True, f"✅ Appended {len(df)} rows to '{st.secrets.get('GSHEETS_WORKSHEET_NAME','Sheet1')}'"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+
 
 
 
