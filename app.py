@@ -29,14 +29,17 @@ def show_cover() -> None:
 
 def main() -> None:
     st.session_state.setdefault("show_cover", True)
-    st.session_state.setdefault("user_email", True)  # set True if you skip auth for now
-
+    
     if st.session_state["show_cover"]:
         show_cover()
         return
 
     with st.sidebar:
-        selected = st.selectbox("Navigation", ["Advisory"],["Thought Leadership"])
+        selected = st.selectbox(
+            "Navigation",
+            options=["Advisory", "Thought Leadership"],  # <-- SINGLE list
+            index=0,
+        )
 
     # ✅ correct branching + call
     if selected == "Advisory":
