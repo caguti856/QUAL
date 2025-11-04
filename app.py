@@ -494,10 +494,13 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ==============================
 # Google Sheets (clean)
 # ==============================
+# ===== Google Sheets: make "Advisory" the default sheet =====
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")  # <- default to "Advisory"
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
@@ -522,23 +525,9 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
-def test_gsheets():
-    try:
-        client = gs_client()
-        sh = client.open_by_key(st.secrets["GSHEETS_SPREADSHEET_KEY"])
-        try:
-            ws = sh.worksheet(st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1"))
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1"),
-                                  rows="100", cols="10")
-        ws.update('A1', 'hello from streamlit')
-        st.success("✅ Google Sheets auth + write OK")
-    except Exception as e:
-        st.error(f"❌ Test failed: {type(e).__name__}: {e}")
-
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
-    ws_name = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1")
+    ws_name = DEFAULT_WS_NAME                          # <- use Advisory by default
     if not key:
         raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
     gc = gs_client()
@@ -563,8 +552,32 @@ def _chunk(iterable, n):
     for i in range(0, len(iterable), n):
         yield iterable[i:i+n]
 
+def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
+    """Freeze first row + auto-resize columns. Why: readability."""
+    try:
+        ws.freeze(rows=1)
+    except Exception:
+        pass
+    try:
+        # Auto-resize columns A:col_end
+        col_end = _to_a1_col(cols)
+        ws.spreadsheet.batch_update({
+            "requests": [{
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": ws.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,             # A
+                        "endIndex": cols             # exclusive
+                    }
+                }
+            }]
+        })
+    except Exception:
+        pass
+
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    """Clear + batch write (header + values) using values_batch_update."""
+    """Write header + data to the 'Advisory' sheet (create if missing)."""
     try:
         ws = _open_ws_by_key()
 
@@ -572,8 +585,8 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
         all_rows = [header] + values
 
+        # clear sheet then write in large chunks
         ws.clear()
-
         col_end = _to_a1_col(len(header))
         ROWS_PER_CHUNK = 10000
 
@@ -588,13 +601,14 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         ws.spreadsheet.values_batch_update(
             body={"valueInputOption": "USER_ENTERED", "data": data_payload}
         )
+
+        _post_write_formatting(ws, len(header))
         return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
 
-# ---- UI: test button ----
-if st.button("Run Google Sheets test"):
-    test_gsheets()
+
+
 
 # ==============================
 # UI
@@ -644,10 +658,11 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
         use_container_width=True
     )
 
+# UI snippet (update labels to show the target sheet)
 if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
     with st.expander("Google Sheets export", expanded=True):
         st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-        st.write("Worksheet name:", st.secrets.get("GSHEETS_WORKSHEET_NAME") or "⚠️ Not set")
+        st.write("Worksheet name:", DEFAULT_WS_NAME)
         if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
             ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
             show_status(ok, msg)
