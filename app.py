@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
-import gspread
+
 
 # ==============================
 # CONSTANTS / PATHS
@@ -75,6 +75,7 @@ AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re
 def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
 
 def kobo_url(asset_uid: str, kind: str = "submissions"):
+    # kind ∈ {"submissions", "data"}
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 def normalize_col_name(s: str) -> str:
@@ -85,7 +86,7 @@ def normalize_col_name(s: str) -> str:
     return s
 
 def show_status(ok: bool, msg: str) -> None:
-    """Render a status message; avoid leaking DeltaGenerator objects."""
+    """Render status without leaking DeltaGenerator objects."""
     if ok:
         st.success(msg)
     else:
@@ -151,17 +152,17 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# QUESTION_ID → KOBO COLUMN RESOLVER
+# QUESTION_ID → KOBO COLUMN RESOLVER (critical)
 # ==============================
 QID_PREFIX_TO_SECTION = {
-    "SAT": "A1",
-    "CT":  "A2",
-    "ECI": "A3",
-    "CSF": "A4",
-    "FCP": "A5",
-    "ERI": "A6",
-    "SOA": "A7",
-    "CSE": "A8",
+    "SAT": "A1",  # Strategic & analytical thinking
+    "CT":  "A2",  # Credibility & trustworthiness
+    "ECI": "A3",  # Effective communication & influence
+    "CSF": "A4",  # Client & stakeholder focus
+    "FCP": "A5",  # Fostering collaboration & partnership
+    "ERI": "A6",  # Ensuring relevance & impact
+    "SOA": "A7",  # Solution orientation & adaptability
+    "CSE": "A8",  # Capacity strengthening & empowerment support
 }
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
@@ -193,6 +194,7 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
     ]
 
 def _score_kobo_header(col: str, token: str) -> int:
+    """Heuristic score for mapping headers like 'A1_5' across varied exports."""
     c = col.lower()
     t = token.lower()
     if c == t:
@@ -209,6 +211,11 @@ def _score_kobo_header(col: str, token: str) -> int:
     return score
 
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+    """
+    1) token from question_id (SAT_Q5 -> A1_5)
+    2) score headers, pick best
+    3) fallback fuzzy on prompt_hint
+    """
     base = build_kobo_base_from_qid(question_id)
     token = None
     if question_id:
@@ -225,11 +232,9 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         return base
     if base:
         for v in expand_possible_kobo_columns(base):
-            if v in df_cols:
-                return v
+            if v in df_cols: return v
         for c in df_cols:
-            if c.startswith(base):
-                return c
+            if c.startswith(base): return c
 
     if token:
         best_col, best_score = None, 0
@@ -303,9 +308,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     if qid and qid in q_centroids:
         return qid
     hint = clean(prompt_hint or "")
-    if not hint or not question_texts:
-        return None
-    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio)
+    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio) if (hint and question_texts) else None
     if match and match[1] >= FUZZY_THRESHOLD:
         wanted = match[0]
         for k, pack in by_qkey.items():
@@ -488,16 +491,36 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     return bio.getvalue()
 
-# ===== Google Sheets =====
+# ==============================
+# Google Sheets (clean)
+# ==============================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
+def _normalize_sa_dict(raw: dict) -> dict:
+    if not raw:
+        raise ValueError("gcp_service_account missing in secrets.")
+    sa = dict(raw)
+    if "token_ur" in sa and "token_uri" not in sa:
+        sa["token_uri"] = sa.pop("token_ur")
+    if sa.get("private_key") and "\\n" in sa["private_key"]:
+        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+    sa.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+    sa.setdefault("auth_uri", "https://accounts.google.com/o/oauth2/auth")
+    sa.setdefault("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs")
+    required = ["type","project_id","private_key_id","private_key","client_email","client_id","token_uri"]
+    missing = [k for k in required if not sa.get(k)]
+    if missing:
+        raise ValueError(f"gcp_service_account missing fields: {', '.join(missing)}")
+    return sa
+
 @st.cache_resource(show_spinner=False)
 def gs_client():
-    sa = dict(st.secrets["gcp_service_account"])
-    return gspread.authorize(Credentials.from_service_account_info(sa, scopes=SCOPES))
+    sa = _normalize_sa_dict(st.secrets.get("gcp_service_account"))
+    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
+    return gspread.authorize(creds)
 
 def test_gsheets():
     try:
@@ -512,9 +535,6 @@ def test_gsheets():
         st.success("✅ Google Sheets auth + write OK")
     except Exception as e:
         st.error(f"❌ Test failed: {type(e).__name__}: {e}")
-
-if st.button("Run Google Sheets test"):
-    test_gsheets()
 
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
@@ -533,7 +553,6 @@ def _open_ws_by_key() -> gspread.Worksheet:
         return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
 
 def _to_a1_col(n: int) -> str:
-    """1->A, 26->Z, 27->AA"""
     s = []
     while n > 0:
         n, r = divmod(n - 1, 26)
@@ -545,9 +564,7 @@ def _chunk(iterable, n):
         yield iterable[i:i+n]
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Clear + batch write (header + values) using values_batch_update.
-    """
+    """Clear + batch write (header + values) using values_batch_update."""
     try:
         ws = _open_ws_by_key()
 
@@ -557,10 +574,9 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 
         ws.clear()
 
-        max_cols = len(header)
-        col_end = _to_a1_col(max_cols)
-
+        col_end = _to_a1_col(len(header))
         ROWS_PER_CHUNK = 10000
+
         data_payload = []
         start_row = 1
         for rows in _chunk(all_rows, ROWS_PER_CHUNK):
@@ -572,10 +588,13 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         ws.spreadsheet.values_batch_update(
             body={"valueInputOption": "USER_ENTERED", "data": data_payload}
         )
-
         return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+
+# ---- UI: test button ----
+if st.button("Run Google Sheets test"):
+    test_gsheets()
 
 # ==============================
 # UI
