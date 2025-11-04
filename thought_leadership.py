@@ -33,6 +33,12 @@ EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
+# Accept a few common Kobo path variants for this form
+TL_ROOTS = [
+    "Thought Leadership",   # with space
+    "ThoughtLeadership",    # no space
+    "Leadership"            # short root seen on some exports
+]
 
 
 # ----------------- Domain constants -----------------
@@ -104,9 +110,14 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     m.columns = [c.lower().strip() for c in m.columns]
     assert {"column","question_id","attribute"}.issubset(m.columns), \
         "mapping must have: column, question_id, attribute"
-    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
+    # default prompt_hint to the full question text for better fuzzy match
+    if "prompt_hint" not in m.columns:
+        m["prompt_hint"] = m["column"]
+    else:
+        m["prompt_hint"] = m["prompt_hint"].fillna("").where(m["prompt_hint"].str.len()>0, m["column"])
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
     return m
+
 
 def read_jsonl_path(path: Path) -> list[dict]:
     if not path.exists():
@@ -180,8 +191,10 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     prefix = qid.split("_Q")[0]
     if prefix not in QID_PREFIX_TO_SECTION:
         return None
-    section = QID_PREFIX_TO_SECTION[prefix]
-    return f"Thought Leadership/{section}_Section/{section}_{qn}"
+    section = QID_PREFIX_TO_SECTION[prefix]  # T1..T7
+    # default to the first root; resolver will also test other roots
+    return f"{TL_ROOTS[0]}/{section}_Section/{section}_{qn}"
+
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base:
@@ -203,47 +216,22 @@ def _score_kobo_header(col: str, token: str) -> int:
     score = 0
     if c.endswith("/" + t): score = max(score, 95)
     if f"/{t}/" in c:       score = max(score, 92)
-    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: score = max(score, 90)
+    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c:
+        score = max(score, 90)
     if t in c:              score = max(score, 80)
+
+    # small bonuses for human-readable label columns
     if "english" in c or "label" in c: score += 3
     if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
-    if "thought_leadership/" in c or "/a" in c: score += 1
+
+    # prefer TL roots
+    for root in TL_ROOTS:
+        if root.lower() + "/" in c:
+            score += 3
+            break
+    # do NOT bias toward advisory paths
     return score
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    base = build_kobo_base_from_qid(question_id)
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1)
-            prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect:
-                token = f"{sect}_{qn}"
-    if base and base in df_cols:
-        return base
-    if base:
-        for v in expand_possible_kobo_columns(base):
-            if v in df_cols: return v
-        for c in df_cols:
-            if c.startswith(base): return c
-    if token:
-        best_col, best_score = None, 0
-        for col in df_cols:
-            s = _score_kobo_header(col, token)
-            if s > best_score:
-                best_score, best_col = s, col
-        if best_col and best_score >= 82:
-            return best_col
-    hint = clean(prompt_hint or "")
-    if hint:
-        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
-        for col, score, _ in hits:
-            if score >= 88:
-                return col
-    return None
 
 # ==============================
 # EMBEDDINGS / CENTROIDS
@@ -295,18 +283,64 @@ def build_centroids(exemplars: list[dict]):
 
     return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
 
-def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
-    qid = (qid or "").strip()
-    if qid and qid in q_centroids:
-        return qid
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+    base = build_kobo_base_from_qid(question_id)
+    token = None
+    if question_id:
+        qid = question_id.strip().upper()
+        m = QNUM_RX.search(qid)
+        if m:
+            qn = m.group(1)
+            prefix = qid.split("_Q")[0]
+            sect = QID_PREFIX_TO_SECTION.get(prefix)
+            if sect:
+                token = f"{sect}_{qn}"
+
+    # 1) exact / expanded matches for all TL roots
+    bases_to_try = []
+    if token:
+        for root in TL_ROOTS:
+            bases_to_try.append(f"{root}/{token.split('_')[0]}_Section/{token}")
+    if base:
+        bases_to_try.append(base)
+
+    for b in bases_to_try:
+        if b in df_cols:
+            return b
+        for v in expand_possible_kobo_columns(b):
+            if v in df_cols:
+                return v
+        # headers that start with the base path
+        for c in df_cols:
+            if c.startswith(b):
+                return c
+
+    # 2) token-only heuristics across ALL headers
+    if token:
+        # endings like ".../T1_1"
+        for c in df_cols:
+            cl = c.lower()
+            if cl.endswith("/" + token.lower()):
+                return c
+        # score all by heuristic
+        best_col, best_score = None, 0
+        for col in df_cols:
+            s = _score_kobo_header(col, token)
+            if s > best_score:
+                best_score, best_col = s, col
+        if best_col and best_score >= 82:
+            return best_col
+
+    # 3) fuzzy on prompt_hint (falls back to question text)
     hint = clean(prompt_hint or "")
-    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio) if (hint and question_texts) else None
-    if match and match[1] >= FUZZY_THRESHOLD:
-        wanted = match[0]
-        for k, pack in by_qkey.items():
-            if clean(pack["question_text"]) == wanted:
-                return k
+    if hint:
+        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
+        for col, score, _ in hits:
+            if score >= 88:
+                return col
+
     return None
+
 
 _embed_cache: dict[str, np.ndarray] = {}
 def embed_cached(text: str):
@@ -316,6 +350,27 @@ def embed_cached(text: str):
     vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
     _embed_cache[t] = vec
     return vec
+# --- Put this above score_dataframe ---
+def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
+    """
+    Prefer an exact question_id match (e.g., LAV_Q1). If not found,
+    fuzzy-match the prompt_hint (or question text) to the known question_texts.
+    """
+    qid = (qid or "").strip()
+    if qid and qid in q_centroids:
+        return qid
+
+    hint = clean(prompt_hint or "")
+    if not hint or not question_texts:
+        return None
+
+    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio)
+    if match and match[1] >= FUZZY_THRESHOLD:
+        wanted = match[0]
+        for k, pack in by_qkey.items():
+            if clean(pack.get("question_text", "")) == wanted:
+                return k
+    return None
 
 # ==============================
 # SCORING
