@@ -1,6 +1,6 @@
 # app.py
 import streamlit as st
-st.set_page_config(page_title="Advisory Scoring (Kobo → Excel/Power BI)", layout="wide")
+st.set_page_config(page_title="Advisory Scoring (Kobo → Excel / Google Sheets)", layout="wide")
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -21,7 +21,6 @@ import gspread
 KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
-
 
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
@@ -76,7 +75,6 @@ AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re
 def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
 
 def kobo_url(asset_uid: str, kind: str = "submissions"):
-    # kind ∈ {"submissions", "data"}
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 def normalize_col_name(s: str) -> str:
@@ -85,6 +83,13 @@ def normalize_col_name(s: str) -> str:
     s = re.sub(r"\s+"," ", s)
     s = re.sub(r"[^a-z0-9_ ]+", "", s)
     return s
+
+def show_status(ok: bool, msg: str) -> None:
+    """Render a status message; avoid leaking DeltaGenerator objects."""
+    if ok:
+        st.success(msg)
+    else:
+        st.error(msg)
 
 # ==============================
 # LOADERS
@@ -146,26 +151,22 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# QUESTION_ID → KOBO COLUMN RESOLVER (critical)
+# QUESTION_ID → KOBO COLUMN RESOLVER
 # ==============================
-# Map your question_id prefixes to Kobo section prefixes
 QID_PREFIX_TO_SECTION = {
-    "SAT": "A1",  # Strategic & analytical thinking
-    "CT":  "A2",  # Credibility & trustworthiness
-    "ECI": "A3",  # Effective communication & influence
-    "CSF": "A4",  # Client & stakeholder focus
-    "FCP": "A5",  # Fostering collaboration & partnership
-    "ERI": "A6",  # Ensuring relevance & impact
-    "SOA": "A7",  # Solution orientation & adaptability
-    "CSE": "A8",  # Capacity strengthening & empowerment support
+    "SAT": "A1",
+    "CT":  "A2",
+    "ECI": "A3",
+    "CSF": "A4",
+    "FCP": "A5",
+    "ERI": "A6",
+    "SOA": "A7",
+    "CSE": "A8",
 }
-
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def build_kobo_base_from_qid(question_id: str) -> str | None:
-    """
-    SAT_Q1 -> A1_1 -> Advisory/A1_Section/A1_1
-    """
+    """SAT_Q1 -> A1_1 -> Advisory/A1_Section/A1_1"""
     if not question_id:
         return None
     qid = question_id.strip().upper()
@@ -176,13 +177,10 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     prefix = qid.split("_Q")[0]
     if prefix not in QID_PREFIX_TO_SECTION:
         return None
-    section = QID_PREFIX_TO_SECTION[prefix]  # e.g., A1
+    section = QID_PREFIX_TO_SECTION[prefix]
     return f"Advisory/{section}_Section/{section}_{qn}"
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
-    """
-    Likely variants that show up across different Kobo exports.
-    """
     if not base:
         return []
     return [
@@ -194,55 +192,24 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
         f"{base}_label",
     ]
 
-# --- put this near your other helpers ---
 def _score_kobo_header(col: str, token: str) -> int:
-    """
-    Heuristic score for how well a Kobo header 'col' matches 'token' (e.g., 'A1_5').
-    Higher is better. This lets us tolerate different groupings/labels.
-    """
     c = col.lower()
     t = token.lower()
-
-    # exact token
     if c == t:
         return 100
-
     score = 0
-    # strong: path ends with /token
-    if c.endswith("/" + t):
-        score = max(score, 95)
-    # contains clear segment /token/
-    if f"/{t}/" in c:
-        score = max(score, 92)
-    # contains token with separator (very common)
+    if c.endswith("/" + t): score = max(score, 95)
+    if f"/{t}/" in c:       score = max(score, 92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c:
         score = max(score, 90)
-    # base contains token anywhere
-    if t in c:
-        score = max(score, 80)
-
-    # little bonuses if it looks like label/text columns we want
-    if "english" in c or "label" in c:   # human-readable labels
-        score += 3
-    if "answer (text)" in c or "answer_text" in c or "text" in c:
-        score += 2
-
-    # small preference for paths that look advisory-ish
-    if "advisory/" in c or "/a" in c:
-        score += 1
-
+    if t in c:              score = max(score, 80)
+    if "english" in c or "label" in c: score += 3
+    if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
+    if "advisory/" in c or "/a" in c: score += 1
     return score
 
-# --- REPLACE your resolve_kobo_column_for_mapping with this one ---
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    """
-    Robust resolver:
-      1) derive token from question_id (e.g., SAT_Q5 -> 'A1_5')
-      2) score ALL headers with heuristics and pick the best
-      3) if nothing passes a safe threshold, fuzzy on prompt_hint
-    """
-    base = build_kobo_base_from_qid(question_id)  # Advisory/A1_Section/A1_5 (maybe right, maybe not)
-    # regardless of base, compute the essential token 'A1_5'
+    base = build_kobo_base_from_qid(question_id)
     token = None
     if question_id:
         qid = question_id.strip().upper()
@@ -254,7 +221,6 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
             if sect:
                 token = f"{sect}_{qn}"
 
-    # 1) fast path: exact base matches (keep your old wins)
     if base and base in df_cols:
         return base
     if base:
@@ -265,27 +231,21 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
             if c.startswith(base):
                 return c
 
-    # 2) heuristic scan over ALL headers using the token
     if token:
-        best_col = None
-        best_score = 0
+        best_col, best_score = None, 0
         for col in df_cols:
             s = _score_kobo_header(col, token)
             if s > best_score:
-                best_score = s
-                best_col = col
-        # choose if confident enough
+                best_score, best_col = s, col
         if best_col and best_score >= 82:
             return best_col
 
-    # 3) final fallback: fuzzy on prompt_hint against headers
     hint = clean(prompt_hint or "")
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
         for col, score, _ in hits:
             if score >= 88:
                 return col
-
     return None
 
 # ==============================
@@ -296,10 +256,7 @@ def get_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 def build_centroids(exemplars: list[dict]):
-    by_qkey = {}
-    by_attr = {}
-    question_texts = []
-
+    by_qkey, by_attr, question_texts = {}, {}, []
     for e in exemplars:
         qid   = clean(e.get("question_id",""))
         qtext = clean(e.get("question_text",""))
@@ -374,12 +331,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    # show quick peek of likely advisory columns
     with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
         sample_cols = [c for c in df_cols if "/A" in c or "Advisory/" in c or c.startswith("A")]
         st.write(sample_cols[:80])
 
-    # Staff ID / time fields
     staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id" or c.strip().lower()=="staff_id"), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
@@ -395,7 +350,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # Pre-resolve Kobo columns for each mapping row using question_id (critical change)
     resolved_for_qid = {}
     missing_map_rows = []
     for r in all_mapping:
@@ -415,24 +369,18 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers (showing up to 30).")
             st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
 
-    # Row-wise scoring
     for i, resp in df.iterrows():
         out = {}
-        # ID
         if pd.notna(dt_series.iloc[i]):
             out["ID"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
         else:
             out["ID"] = str(i)
-        # Staff ID
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
-        # Duration
         out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
         ai_flags = []
 
-        # warm embedding cache for this row
-        # collect answers first
         tmp_answers = {}
         for r in all_mapping:
             qid = r["question_id"]
@@ -454,12 +402,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             ai_flags.append(looks_ai_like(ans))
             vec = embed_cached(ans)
 
-            # resolve exemplar key for this question
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
 
             sc = None
             if vec is not None:
-                # question-level
                 if qkey and qkey in q_centroids:
                     sims = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
                     if sims:
@@ -467,14 +413,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         qtext = by_qkey[qkey]["question_text"]
                         if qa_overlap(ans, qtext or qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
-                # attribute-level
                 if sc is None and attr in attr_centroids:
                     sims = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
                     if sims:
                         sc = max(sims, key=sims.get)
                         if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
-                # global fallback
                 if sc is None:
                     sims = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
                     if sims:
@@ -482,7 +426,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
 
-            # figure Qn index
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
@@ -500,13 +443,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[rubric_key] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing structure
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # per-attribute averages & overall
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -525,8 +466,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
-    
-    # order columns exactly
     def order_cols(cols):
         ordered = ["ID","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
@@ -537,7 +476,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
         extras = [c for c in cols if c not in ordered]
         return [c for c in ordered if c in cols] + extras
-
     return res_df.reindex(columns=order_cols(list(res_df.columns)))
 
 # ==============================
@@ -550,49 +488,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     return bio.getvalue()
 
-def _sanitize_for_pbi(df: pd.DataFrame) -> pd.DataFrame:
-    # Power BI chokes on NaN and very long strings; ensure str cols are trimmed and NaN -> None
-    out = df.copy()
-
-    # Convert numpy types and NaN to Python/None-friendly values
-    def _clean_cell(v):
-        if pd.isna(v):
-            return None
-        if isinstance(v, (np.bool_,)):  # convert numpy bools
-            return bool(v)
-        if isinstance(v, (np.integer,)):
-            return int(v)
-        if isinstance(v, (np.floating,)):
-            # Power BI accepts floats; keep them, but ensure not NaN (handled above)
-            return float(v)
-        # strings: trim overly long values (PBI has row & cell limits)
-        s = str(v)
-        return s[:4000]
-
-    for c in out.columns:
-        out[c] = out[c].map(_clean_cell)
-
-    # Power BI is fine with various column names, but just in case, strip control chars
-    safe_cols = []
-    for c in out.columns:
-        name = re.sub(r"[\x00-\x1f]+", "", str(c)).strip()
-        safe_cols.append(name[:120])  # keep names sane
-    out.columns = safe_cols
-
-    return out
-
-
-def _detect_rows_wrapper(url: str) -> bool:
-    # If your URL already ends with /rows or ?key=…/rows etc., Power BI expects {"rows": [...]}
-    return "/rows" in url.lower()
-
-
-def _chunk(iterable, n):
-    for i in range(0, len(iterable), n):
-        yield iterable[i:i+n]
-
-# ===== Google Sheets (open by key) =====
-
+# ===== Google Sheets =====
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -600,8 +496,7 @@ SCOPES = [
 
 @st.cache_resource(show_spinner=False)
 def gs_client():
-    sa = dict(st.secrets["gcp_service_account"])  # table in secrets.toml
-    # (optional) if your private_key has literal \n, google-auth accepts it as-is
+    sa = dict(st.secrets["gcp_service_account"])
     return gspread.authorize(Credentials.from_service_account_info(sa, scopes=SCOPES))
 
 def test_gsheets():
@@ -626,7 +521,7 @@ def _open_ws_by_key() -> gspread.Worksheet:
     ws_name = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Sheet1")
     if not key:
         raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
-    gc = gs_client()  # <- use the defined function
+    gc = gs_client()
     try:
         sh = gc.open_by_key(key)
     except gspread.SpreadsheetNotFound:
@@ -637,34 +532,57 @@ def _open_ws_by_key() -> gspread.Worksheet:
         st.warning(f"Worksheet '{ws_name}' not found. Creating it…")
         return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
 
+def _to_a1_col(n: int) -> str:
+    """1->A, 26->Z, 27->AA"""
+    s = []
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s.append(chr(65 + r))
+    return ''.join(reversed(s))
+
+def _chunk(iterable, n):
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i+n]
+
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Clear + batch write (header + values) using values_batch_update.
+    """
     try:
         ws = _open_ws_by_key()
-        existing = ws.get_all_values()
-        is_empty = len(existing) == 0
 
         header = df.columns.astype(str).tolist()
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
+        all_rows = [header] + values
 
-        if is_empty:
-            ws.append_row(header)
-        for i in range(0, len(values), 1000):
-            ws.append_rows(values[i:i+1000], value_input_option="USER_ENTERED")
+        ws.clear()
 
-        return True, f"✅ Appended {len(df)} rows to '{st.secrets.get('GSHEETS_WORKSHEET_NAME','Sheet1')}'"
+        max_cols = len(header)
+        col_end = _to_a1_col(max_cols)
+
+        ROWS_PER_CHUNK = 10000
+        data_payload = []
+        start_row = 1
+        for rows in _chunk(all_rows, ROWS_PER_CHUNK):
+            end_row = start_row + len(rows) - 1
+            a1_range = f"'{ws.title}'!A{start_row}:{col_end}{end_row}"
+            data_payload.append({"range": a1_range, "values": rows})
+            start_row = end_row + 1
+
+        ws.spreadsheet.values_batch_update(
+            body={"valueInputOption": "USER_ENTERED", "data": data_payload}
+        )
+
+        return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
-
-
-
 
 # ==============================
 # UI
 # ==============================
-st.title("📊 Advisory Scoring: Kobo → Scored Excel (and Power BI)")
+st.title("📊 Advisory Scoring: Kobo → Scored Excel / Google Sheets")
 
 if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
-    # Load mapping + exemplars
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
     except Exception as e:
@@ -698,24 +616,22 @@ if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True
 
     st.success("✅ Scoring complete.")
     st.dataframe(scored_df.head(50), use_container_width=True)
-    # 🔐 keep it for the Power BI button (survives reruns)
     st.session_state["scored_df"] = scored_df
     st.download_button(
         "⬇️ Download Excel",
         data=to_excel_bytes(scored_df),
-        file_name="Individual_Advisory_Scoring_Sheet.xlsx",
+        file_name="Advisory_Scoring.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
 
-# Push to Google Sheets (after scoring)
 if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
     with st.expander("Google Sheets export", expanded=True):
         st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
         st.write("Worksheet name:", st.secrets.get("GSHEETS_WORKSHEET_NAME") or "⚠️ Not set")
         if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
             ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-            st.success(msg) if ok else st.error(msg)
+            show_status(ok, msg)
 
 st.markdown("---")
-st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.") 
+st.caption("Derives Kobo columns from question_id (e.g., SAT_Q1 → Advisory/A1_Section/A1_1), falls back to fuzzy on prompt_hint, then scores via SBERT centroids.")
