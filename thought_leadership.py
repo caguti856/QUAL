@@ -181,7 +181,7 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     if prefix not in QID_PREFIX_TO_SECTION:
         return None
     section = QID_PREFIX_TO_SECTION[prefix]
-    return f"Advisory/{section}_Section/{section}_{qn}"
+    return f"Thought Leadership/{section}_Section/{section}_{qn}"
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base:
@@ -207,7 +207,7 @@ def _score_kobo_header(col: str, token: str) -> int:
     if t in c:              score = max(score, 80)
     if "english" in c or "label" in c: score += 3
     if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
-    if "advisory/" in c or "/a" in c: score += 1
+    if "thought_leadership/" in c or "/a" in c: score += 1
     return score
 
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
