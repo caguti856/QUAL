@@ -2,14 +2,10 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-# === PAGES (make sure these files exist under ./pages/)
-from pages import advisory_page
-from pages import thought_leadership_page
-from pages import growth_mindset_skills_page
-from pages import networking_and_advocacy_page
-from pages import influencing_relationship_page  # <-- not "...pageso"
-
 st.set_page_config(page_title="DATA LENS", page_icon="ASIGMA.png", layout="wide")
+
+# === PAGES (make sure advisory.py exists in the same folder or is importable)
+import advisory  # must define advisory.main()
 
 # ----- optional cover -----
 COVER_HTML = """
@@ -24,43 +20,27 @@ COVER_HTML = """
 </div>
 """
 
-def show_cover():
+def show_cover() -> None:
     components.html(COVER_HTML, height=550, scrolling=False)
     st.write("")
     if st.button("🚀 Get Started", use_container_width=True):
-        st.session_state.show_cover = False
+        st.session_state["show_cover"] = False
         st.rerun()
 
-def main():
+def main() -> None:
     st.session_state.setdefault("show_cover", True)
-    st.session_state.setdefault("user_email", True)  # set True if you skip auth; integrate your auth if needed
+    st.session_state.setdefault("user_email", True)  # set True if you skip auth for now
 
     if st.session_state["show_cover"]:
         show_cover()
         return
 
     with st.sidebar:
-        selected = st.selectbox(
-            "Navigation",
-            [
-                "Advisory",
-                "Thought Leadership",
-                "Growth Mindset Skills",
-                "Networking and Advocacy",
-                "Influencing Relationship",
-            ],
-        )
+        selected = st.selectbox("Navigation", ["Advisory"])
 
+    # ✅ correct branching + call
     if selected == "Advisory":
-        advisory_page.main()
-    elif selected == "Thought Leadership":
-        thought_leadership_page.main()
-    elif selected == "Growth Mindset Skills":
-        growth_mindset_skills_page.main()
-    elif selected == "Networking and Advocacy":
-        networking_and_advocacy_page.main()
-    elif selected == "Influencing Relationship":
-        influencing_relationship_page.main()
+        advisory.main()
 
 if __name__ == "__main__":
     main()
