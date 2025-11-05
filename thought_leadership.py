@@ -689,3 +689,4 @@ def main():
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
                 show_status(ok, msg)
 
+
