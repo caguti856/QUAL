@@ -22,7 +22,7 @@ KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping1.csv"
-EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.jsonl"
+EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
@@ -610,7 +610,7 @@ def main():
         st.download_button(
             "⬇️ Download Excel",
             data=to_excel_bytes(scored_df),
-            file_name="Advisory_Scoring.xlsx",
+            file_name="Leadership_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
