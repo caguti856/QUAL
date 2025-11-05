@@ -1,10 +1,4 @@
-# thought_leadership.py
-# Standalone Streamlit page for: Thought Leadership
-# Creates DATASETS/thought_leadership/{mapping.csv, exemplars.cleaned.jsonl} if missing.
-
-import re
-import json
-import unicodedata
+# advisory.py  ← FIXED to expose main() and not call set_page_config here
 import streamlit as st
 
 import gspread
@@ -22,33 +16,22 @@ from rapidfuzz import fuzz, process
 # ==============================
 # CONSTANTS / PATHS
 # ==============================
-KOBO_BASE       = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
+KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID1    = st.secrets.get("KOBO_ASSET_ID1", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping1.csv"
-EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
+EXEMPLARS_PATH   = DATASETS_DIR / "thought_leadership.jsonl"
 
-
-FUZZY_THRESHOLD = 80
-MIN_QA_OVERLAP  = 0.05
-# Accept a few common Kobo path variants for this form
-TL_ROOTS = [
-    "Thought Leadership",   # with space
-    "ThoughtLeadership",    # no space
-    "Leadership"            # short root seen on some exports
-]
-
-
-# ----------------- Domain constants -----------------
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
-    ("Transformative Strategist", 19, 21),
-    ("Strategic Leader",          15, 18),
-    ("Growing Strategist",        8,  14),
-    ("Needs Strengthening",       0,   7),
+    ("Exemplary Thought Leader", 21, 24),
+    ("Strategic Advisor",       16, 20),
+    ("Emerging Advisor",        10, 15),
+    ("Needs Capacity Support",   0,  9),
 ]
+
 ORDERED_ATTRS = [
     "Locally Anchored Visioning",
     "Innovation and Insight",
@@ -59,6 +42,8 @@ ORDERED_ATTRS = [
     "Result-Oriented Decision-Making",
 ]
 
+FUZZY_THRESHOLD = 80
+MIN_QA_OVERLAP  = 0.05
 
 # ==============================
 # HELPERS
@@ -110,14 +95,9 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     m.columns = [c.lower().strip() for c in m.columns]
     assert {"column","question_id","attribute"}.issubset(m.columns), \
         "mapping must have: column, question_id, attribute"
-    # default prompt_hint to the full question text for better fuzzy match
-    if "prompt_hint" not in m.columns:
-        m["prompt_hint"] = m["column"]
-    else:
-        m["prompt_hint"] = m["prompt_hint"].fillna("").where(m["prompt_hint"].str.len()>0, m["column"])
+    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
     return m
-
 
 def read_jsonl_path(path: Path) -> list[dict]:
     if not path.exists():
@@ -132,7 +112,7 @@ def read_jsonl_path(path: Path) -> list[dict]:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_kobo_dataframe() -> pd.DataFrame:
     if not KOBO_ASSET_ID1 or not KOBO_TOKEN:
-        st.warning("Set KOBO_ASSET_ID and KOBO_TOKEN in st.secrets.")
+        st.warning("Set KOBO_ASSET_ID1 and KOBO_TOKEN in st.secrets.")
         return pd.DataFrame()
     headers = {"Authorization": f"Token {KOBO_TOKEN}"}
     for kind in ("submissions","data"):
@@ -161,13 +141,12 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
         except Exception as e:
             st.error(f"Failed to fetch Kobo data: {e}")
             return pd.DataFrame()
-    st.error("Could not fetch data. Check KOBO_BASE1, KOBO_ASSET_ID1, token permissions.")
+    st.error("Could not fetch data. Check KOBO_BASE, KOBO_ASSET_ID1, token permissions.")
     return pd.DataFrame()
 
 # ==============================
 # QUESTION_ID → KOBO COLUMN RESOLVER
 # ==============================
-
 QID_PREFIX_TO_SECTION = {
     "LAV": "T1",
     "II":  "T2",
@@ -178,7 +157,6 @@ QID_PREFIX_TO_SECTION = {
     "RDM": "T7",
 }
 QNUM_RX = re.compile(r"_Q(\d+)$")
-
 
 def build_kobo_base_from_qid(question_id: str) -> str | None:
     if not question_id:
@@ -191,10 +169,8 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     prefix = qid.split("_Q")[0]
     if prefix not in QID_PREFIX_TO_SECTION:
         return None
-    section = QID_PREFIX_TO_SECTION[prefix]  # T1..T7
-    # default to the first root; resolver will also test other roots
-    return f"{TL_ROOTS[0]}/{section}_Section/{section}_{qn}"
-
+    section = QID_PREFIX_TO_SECTION[prefix]
+    return f"Leadership/{section}_Section/{section}_{qn}"
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base:
@@ -216,22 +192,47 @@ def _score_kobo_header(col: str, token: str) -> int:
     score = 0
     if c.endswith("/" + t): score = max(score, 95)
     if f"/{t}/" in c:       score = max(score, 92)
-    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c:
-        score = max(score, 90)
+    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: score = max(score, 90)
     if t in c:              score = max(score, 80)
-
-    # small bonuses for human-readable label columns
     if "english" in c or "label" in c: score += 3
     if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
-
-    # prefer TL roots
-    for root in TL_ROOTS:
-        if root.lower() + "/" in c:
-            score += 3
-            break
-    # do NOT bias toward advisory paths
+    if "thoughtleadership/" in c or "/a" in c: score += 1
     return score
 
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+    base = build_kobo_base_from_qid(question_id)
+    token = None
+    if question_id:
+        qid = question_id.strip().upper()
+        m = QNUM_RX.search(qid)
+        if m:
+            qn = m.group(1)
+            prefix = qid.split("_Q")[0]
+            sect = QID_PREFIX_TO_SECTION.get(prefix)
+            if sect:
+                token = f"{sect}_{qn}"
+    if base and base in df_cols:
+        return base
+    if base:
+        for v in expand_possible_kobo_columns(base):
+            if v in df_cols: return v
+        for c in df_cols:
+            if c.startswith(base): return c
+    if token:
+        best_col, best_score = None, 0
+        for col in df_cols:
+            s = _score_kobo_header(col, token)
+            if s > best_score:
+                best_score, best_col = s, col
+        if best_col and best_score >= 82:
+            return best_col
+    hint = clean(prompt_hint or "")
+    if hint:
+        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
+        for col, score, _ in hits:
+            if score >= 88:
+                return col
+    return None
 
 # ==============================
 # EMBEDDINGS / CENTROIDS
@@ -283,64 +284,18 @@ def build_centroids(exemplars: list[dict]):
 
     return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    base = build_kobo_base_from_qid(question_id)
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1)
-            prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect:
-                token = f"{sect}_{qn}"
-
-    # 1) exact / expanded matches for all TL roots
-    bases_to_try = []
-    if token:
-        for root in TL_ROOTS:
-            bases_to_try.append(f"{root}/{token.split('_')[0]}_Section/{token}")
-    if base:
-        bases_to_try.append(base)
-
-    for b in bases_to_try:
-        if b in df_cols:
-            return b
-        for v in expand_possible_kobo_columns(b):
-            if v in df_cols:
-                return v
-        # headers that start with the base path
-        for c in df_cols:
-            if c.startswith(b):
-                return c
-
-    # 2) token-only heuristics across ALL headers
-    if token:
-        # endings like ".../T1_1"
-        for c in df_cols:
-            cl = c.lower()
-            if cl.endswith("/" + token.lower()):
-                return c
-        # score all by heuristic
-        best_col, best_score = None, 0
-        for col in df_cols:
-            s = _score_kobo_header(col, token)
-            if s > best_score:
-                best_score, best_col = s, col
-        if best_col and best_score >= 82:
-            return best_col
-
-    # 3) fuzzy on prompt_hint (falls back to question text)
+def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
+    qid = (qid or "").strip()
+    if qid and qid in q_centroids:
+        return qid
     hint = clean(prompt_hint or "")
-    if hint:
-        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
-        for col, score, _ in hits:
-            if score >= 88:
-                return col
-
+    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio) if (hint and question_texts) else None
+    if match and match[1] >= FUZZY_THRESHOLD:
+        wanted = match[0]
+        for k, pack in by_qkey.items():
+            if clean(pack["question_text"]) == wanted:
+                return k
     return None
-
 
 _embed_cache: dict[str, np.ndarray] = {}
 def embed_cached(text: str):
@@ -350,27 +305,6 @@ def embed_cached(text: str):
     vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
     _embed_cache[t] = vec
     return vec
-# --- Put this above score_dataframe ---
-def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
-    """
-    Prefer an exact question_id match (e.g., LAV_Q1). If not found,
-    fuzzy-match the prompt_hint (or question text) to the known question_texts.
-    """
-    qid = (qid or "").strip()
-    if qid and qid in q_centroids:
-        return qid
-
-    hint = clean(prompt_hint or "")
-    if not hint or not question_texts:
-        return None
-
-    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio)
-    if match and match[1] >= FUZZY_THRESHOLD:
-        wanted = match[0]
-        for k, pack in by_qkey.items():
-            if clean(pack.get("question_text", "")) == wanted:
-                return k
-    return None
 
 # ==============================
 # SCORING
@@ -381,7 +315,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    with st.expander("🔎 Debug: Leadership section columns present", expanded=False):
+    with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
         sample_cols = [c for c in df_cols if "/A" in c or "Leadership/" in c or c.startswith("A")]
         st.write(sample_cols[:80])
 
@@ -546,7 +480,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Leadership")
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Leadership")
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
@@ -636,7 +570,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # PAGE ENTRYPOINT
 # ==============================
 def main():
-    st.title("Thought Leadership")
+    st.title("📊    Leadership Scoring: Kobo → Scored Excel / Google Sheets")
 
     if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
         try:
@@ -676,7 +610,7 @@ def main():
         st.download_button(
             "⬇️ Download Excel",
             data=to_excel_bytes(scored_df),
-            file_name="Thoughtleadership_Scoring.xlsx",
+            file_name="Advisory_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -688,5 +622,3 @@ def main():
             if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
                 show_status(ok, msg)
-
-
