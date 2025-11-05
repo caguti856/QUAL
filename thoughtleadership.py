@@ -481,7 +481,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Leadership")
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Thought Leadership")
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
