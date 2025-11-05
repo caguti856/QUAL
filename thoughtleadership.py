@@ -170,7 +170,7 @@ def build_kobo_base_from_qid(question_id: str) -> str | None:
     if prefix not in QID_PREFIX_TO_SECTION:
         return None
     section = QID_PREFIX_TO_SECTION[prefix]
-    return f"Leadership/{section}_Section/{section}_{qn}"
+    return f"Thought Leadership/{section}_Section/{section}_{qn}"
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base:
@@ -196,7 +196,7 @@ def _score_kobo_header(col: str, token: str) -> int:
     if t in c:              score = max(score, 80)
     if "english" in c or "label" in c: score += 3
     if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
-    if "thoughtleadership/" in c or "/a" in c: score += 1
+    if "Thought Leadership/" in c or "/a" in c: score += 1
     return score
 
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
@@ -315,9 +315,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    with st.expander("🔎 Debug: Leadership section columns present", expanded=False):
+    with st.expander("🔎 Debug: Thought Leadership section columns present", expanded=False):
 
-        sample_cols = [c for c in df_cols if "/A" in c or "Leadership/" in c or c.startswith("A")]
+        sample_cols = [c for c in df_cols if "/T" in c or "Thought Leadership/" in c or c.startswith("T")]
         st.write(sample_cols[:80])
 
     staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id" or c.strip().lower()=="staff_id"), None)
