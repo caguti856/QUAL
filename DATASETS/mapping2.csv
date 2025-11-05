@@ -1,0 +1,17 @@
+column,question_id,attribute,match_score
+"Looking back at the first rollout, what did we get wrong or miss, and how will you test your updated assumptions in the next two weeks? Be specific about what you’ll measure and the stop/continue criteria.",LA_Q1,Learning Agility,90
+"Design a 30-day learning plan: what hypotheses will you run, what evidence would change your mind, and what will you stop doing to create bandwidth for learning?",LA_Q2,Learning Agility,90
+"Rumors on WhatsApp spiked after the rainy-day outage. How do you treat rumors as data—what listening posts and feedback loops do you set, and how does that change your next iteration?",LA_Q3,Learning Agility,90
+"Older/low-literacy women felt excluded. Describe how you will observe, learn, and adapt the experience with them (not for them) within one market cycle.”",LA_Q4,Learning Agility,90
+"Compare USSD + offline + mini-printer vs. a telco-exclusive app on inclusion, resilience, cost of ownership, and data protection. Which stack do you recommend for the next sprint and why?",DS_Q1,Digital Savvy,90
+"Draft a low-literacy consent flow (e.g., Lusoga audio + opt-out) that works offline and remains auditable when data syncs later.”",DS_Q2,Digital Savvy,90
+"On another network-down day, walk through your offline-first operating protocol—from capturing transactions to recovery/sync and user receipts.”",DS_Q3,Digital Savvy,90
+"A small logging bug is found. Outline your disclosure and remediation plan: who you tell, what you publish, and how you prevent recurrence.",DS_Q4,Digital Savvy,90
+"Design a two-market experiment comparing Prototype A and B: caps, success thresholds, and go/no-go rules. What would count as a surprising result, and how would you act on it?",IN_Q1,Innovation,90
+"Propose one frugal innovation that improves inclusion without new capex (e.g., tokens, shared printers, peer navigators). How will you test it in one week?",IN_Q2,Innovation,90
+How will you co-create with market mamas and buyers so they help define the next iteration? Describe the session and what artifacts you’ll produce.,IN_Q3,Innovation,90
+"Draft a brief, public ‘we heard, we changed’ update after the sprint—what three changes will you highlight and why?",IN_Q4,Innovation,90
+"Map key actors (district, telco, brokers, church leaders, buyers, police) and election-season incentives. Identify three red lines and how you’ll negotiate them into the MoU.",IN_Q1,Contextual Intelligence,90
+"A stall leader hints at a facilitation. Explain your steps to refuse, document, and protect relationships while safeguarding the program.",IN_Q2,Contextual Intelligence,90
+"District wants fees integration. Propose governance guardrails so integration doesn’t silence women’s voice (e.g., opt-in, community oversight, data-sharing limits).",IN_Q3,Contextual Intelligence,90
+"Plan a coalition radio segment to rebuild trust. Who speaks, what are the three messages, and how do you know it’s working beyond likes/calls?",IN_Q4,Contextual Intelligence,90
