@@ -7,6 +7,7 @@ st.set_page_config(page_title="Thematic Analytics",  layout="wide")
 # === PAGES (make sure advisory.py exists in the same folder or is importable)
 import advisory  # must define advisory.main()
 import thoughtleadership
+import growthmindset
 # ----- optional cover -----
 COVER_HTML = """
 <div style="font-family: Inter, sans-serif; background:#f6f7f8; height: 100vh; display:flex; flex-direction:column; justify-content:space-between; text-align:center; color:#101922; padding:2rem 3rem;">
@@ -37,7 +38,7 @@ def main() -> None:
     with st.sidebar:
         selected = st.selectbox(
             "Navigation",
-            options=["Advisory", "Thought Leadership"],  # <-- SINGLE list
+            options=["Advisory", "Thought Leadership","Growth Mindset"],  # <-- SINGLE list
             index=0,
         )
 
@@ -46,5 +47,7 @@ def main() -> None:
         advisory.main()
     elif selected == "Thought Leadership":
         thoughtleadership.main()
+    elif selected == "Growth Mindset":
+        growthmindset.main()  
 if __name__ == "__main__":
     main()
