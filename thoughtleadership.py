@@ -315,7 +315,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
+    with st.expander("🔎 Debug: Leadership section columns present", expanded=False):
+
         sample_cols = [c for c in df_cols if "/A" in c or "Leadership/" in c or c.startswith("A")]
         st.write(sample_cols[:80])
 
