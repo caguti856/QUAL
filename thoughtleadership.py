@@ -92,12 +92,31 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"mapping file not found: {path}")
     m = pd.read_csv(path) if path.suffix.lower()==".csv" else pd.read_excel(path)
+    # normalise columns
     m.columns = [c.lower().strip() for c in m.columns]
     assert {"column","question_id","attribute"}.issubset(m.columns), \
         "mapping must have: column, question_id, attribute"
-    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
-    m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
-    return m
+    if "prompt_hint" not in m.columns: 
+        m["prompt_hint"] = ""
+
+    # robust attribute normalisation
+    norm = lambda s: re.sub(r"\s+"," ", str(s).strip().lower())
+    target = {norm(a): a for a in ORDERED_ATTRS}
+    m["attribute_norm"] = m["attribute"].map(norm)
+
+    # keep rows whose normalised name is close to any ORDERED_ATTRS (≥75)
+    def snap_attr(a):
+        key = norm(a)
+        if key in target: 
+            return target[key]
+        # fuzzy snap
+        best = process.extractOne(key, list(target.keys()), scorer=fuzz.token_set_ratio)
+        return target[best[0]] if best and best[1] >= 75 else None
+
+    m["attribute"] = m["attribute"].apply(snap_attr)
+    m = m[m["attribute"].notna()].copy()
+    return m.drop(columns=["attribute_norm"], errors="ignore")
+
 
 def read_jsonl_path(path: Path) -> list[dict]:
     if not path.exists():
@@ -199,17 +218,18 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
 def _score_kobo_header(col: str, token: str) -> int:
     c = col.lower()
     t = token.lower()
-    if c == t:
-        return 100
+    if c == t: return 100
     score = 0
     if c.endswith("/" + t): score = max(score, 95)
     if f"/{t}/" in c:       score = max(score, 92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: score = max(score, 90)
     if t in c:              score = max(score, 80)
-    if "english" in c or "label" in c: score += 3
-    if "answer (text)" in c or "answer_text" in c or "text" in c: score += 2
-    if "thought leadership/" in c or "leadership/" in c: score += 1   # 👈 NO “advisory/”
+    # new common Kobo variants
+    if "english" in c or "label" in c or "(en)" in c: score += 5
+    if "answer (text)" in c or "answer_text" in c or "text" in c: score += 5
+    if "thought leadership/" in c or "leadership/" in c or "/a" in c: score += 2
     return score
+
 
 
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
@@ -257,23 +277,11 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
         for col, score, _ in hits:
-            if score >= 88:
+            if score >= 80:
                 return col
 
     return None
-    # --- DRY RUN: show first 3 rows of extracted answers ---
-    if not df.empty:
-        preview_rows = []
-        all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
-        for i in range(min(3, len(df))):
-            sample = {"_row": i}
-            for r in all_mapping:
-                qid = r["question_id"]
-                col = resolved_for_qid.get(qid)
-                sample[qid] = clean(df.iloc[i].get(col, "")) if col else ""
-            preview_rows.append(sample)
-        st.caption("👀 Dry-run extract (first 3 rows) — if these are blank, resolution is the issue.")
-        st.dataframe(pd.DataFrame(preview_rows))
+    
 
 
 # ==============================
