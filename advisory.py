@@ -748,53 +748,125 @@ def run_pipeline_auto():
 # ==============================
 # PAGE ENTRYPOINT
 # ==============================
-def run_pipeline_auto():
-    st.title("📊 Advisory Scoring (Auto)")
+def main():
+    st.title("📊 Advisory Scoring: Kobo → Scored Excel / Google Sheets")
 
-    # Controls (via secrets)
-    AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", True))
-    AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", True))
-    REFRESH_TTL = int(st.secrets.get("AUTO_REFRESH_TTL_SEC", 0))  # 0 = no auto-refresh cache window
+    # --- NEW: simple toggles via secrets ---
+    AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))   # set to true in secrets to auto-run
+    AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))  # set to true in secrets to auto-push
 
-    if not AUTO_RUN:
-        st.info("AUTO_RUN is disabled in secrets. Set AUTO_RUN=true to run automatically.")
-        return
+    # --- NEW: guard so it only auto-runs once per session ---
+    if AUTO_RUN and not st.session_state.get("auto_ran_once", False):
+        st.session_state["auto_ran_once"] = True
 
-    with st.status("Running pipeline…", expanded=True) as status:
-        st.write("1) Loading mapping & exemplars")
-        mapping = load_mapping_from_path(MAPPING_PATH)
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars:
-            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-            status.update(label="Failed", state="error")
+        # === This block is your "🚀 Fetch Kobo & Score" button, just run it directly ===
+        try:
+            mapping = load_mapping_from_path(MAPPING_PATH)
+        except Exception as e:
+            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
             st.stop()
 
-        st.write("2) Building semantic centroids")
-        q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+        try:
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+                st.stop()
+        except Exception as e:
+            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
+            st.stop()
 
-        st.write("3) Fetching Kobo data")
-        df = fetch_kobo_dataframe()
+        with st.spinner("Building semantic centroids..."):
+            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+
+        with st.spinner("Fetching Kobo submissions..."):
+            df = fetch_kobo_dataframe()
+
         if df.empty:
             st.warning("No Kobo submissions found.")
-            status.update(label="No data", state="warning")
             st.stop()
 
-        # Optional: cache the scoring output so reloads within TTL don't re-push
-        @st.cache_data(ttl=REFRESH_TTL if REFRESH_TTL > 0 else None, show_spinner=False)
-        def _score_once(_df):
-            return score_dataframe(_df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
+        st.caption("Fetched sample:")
+        st.dataframe(df.head(), use_container_width=True)
 
-        st.write("4) Scoring responses")
-        scored_df = _score_once(df)
-        st.dataframe(scored_df.head(25), use_container_width=True)
+        with st.spinner("Scoring responses..."):
+            scored_df = score_dataframe(
+                df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
+            )
 
-        # 🔴 No star schema, no dim/fact sheets anymore
+        st.success("✅ Scoring complete.")
+        st.dataframe(scored_df.head(50), use_container_width=True)
+        st.session_state["scored_df"] = scored_df
 
+        # Offer download even in auto mode
+        st.download_button(
+            "⬇️ Download Excel",
+            data=to_excel_bytes(scored_df),
+            file_name="Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+        # === NEW: auto-push to the single Advisory worksheet (your existing function) ===
         if AUTO_PUSH:
-            st.write("5) Pushing scored table to Google Sheets (single worksheet)")
-            ok, msg = upload_df_to_gsheets(scored_df)  # writes to DEFAULT_WS_NAME ("Advisory")
+            with st.spinner("📤 Sending scored table to Google Sheets..."):
+                ok, msg = upload_df_to_gsheets(scored_df)
             show_status(ok, msg)
-        else:
-            st.info("AUTO_PUSH is disabled in secrets. Set AUTO_PUSH=true to push automatically.")
 
-        status.update(label="Pipeline complete", state="complete")
+    # --- Keep your original manual UI for when AUTO_RUN/AUTO_PUSH are false ---
+    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+        try:
+            mapping = load_mapping_from_path(MAPPING_PATH)
+        except Exception as e:
+            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
+            st.stop()
+
+        try:
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+                st.stop()
+        except Exception as e:
+            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
+            st.stop()
+
+        with st.spinner("Building semantic centroids..."):
+            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+
+        with st.spinner("Fetching Kobo submissions..."):
+            df = fetch_kobo_dataframe()
+
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            st.stop()
+
+        st.caption("Fetched sample:")
+        st.dataframe(df.head(), use_container_width=True)
+
+        with st.spinner("Scoring responses..."):
+            scored_df = score_dataframe(
+                df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
+            )
+
+        st.success("✅ Scoring complete.")
+        st.dataframe(scored_df.head(50), use_container_width=True)
+        st.session_state["scored_df"] = scored_df
+        st.download_button(
+            "⬇️ Download Excel",
+            data=to_excel_bytes(scored_df),
+            file_name="Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
+        with st.expander("Google Sheets export", expanded=True):
+            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
+            st.write("Worksheet name:", DEFAULT_WS_NAME)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
+                    ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
+                    show_status(ok, msg)
+            # Optional: show whether auto flags are active
+            with col2:
+                st.caption(f"AUTO_RUN={AUTO_RUN}, AUTO_PUSH={AUTO_PUSH}")
