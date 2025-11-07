@@ -567,60 +567,191 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+def build_star_schema_from_scored(scored: pd.DataFrame):
+    import numpy as np
+    import pandas as pd
+
+    cols = list(scored.columns)
+    qn_score_cols = [c for c in cols if "_Qn" in c and not c.endswith(")")]
+    avg_cols = [c for c in cols if c.endswith("_Avg (0–3)")]
+
+    def attr_from_score_col(c): return c.split("_Qn")[0]
+    attributes = sorted(set([attr_from_score_col(c) for c in qn_score_cols]) |
+                        set([c.replace("_Avg (0–3)", "") for c in avg_cols]))
+
+    # Fact: per-question
+    qrows = []
+    for c in qn_score_cols:
+        attr = attr_from_score_col(c)
+        qn = int(c.split("_Qn")[1])
+        rubric_col = f"{attr}_Rubric_Qn{qn}"
+        r = scored[["ID","Staff ID"]].copy()
+        r["Attribute"] = attr
+        r["QuestionNo"] = qn
+        r["Score"] = scored[c]
+        r["RubricBand"] = scored[rubric_col] if rubric_col in scored.columns else np.nan
+        qrows.append(r)
+    fact_question = pd.concat(qrows, ignore_index=True) if qrows else pd.DataFrame(
+        columns=["ID","Staff ID","Attribute","QuestionNo","Score","RubricBand"]
+    )
+
+    # Fact: per-attribute
+    arows = []
+    for attr in attributes:
+        avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"
+        if avg_col in scored.columns or rank_col in scored.columns:
+            r = scored[["ID","Staff ID"]].copy()
+            r["Attribute"] = attr
+            r["AvgScore"] = scored.get(avg_col)
+            r["RankBand"] = scored.get(rank_col)
+            arows.append(r)
+    fact_attribute = pd.concat(arows, ignore_index=True) if arows else pd.DataFrame(
+        columns=["ID","Staff ID","Attribute","AvgScore","RankBand"]
+    )
+
+    # Submission-level
+    sub_cols = ["ID","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]
+    for c in sub_cols:
+        if c not in scored.columns: scored[c] = np.nan
+    submission = scored[sub_cols].copy()
+
+    # Date dim
+    def _to_dt(x):
+        try: return pd.to_datetime(x)
+        except: return pd.NaT
+    submission["DateTimeUTC"] = submission["ID"].apply(_to_dt)
+    submission["date_key"] = submission["DateTimeUTC"].dt.strftime("%Y%m%d").astype("Int64")
+
+    dim_date = submission[["date_key","DateTimeUTC"]].dropna(subset=["date_key"]).drop_duplicates().copy()
+    if not dim_date.empty:
+        dt = pd.to_datetime(dim_date["DateTimeUTC"])
+        dim_date["year"] = dt.dt.year
+        dim_date["quarter"] = dt.dt.quarter
+        dim_date["month"] = dt.dt.month
+        dim_date["day"] = dt.dt.day
+        dim_date["week"] = dt.dt.isocalendar().week.astype(int)
+        dim_date["dow"] = dt.dt.dayofweek
+        dim_date["month_name"] = dt.dt.month_name()
+        dim_date["dow_name"] = dt.dt.day_name()
+
+    # Dims with surrogate keys
+    dim_staff = submission[["Staff ID"]].rename(columns={"Staff ID":"staff_natural_key"}).drop_duplicates()
+    dim_staff["staff_key"] = dim_staff["staff_natural_key"].astype("category").cat.codes + 1
+    dim_staff = dim_staff[["staff_key","staff_natural_key"]]
+
+    dim_attribute = pd.DataFrame({"attribute_name": attributes})
+    if not dim_attribute.empty:
+        dim_attribute["attribute_key"] = dim_attribute["attribute_name"].astype("category").cat.codes + 1
+        dim_attribute = dim_attribute[["attribute_key","attribute_name"]]
+
+    # Map keys into facts
+    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"]))
+    attr_map = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"]))
+
+    submission["staff_key"] = submission["Staff ID"].map(staff_map)
+
+    fact_attribute = (fact_attribute
+        .assign(staff_key=fact_attribute["Staff ID"].map(staff_map),
+                attribute_key=fact_attribute["Attribute"].map(attr_map))
+        .merge(submission[["ID","date_key"]], on="ID", how="left")
+        [["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
+    )
+
+    fact_question = (fact_question
+        .assign(staff_key=fact_question["Staff ID"].map(staff_map),
+                attribute_key=fact_question["Attribute"].map(attr_map))
+        .merge(submission[["ID","date_key"]], on="ID", how="left")
+        [["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
+    )
+
+    submission_out = submission[["ID","date_key","staff_key","Duration_min",
+                                 "Overall Total (0–24)","Overall Rank","AI_suspected"]]
+
+    return {
+        "fact_attribute": fact_attribute,
+        "fact_question": fact_question,
+        "dim_staff": dim_staff,
+        "dim_attribute": dim_attribute,
+        "dim_date": dim_date,
+        "submission": submission_out,
+    }
+def run_pipeline_auto():
+    import pandas as pd
+    st.title("📊 Advisory Scoring (Auto)")
+
+    # Controls (via secrets)
+    AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", True))
+    AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", True))
+    REFRESH_TTL = int(st.secrets.get("AUTO_REFRESH_TTL_SEC", 0))  # 0 = no auto-refresh cache window
+
+    if not AUTO_RUN:
+        st.info("AUTO_RUN is disabled in secrets. Set AUTO_RUN=true to run automatically.")
+        return
+
+    with st.status("Running pipeline…", expanded=True) as status:
+        st.write("1) Loading mapping & exemplars")
+        mapping = load_mapping_from_path(MAPPING_PATH)
+        exemplars = read_jsonl_path(EXEMPLARS_PATH)
+        if not exemplars:
+            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+            status.update(label="Failed", state="error")
+            st.stop()
+
+        st.write("2) Building semantic centroids")
+        q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+
+        st.write("3) Fetching Kobo data")
+        df = fetch_kobo_dataframe()
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            status.update(label="No data", state="warning")
+            st.stop()
+
+        # Optional: cache the scoring output so reloads within TTL don't re-push
+        @st.cache_data(ttl=REFRESH_TTL if REFRESH_TTL > 0 else None, show_spinner=False)
+        def _score_once(_df):
+            return score_dataframe(_df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
+
+        st.write("4) Scoring responses")
+        scored_df = _score_once(df)
+        st.dataframe(scored_df.head(25), use_container_width=True)
+
+        st.write("5) Building star schema")
+        tables = build_star_schema_from_scored(scored_df)
+
+        if AUTO_PUSH:
+            st.write("6) Pushing star schema to Google Sheets")
+            ws = _open_ws_by_key()
+            sh = ws.spreadsheet
+            for title, tdf in tables.items():
+                try:
+                    w = sh.worksheet(title)
+                except gspread.WorksheetNotFound:
+                    w = sh.add_worksheet(title=title, rows="20000", cols="200")
+                header = tdf.columns.astype(str).tolist()
+                values = tdf.astype(object).where(pd.notna(tdf), "").values.tolist()
+                w.clear()
+                col_end = _to_a1_col(len(header))
+                sh.values_batch_update(body={
+                    "valueInputOption":"USER_ENTERED",
+                    "data":[{"range": f"'{title}'!A1:{col_end}{len(values)+1}",
+                             "values":[header] + values}]
+                })
+                _post_write_formatting(w, len(header))
+
+            st.success("✅ Star schema tables written to Google Sheets.")
+        else:
+            st.info("AUTO_PUSH is disabled in secrets. Set AUTO_PUSH=true to push automatically.")
+
+        status.update(label="Pipeline complete", state="complete")
 
 # ==============================
 # PAGE ENTRYPOINT
 # ==============================
 def main():
     st.title("📊 Advisory Scoring: Kobo → Scored Excel / Google Sheets")
+    # Runs end-to-end automatically and pushes to Google Sheets.
+    # Requires run_pipeline_auto() from my previous message.
+    run_pipeline_auto()
 
-    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
-        try:
-            mapping = load_mapping_from_path(MAPPING_PATH)
-        except Exception as e:
-            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
-            st.stop()
-
-        try:
-            exemplars = read_jsonl_path(EXEMPLARS_PATH)
-            if not exemplars:
-                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-                st.stop()
-        except Exception as e:
-            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
-            st.stop()
-
-        with st.spinner("Building semantic centroids..."):
-            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
-
-        with st.spinner("Fetching Kobo submissions..."):
-            df = fetch_kobo_dataframe()
-
-        if df.empty:
-            st.warning("No Kobo submissions found.")
-            st.stop()
-
-        st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
-
-        with st.spinner("Scoring responses..."):
-            scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
-
-        st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True)
-        st.session_state["scored_df"] = scored_df
-        st.download_button(
-            "⬇️ Download Excel",
-            data=to_excel_bytes(scored_df),
-            file_name="Advisory_Scoring.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
-        with st.expander("Google Sheets export", expanded=True):
-            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-            st.write("Worksheet name:", DEFAULT_WS_NAME)
-            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
-                ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                show_status(ok, msg)
+     
