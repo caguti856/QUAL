@@ -675,7 +675,6 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         "dim_date": dim_date,
         "submission": submission_out,
     }
-import time
 from gspread.exceptions import APIError, WorksheetNotFound
 
 def _open_spreadsheet_by_key() -> gspread.Spreadsheet:
@@ -686,31 +685,28 @@ def _open_spreadsheet_by_key() -> gspread.Spreadsheet:
     try:
         return gc.open_by_key(key)
     except gspread.SpreadsheetNotFound:
-        raise ValueError(f"Spreadsheet with key '{key}' not found or not shared with the service account.")
+        raise ValueError(
+            "Spreadsheet not found or not shared with the service account. "
+            "Share it with the service account email (Editor)."
+        )
 
 def _safe_get_or_create_ws(sh: gspread.Spreadsheet, title: str, rows: int = 5000, cols: int = 100) -> gspread.Worksheet:
-    # 1) If exists, open it
+    t = (title or "Sheet")[:100]
+    # Try to open
     try:
-        return sh.worksheet(title)
+        return sh.worksheet(t)
     except WorksheetNotFound:
         pass
-
-    # 2) Otherwise create (with a little retry for transient errors / concurrency)
-    backoff = 1.0
-    for _ in range(5):
+    # Create, then open (handles concurrency)
+    try:
+        sh.add_worksheet(title=t, rows=str(rows), cols=str(cols))
+    except APIError:
+        # If a concurrent run created it meanwhile, try to open again
         try:
-            return sh.add_worksheet(title=title[:100], rows=str(rows), cols=str(cols))
-        except APIError as e:
-            # If a concurrent run created it meanwhile, open it
-            try:
-                return sh.worksheet(title)
-            except WorksheetNotFound:
-                msg = str(e)
-                if any(x in msg for x in ["429", "Rate Limit", "Internal error", "500", "503"]):
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 8.0)
-                    continue
-                raise
+            return sh.worksheet(t)
+        except WorksheetNotFound:
+            raise
+    return sh.worksheet(t)
 
 def _write_whole_dataframe(ws: gspread.Worksheet, df: pd.DataFrame) -> None:
     header = df.columns.astype(str).tolist()
@@ -726,69 +722,83 @@ def _write_whole_dataframe(ws: gspread.Worksheet, df: pd.DataFrame) -> None:
     })
     _post_write_formatting(ws, len(header))
 
+
 def run_pipeline_auto():
-    
     st.title("📊 Advisory Scoring (Auto)")
 
     # Controls (via secrets)
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", True))
     AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", True))
-    REFRESH_TTL = int(st.secrets.get("AUTO_REFRESH_TTL_SEC", 0))  # 0 = no auto-refresh cache window
+    REFRESH_TTL = int(st.secrets.get("AUTO_REFRESH_TTL_SEC", 0))  # 0 = no cache window
 
     if not AUTO_RUN:
         st.info("AUTO_RUN is disabled in secrets. Set AUTO_RUN=true to run automatically.")
         return
 
     with st.status("Running pipeline…", expanded=True) as status:
-        st.write("1) Loading mapping & exemplars")
-        mapping = load_mapping_from_path(MAPPING_PATH)
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars:
-            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+        try:
+            st.write("1) Loading mapping & exemplars")
+            mapping = load_mapping_from_path(MAPPING_PATH)
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                raise RuntimeError(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+
+            st.write("2) Building semantic centroids")
+            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+
+            st.write("3) Fetching Kobo data")
+            df = fetch_kobo_dataframe()
+            if df.empty:
+                status.update(label="No data", state="warning")
+                st.warning("No Kobo submissions found.")
+                return
+
+            # Cache scoring result (optional)
+            @st.cache_data(ttl=REFRESH_TTL if REFRESH_TTL > 0 else None, show_spinner=False)
+            def _score_once(_df):
+                return score_dataframe(_df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
+
+            st.write("4) Scoring responses")
+            scored_df = _score_once(df)
+            st.dataframe(scored_df.head(25), use_container_width=True)
+
+            st.write("5) Building star schema")
+            tables = build_star_schema_from_scored(scored_df)
+
+            if AUTO_PUSH:
+                st.write("6) Pushing star schema to Google Sheets")
+                sh = _open_spreadsheet_by_key()
+
+                # Show existing tabs (debug)
+                try:
+                    existing_tabs = [ws.title for ws in sh.worksheets()]
+                    st.caption(f"Existing tabs: {existing_tabs}")
+                except Exception:
+                    pass  # non-fatal
+
+                for title, tdf in tables.items():
+                    safe_title = title[:100]  # Sheets tab name limit
+                    w = _safe_get_or_create_ws(sh, safe_title, rows=5000, cols=100)
+                    _write_whole_dataframe(w, tdf)
+
+                st.success("✅ Star schema tables written to Google Sheets (facts + dims).")
+            else:
+                st.info("AUTO_PUSH is disabled in secrets. Set AUTO_PUSH=true to push automatically.")
+
+            status.update(label="Pipeline complete", state="complete")
+
+        except FileNotFoundError as e:
             status.update(label="Failed", state="error")
-            st.stop()
+            st.error(f"❌ File not found: {e}")
+        except (APIError, WorksheetNotFound) as e:
+            status.update(label="Google Sheets error", state="error")
+            st.error("❌ Google Sheets error. Check that the spreadsheet is shared with the "
+                     "service account (Editor) and GSHEETS_SPREADSHEET_KEY is correct.")
+            st.exception(e)
+        except Exception as e:
+            status.update(label="Failed", state="error")
+            st.exception(e)
 
-        st.write("2) Building semantic centroids")
-        q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
-
-        st.write("3) Fetching Kobo data")
-        df = fetch_kobo_dataframe()
-        if df.empty:
-            st.warning("No Kobo submissions found.")
-            status.update(label="No data", state="warning")
-            st.stop()
-
-        # Optional: cache the scoring output so reloads within TTL don't re-push
-        @st.cache_data(ttl=REFRESH_TTL if REFRESH_TTL > 0 else None, show_spinner=False)
-        def _score_once(_df):
-            return score_dataframe(_df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
-
-        st.write("4) Scoring responses")
-        scored_df = _score_once(df)
-        st.dataframe(scored_df.head(25), use_container_width=True)
-
-        st.write("5) Building star schema")
-        tables = build_star_schema_from_scored(scored_df)
-
-        st.write("6) Pushing star schema to Google Sheets")
-
-        # Open the spreadsheet itself (not one tab)
-        sh = _open_spreadsheet_by_key()
-
-        # (Optional) log existing tabs for debugging
-        existing_tabs = [ws.title for ws in sh.worksheets()]
-        st.caption(f"Existing tabs: {existing_tabs}")
-
-        # Create/update each required tab
-        for title, tdf in tables.items():
-            safe_title = title[:100]  # Sheets tab name limit
-            w = _safe_get_or_create_ws(sh, safe_title, rows=5000, cols=100)
-            _write_whole_dataframe(w, tdf)
-
-        st.success("✅ Star schema tables written to Google Sheets (facts + dims).")
-
-
-        status.update(label="Pipeline complete", state="complete")
 
 # ==============================
 # PAGE ENTRYPOINT
