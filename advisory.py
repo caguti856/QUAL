@@ -675,8 +675,59 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         "dim_date": dim_date,
         "submission": submission_out,
     }
+import time
+from gspread.exceptions import APIError, WorksheetNotFound
+
+def _open_spreadsheet_by_key() -> gspread.Spreadsheet:
+    key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
+    if not key:
+        raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
+    gc = gs_client()
+    try:
+        return gc.open_by_key(key)
+    except gspread.SpreadsheetNotFound:
+        raise ValueError(f"Spreadsheet with key '{key}' not found or not shared with the service account.")
+
+def _safe_get_or_create_ws(sh: gspread.Spreadsheet, title: str, rows: int = 5000, cols: int = 100) -> gspread.Worksheet:
+    # 1) If exists, open it
+    try:
+        return sh.worksheet(title)
+    except WorksheetNotFound:
+        pass
+
+    # 2) Otherwise create (with a little retry for transient errors / concurrency)
+    backoff = 1.0
+    for _ in range(5):
+        try:
+            return sh.add_worksheet(title=title[:100], rows=str(rows), cols=str(cols))
+        except APIError as e:
+            # If a concurrent run created it meanwhile, open it
+            try:
+                return sh.worksheet(title)
+            except WorksheetNotFound:
+                msg = str(e)
+                if any(x in msg for x in ["429", "Rate Limit", "Internal error", "500", "503"]):
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 8.0)
+                    continue
+                raise
+
+def _write_whole_dataframe(ws: gspread.Worksheet, df: pd.DataFrame) -> None:
+    header = df.columns.astype(str).tolist()
+    values = df.astype(object).where(pd.notna(df), "").values.tolist()
+    col_end = _to_a1_col(len(header))
+    ws.clear()
+    ws.spreadsheet.values_batch_update(body={
+        "valueInputOption": "USER_ENTERED",
+        "data": [{
+            "range": f"'{ws.title}'!A1:{col_end}{len(values)+1}",
+            "values": [header] + values
+        }]
+    })
+    _post_write_formatting(ws, len(header))
+
 def run_pipeline_auto():
-    import pandas as pd
+    
     st.title("📊 Advisory Scoring (Auto)")
 
     # Controls (via secrets)
@@ -719,29 +770,23 @@ def run_pipeline_auto():
         st.write("5) Building star schema")
         tables = build_star_schema_from_scored(scored_df)
 
-        if AUTO_PUSH:
-            st.write("6) Pushing star schema to Google Sheets")
-            ws = _open_ws_by_key()
-            sh = ws.spreadsheet
-            for title, tdf in tables.items():
-                try:
-                    w = sh.worksheet(title)
-                except gspread.WorksheetNotFound:
-                    w = sh.add_worksheet(title=title, rows="20000", cols="200")
-                header = tdf.columns.astype(str).tolist()
-                values = tdf.astype(object).where(pd.notna(tdf), "").values.tolist()
-                w.clear()
-                col_end = _to_a1_col(len(header))
-                sh.values_batch_update(body={
-                    "valueInputOption":"USER_ENTERED",
-                    "data":[{"range": f"'{title}'!A1:{col_end}{len(values)+1}",
-                             "values":[header] + values}]
-                })
-                _post_write_formatting(w, len(header))
+        st.write("6) Pushing star schema to Google Sheets")
 
-            st.success("✅ Star schema tables written to Google Sheets.")
-        else:
-            st.info("AUTO_PUSH is disabled in secrets. Set AUTO_PUSH=true to push automatically.")
+        # Open the spreadsheet itself (not one tab)
+        sh = _open_spreadsheet_by_key()
+
+        # (Optional) log existing tabs for debugging
+        existing_tabs = [ws.title for ws in sh.worksheets()]
+        st.caption(f"Existing tabs: {existing_tabs}")
+
+        # Create/update each required tab
+        for title, tdf in tables.items():
+            safe_title = title[:100]  # Sheets tab name limit
+            w = _safe_get_or_create_ws(sh, safe_title, rows=5000, cols=100)
+            _write_whole_dataframe(w, tdf)
+
+        st.success("✅ Star schema tables written to Google Sheets (facts + dims).")
+
 
         status.update(label="Pipeline complete", state="complete")
 
