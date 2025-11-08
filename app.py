@@ -72,20 +72,6 @@ COVER_HTML = """
         <p style="margin:0; color:#3B3B48;">Publish clear dashboards for program & MEAL teams.</p>
       </div>
     </div>
-
-    <div style="margin-top:1.6rem; display:flex; gap:.75rem; justify-content:center; flex-wrap:wrap;">
-      <a href="#" style="
-        display:inline-block; text-decoration:none; font-weight:800; letter-spacing:.3px;
-        background: var(--care-orange); color:#fff; padding:.85rem 1.2rem; border-radius:12px;
-        box-shadow: 0 10px 24px rgba(235,113,0,.35), inset 0 -3px 0 rgba(0,0,0,.12);
-        border: 2px solid transparent;
-      " aria-label="Get Started">Get Started</a>
-      <a href="#" style="
-        display:inline-block; text-decoration:none; font-weight:800; letter-spacing:.3px;
-        background: transparent; color:#fff; padding:.85rem 1.2rem; border-radius:12px;
-        border:2px solid rgba(255,255,255,.25);
-      " aria-label="Learn More">Learn more</a>
-    </div>
   </main>
 
   <footer style="font-size:.85rem; color:#CFCFD6; margin-top: .5rem; text-align:center;">
