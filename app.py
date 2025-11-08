@@ -74,44 +74,6 @@ COVER_HTML = """
       ">
         From field voices to reliable evidence.
       </p>
-
-      <!-- feature cards -->
-      <div style="
-        display:grid; gap:18px;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        margin: 28px auto 36px; max-width: 1100px;
-      ">
-        <div style="
-          background: rgba(9,0,21,.75);
-          border:1px solid rgba(255,255,255,.1);
-          border-radius:18px; padding:22px 20px; box-shadow: 0 16px 40px rgba(0,0,0,.25);
-        ">
-          <div style="font-size:28px; margin-bottom:6px;">📝</div>
-          <h3 style="margin:0 0 6px 0; font-size:20px; font-weight:800;">Collect Feedback</h3>
-          <p style="margin:0; color:rgba(255,255,255,.8)">Import data using api and score into different themes using machine learning algorithm.</p>
-        </div>
-
-        <div style="
-          background: rgba(9,0,21,.75);
-          border:1px solid rgba(255,255,255,.1);
-          border-radius:18px; padding:22px 20px; box-shadow: 0 16px 40px rgba(0,0,0,.25);
-        ">
-          <div style="font-size:28px; margin-bottom:6px;">🎯</div>
-          <h3 style="margin:0 0 6px 0; font-size:20px; font-weight:800;">Score Themes</h3>
-          <p style="margin:0; color:rgba(255,255,255,.8)">Apply standardized rubrics to sentiment & evidence strength.</p>
-        </div>
-
-        <div style="
-          background: rgba(9,0,21,.75);
-          border:1px solid rgba(255,255,255,.1);
-          border-radius:18px; padding:22px 20px; box-shadow: 0 16px 40px rgba(0,0,0,.25);
-        ">
-          <div style="font-size:28px; margin-bottom:6px;">📊</div>
-          <h3 style="margin:0 0 6px 0; font-size:20px; font-weight:800;">Share Insights</h3>
-          <p style="margin:0; color:rgba(255,255,255,.8)">Publish clear dashboards for program & MEAL teams.</p>
-        </div>
-      </div>
-
       
     </section>
   </main>
