@@ -64,9 +64,9 @@ COVER_HTML = """
     <div style="display:flex; align-items:center; gap:.75rem;">
       <img src="https://brand.care.org/wp-content/uploads/2017/08/Orange-Horizontal-300x97.png"
            alt="CARE" style="height:28px; display:block"/>
-      <span style="font-weight:700; color:#5B616E;">Thematic Analytics</span>
+     
     </div>
-    <div style="opacity:.85; font-size:.95rem; color:#6B7280;">Qualitative Scoring</div>
+    <div style="opacity:.85; font-size:.95rem; color:#6B7280;">Thematic Analytics</div>
   </header>
 
   <!-- Hero (centered; uses clamp to ALWAYS fit) -->
@@ -94,25 +94,6 @@ COVER_HTML = """
           padding:12px 20px; border-radius:999px; text-decoration:none;
           box-shadow:0 10px 22px rgba(235,113,0,.28);
         ">🚀 Get Started</a>
-      </div>
-
-      <!-- Three orange accent tiles kept compact to avoid overflow -->
-      <div style="
-        display:grid; grid-template-columns:repeat(3,minmax(0,1fr));
-        gap:12px; margin:20px auto 0; padding:0 clamp(8px,3vw,18px); max-width:980px;
-      ">
-        <div style="background:var(--care-orange); color:#fff; border-radius:14px; padding:14px;">
-          <h3 style="margin:.2rem 0 .25rem; font-size:clamp(14px,1.8vw,16px); font-weight:800;">Collect Feedback</h3>
-          <p style="margin:0; opacity:.95; font-size:clamp(12px,1.7vw,14px);">Upload notes & transcripts from the field.</p>
-        </div>
-        <div style="background:var(--care-orange); color:#fff; border-radius:14px; padding:14px;">
-          <h3 style="margin:.2rem 0 .25rem; font-size:clamp(14px,1.8vw,16px); font-weight:800;">Score Themes</h3>
-          <p style="margin:0; opacity:.95; font-size:clamp(12px,1.7vw,14px);">Apply a consistent rubric to sentiment & evidence.</p>
-        </div>
-        <div style="background:var(--care-orange); color:#fff; border-radius:14px; padding:14px;">
-          <h3 style="margin:.2rem 0 .25rem; font-size:clamp(14px,1.8vw,16px); font-weight:800;">Share Insights</h3>
-          <p style="margin:0; opacity:.95; font-size:clamp(12px,1.7vw,14px);">Export clean outputs for MEAL & program teams.</p>
-        </div>
       </div>
     </section>
   </main>
