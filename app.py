@@ -15,116 +15,132 @@ import login
 # Full-bleed, true viewport cover (no scroll, no padding)
 st.markdown("""
 <style>
-/* kill default paddings/margins so our cover can be full-bleed */
-html, body, [data-testid="stAppViewContainer"] {
-  height: 100vh !important;
-  width: 100vw !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  overflow: hidden !important; /* cover is a single screen */
+html, body, [data-testid="stAppViewContainer"]{
+  height:100vh !important; width:100vw !important;
+  padding:0 !important; margin:0 !important; overflow:hidden !important;
 }
-.block-container, section.main, [data-testid="stSidebar"] {
-  padding: 0 !important;
-  margin: 0 !important;
-}
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer {
-  display: none !important;
-}
+.block-container, section.main{ padding:0 !important; margin:0 !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
+
 COVER_HTML = """
 <div style="
-  --care-orange:#EB7100;
-  --care-deep:#090015;
-  --text:#FFFFFF;
-  --muted:#FFE7D1;
-  --card:#090015;
-  --card-text:#FFFFFF;
-  --ring:rgba(9,0,21,0.35);
-  font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  --care-orange:#EB7100;       /* Primary brand */
+  --care-orange-2:#ff8a1f;     /* Lighter stop for gradient */
+  --care-deep:#090015;         /* Accessible deep accent */
+  --text:#fff;
+  --muted:#FFEAD6;             /* Warm, readable supporting text */
+  --card:#0B0716;
+  --ring:rgba(9,0,21,.35);
+  --radius:18px;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 
-  /* ORANGE PRIMARY BACKGROUND that fills the viewport */
-  background:
-    radial-gradient(1200px 700px at 10% -10%, rgba(255,255,255,0.12), transparent 60%),
-    radial-gradient(900px 500px at 95% 20%, rgba(255,255,255,0.08), transparent 55%),
-    linear-gradient(180deg, #F17F1C 0%, var(--care-orange) 55%, #D86400 100%);
-  color: var(--text);
-
-  /* make the section itself 100% of the viewport */
-  height: 100vh; width: 100vw;
+  /* Full-bleed, responsive hero */
+  height:100vh; width:100vw; box-sizing:border-box;
   display:flex; flex-direction:column; justify-content:space-between;
-  padding: 2.25rem 2rem; box-sizing: border-box;
+  padding: clamp(20px, 3vw, 36px);
+  color:var(--text);
+
+  /* Warm orange gradient with subtle glow */
+  background:
+    radial-gradient(1200px 700px at 12% -10%, rgba(255,255,255,.14), transparent 60%),
+    radial-gradient(900px 600px at 92% 15%, rgba(255,255,255,.12), transparent 55%),
+    linear-gradient(180deg, var(--care-orange-2) 0%, var(--care-orange) 60%, #D35F00 100%);
 ">
-  <header style="display:flex; align-items:center; justify-content:center; gap:.75rem;">
-    <div aria-hidden="true" style="width:38px;height:38px;border-radius:10px;background:#FFFFFF; box-shadow:0 8px 24px rgba(0,0,0,.18)"></div>
-    <h1 style="font-size:2.2rem; font-weight:900; margin:0; letter-spacing:.2px;">Thematic Analytics</h1>
+
+  <!-- Top brand bar -->
+  <header style="display:flex; align-items:center; justify-content:center; gap:.85rem;">
+    <div aria-hidden="true" style="
+      width:40px; height:40px; border-radius:12px; background:#fff;
+      box-shadow:0 10px 26px rgba(0,0,0,.22);
+    "></div>
+    <h1 style="margin:0; font-size:clamp(1.4rem, 2.2vw, 2.2rem); font-weight:900; letter-spacing:.2px;">
+      Thematic Analytics
+    </h1>
   </header>
 
-  <main style="display:flex; flex-direction:column; align-items:center; text-align:center; margin:.5rem auto 0; max-width:1000px;">
-    <h2 style="font-size:2.6rem; line-height:1.15; font-weight:900; margin:.25rem 0 1rem;">
+  <!-- Main content -->
+  <main style="max-width:1120px; margin: 0 auto; text-align:center;">
+    <h2 style="
+      margin:.25rem auto 1rem;
+      font-weight:900; line-height:1.08;
+      font-size:clamp(1.8rem, 5vw, 3.2rem);
+      text-shadow:0 2px 0 rgba(0,0,0,.12);
+    ">
       Qualitative Scoring for CARE Program Insights
     </h2>
-    <p style="max-width:760px; font-size:1.1rem; line-height:1.6; color: var(--muted); margin:0 0 1.6rem;">
+
+    <p style="
+      margin:0 auto 1.8rem;
+      max-width:820px; color:var(--muted);
+      font-size:clamp(1rem, 1.4vw, 1.15rem); line-height:1.65;
+    ">
       Collect field feedback, score themes consistently, and turn narratives into evidence—so decisions move faster and impact grows.
     </p>
 
-    <div style="display:flex; flex-wrap:wrap; gap:1rem; justify-content:center;">
-      <div role="group" aria-label="Collect Feedback" style="
-        background:var(--card); color:var(--card-text); border-radius:14px; width:260px; padding:1.25rem 1.2rem;
-        box-shadow: 0 10px 24px rgba(0,0,0,.22); border-top:5px solid #FFFFFF;
+    <!-- Feature cards -->
+    <div style="
+      display:grid; gap:clamp(14px, 2vw, 24px);
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+      align-items:stretch; margin: 0 auto;
+      max-width: 1100px;
+    ">
+      <!-- Card -->
+      <div style="
+        background:var(--card); border-radius:var(--radius);
+        padding: clamp(16px, 2vw, 24px);
+        border:2px solid rgba(255,255,255,.12);
+        box-shadow: 0 14px 38px rgba(0,0,0,.25);
       ">
-        <div style="font-size:1.9rem" aria-hidden="true">📝</div>
-        <h3 style="margin:.35rem 0 .4rem; font-size:1.1rem; font-weight:800;">Collect Feedback</h3>
-        <p style="margin:0; color:#E6E6EE;">Import transcripts, notes, and voice-to-text from the field.</p>
+        <div style="font-size:1.9rem; margin-bottom:.4rem">📝</div>
+        <h3 style="margin:.2rem 0 .35rem; font-size:1.2rem; font-weight:800;">Collect Feedback</h3>
+        <p style="margin:0; color:#E7E7F2">Import transcripts, notes, and voice-to-text from the field.</p>
       </div>
 
-      <div role="group" aria-label="Score Themes" style="
-        background:var(--card); color:var(--card-text); border-radius:14px; width:260px; padding:1.25rem 1.2rem;
-        box-shadow: 0 10px 24px rgba(0,0,0,.22); border-top:5px solid #FFFFFF;
+      <div style="
+        background:var(--card); border-radius:var(--radius);
+        padding: clamp(16px, 2vw, 24px);
+        border:2px solid rgba(255,255,255,.12);
+        box-shadow: 0 14px 38px rgba(0,0,0,.25);
       ">
-        <div style="font-size:1.9rem" aria-hidden="true">🎯</div>
-        <h3 style="margin:.35rem 0 .4rem; font-size:1.1rem; font-weight:800;">Score Themes</h3>
-        <p style="margin:0; color:#E6E6EE;">Apply standardized rubrics to sentiment & evidence strength.</p>
+        <div style="font-size:1.9rem; margin-bottom:.4rem">🎯</div>
+        <h3 style="margin:.2rem 0 .35rem; font-size:1.2rem; font-weight:800;">Score Themes</h3>
+        <p style="margin:0; color:#E7E7F2">Use consistent rubrics for sentiment & evidence strength.</p>
       </div>
 
-      <div role="group" aria-label="Share Insights" style="
-        background:var(--card); color:var(--card-text); border-radius:14px; width:260px; padding:1.25rem 1.2rem;
-        box-shadow: 0 10px 24px rgba(0,0,0,.22); border-top:5px solid #FFFFFF;
+      <div style="
+        background:var(--card); border-radius:var(--radius);
+        padding: clamp(16px, 2vw, 24px);
+        border:2px solid rgba(255,255,255,.12);
+        box-shadow: 0 14px 38px rgba(0,0,0,.25);
       ">
-        <div style="font-size:1.9rem" aria-hidden="true">📊</div>
-        <h3 style="margin:.35rem 0 .4rem; font-size:1.1rem; font-weight:800;">Share Insights</h3>
-        <p style="margin:0; color:#E6E6EE;">Publish clear dashboards for program & MEAL teams.</p>
+        <div style="font-size:1.9rem; margin-bottom:.4rem">📊</div>
+        <h3 style="margin:.2rem 0 .35rem; font-size:1.2rem; font-weight:800;">Share Insights</h3>
+        <p style="margin:0; color:#E7E7F2">Publish clear dashboards for program & MEAL teams.</p>
       </div>
     </div>
 
-    <div style="margin-top:1.6rem; display:flex; gap:.75rem; justify-content:center; flex-wrap:wrap;">
-      <span style="
-        display:inline-block; font-weight:800; letter-spacing:.3px;
-        background: var(--care-deep); color:#fff; padding:.85rem 1.2rem; border-radius:12px;
-        box-shadow: 0 10px 24px rgba(0,0,0,.25); border: 2px solid rgba(255,255,255,.0);
-      ">Get Started</span>
-
-      <span style="
-        display:inline-block; font-weight:800; letter-spacing:.3px;
-        background: transparent; color:#fff; padding:.85rem 1.2rem; border-radius:12px;
-        border:2px solid rgba(255,255,255,.9);
-      ">Learn more</span>
-    </div>
+    <!-- CTAs -->
   </main>
 
-  <footer style="font-size:.85rem; color:#FFE7D1; margin-top:.5rem; text-align:center;">
-    © 2025 CARE Thematic Analytics • High contrast • Keyboard accessible
+  <footer style="
+    color:#FFEAD6; text-align:center; font-size:.9rem; margin-top:.6rem;
+  ">
+    © 2025 CARE Thematic Analytics • WCAG AA contrast • Keyboard accessible
   </footer>
 
   <style>
-    a:focus-visible, button:focus-visible, span:focus-visible {
-      outline: 3px solid var(--ring); outline-offset: 3px; border-radius: 10px;
-      box-shadow: 0 0 0 2px #FFFFFF;
+    /* Responsive grid on small screens */
+    @media (max-width: 980px){
+      main > div { grid-template-columns: 1fr; }
     }
-    @media (max-width: 680px){
-      h2{ font-size: 1.9rem !important; }
+    /* Focus rings for keyboard users */
+    a:focus-visible {
+      outline: 3px solid var(--ring); outline-offset: 3px; border-radius: 12px;
+      box-shadow: 0 0 0 2px #fff;
     }
     @media (prefers-reduced-motion: reduce){
       * { animation: none !important; transition: none !important; }
@@ -132,6 +148,7 @@ COVER_HTML = """
   </style>
 </div>
 """
+
 
 
 
