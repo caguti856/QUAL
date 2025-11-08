@@ -3,7 +3,307 @@ import os
 import base64
 import streamlit as st
 from supabase import create_client, Client
+st.markdown("""
+    <style>
+    /* Remove every possible top/bottom padding or margin */
+    html, body, [data-testid="stAppViewContainer"], section.main, .block-container {
+        padding: 0 !important;
+        margin: 0 !important;
+        height: 100vh !important;
+        overflow: hidden !important;
+    }
 
+    /* Kill Streamlit header and toolbar spacing completely */
+    header, [data-testid="stHeader"], [data-testid="stToolbar"] {
+        display: none !important;
+    }
+    /* Force full height for layout columns */
+    [data-testid="column"] {
+        height: 100vh !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    /* Ensure left image fills completely */
+    .image-container, .image-container img {
+        top: 0 !important;
+        left: 0 !important;
+        bottom: 0 !important;
+        width: 100% !important;
+        height: 100vh !important;
+        object-fit: cover !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    /* Remove Streamlit default blue background (if any remains) */
+    [data-testid="stAppViewContainer"] {
+        background: none !important;
+    }
+    </style>
+ """, unsafe_allow_html=True)
+
+
+# ---------------- BASE STYLING ----------------
+st.markdown("""
+    <style>
+    section.main > div, .block-container {
+    padding:0 !important;
+    margin:0 !important;
+    max-width:100% !important;
+    }
+    [data-testid="stHeader"], [data-testid="stToolbar"], footer { display:none !important; }
+    [data-testid="stAppViewContainer"] { background:#0b0b2a; overflow:hidden; }
+    /* Form and input styling */
+    h2{color:#0f2748 !important;font-weight:800 !important;text-align:center;margin-bottom:.4rem !important;}
+    p{color:#475569 !important;text-align:center;margin-bottom:1.4rem !important;}
+    .stTextInput>div>div>input{
+    border-radius:10px;border:1px solid #cbd5e1;padding:.7rem .9rem;font-size:.95rem;background:#fff;
+    }
+    .stTextInput>div>div>input:focus{
+    border-color:#D3D3D3;box-shadow:0 0 0 3px rgba(17,115,212,.15);
+    }
+    .stButton>button{
+    width:100%;background:linear-gradient(90deg,#D3D3D3,#0f63b5);
+    color:#fff;border:none;padding:.9rem 0;border-radius:10px;
+    font-weight:600;font-size:.95rem;margin-top:1rem;cursor:pointer;transition:all .25s ease;
+    }
+    .stButton>button:hover{
+    transform:translateY(-2px);box-shadow:0 6px 18px rgba(17,115,212,.25);
+    }
+    /* Support link */
+    .dl-support{text-align:center;margin-top:1.5rem;}
+    .dl-support a{color:transparent;text-decoration:none;position:relative;}
+    .dl-support a::after{
+    content:'📧 Contact Support';color:#D3D3D3;font-size:.9rem;cursor:pointer;
+    }
+    .dl-support a:hover::after{text-decoration:underline;}
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* --- Glass blur background for login section --- */
+[data-testid="column"]:nth-child(2) {
+    position: relative !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    height: 100vh !important;
+    background: rgba(255,255,255,0.12);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-left: 1px solid rgba(255,255,255,0.15);
+    box-shadow: inset 0 0 30px rgba(255,255,255,0.05);
+}
+/* --- Add soft glowing edge --- */
+[data-testid="column"]:nth-child(2)::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    width: 6px;
+    background: linear-gradient(180deg, #ffffff60, #ffffff20);
+    box-shadow: 0 0 25px rgba(255,255,255,0.25);
+}
+/* --- Text readability + sizing --- */
+h1, h2, h3 {
+    color: #ffffff !important;
+    font-weight: 800 !important;
+    text-align: center !important;
+    text-shadow: 0 0 10px rgba(0,0,0,0.4);
+}
+h1 { font-size: 2.2rem !important; margin-bottom: 0.4rem !important; }
+h2 { font-size: 1.8rem !important; margin-bottom: 0.4rem !important; }
+h3 { font-size: 1.4rem !important; }
+p, label {
+    color: #f8faff !important;
+    text-shadow: 0 0 10px rgba(0,0,0,0.4);
+    font-size: 1.2rem !important;
+    line-height: 1.6 !important;
+}
+/* --- Input fields --- */
+.stTextInput > div > div > input {
+    background: rgba(255, 255, 255, 0.15) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.35) !important;
+    border-radius: 10px !important;
+    padding: 1rem 1.2rem !important;
+    font-size: 1.1rem !important;
+}
+.stTextInput > div > div > input::placeholder {
+    color: #d9e6ff !important;
+    opacity: 0.8 !important;
+}
+.stTextInput > div > div > input:focus {
+    border-color: #66ccff !important;
+    box-shadow: 0 0 14px rgba(79,195,255,0.5);
+}
+/* --- Buttons --- */
+.stButton > button {
+    background: linear-gradient(90deg, #4fc3ff, #007aff) !important;
+    border: none !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 1.1rem !important;
+    letter-spacing: 0.5px !important;
+    border-radius: 10px !important;
+    padding: 1rem 0 !important;
+    box-shadow: 0 0 25px rgba(79,195,255,0.35);
+}
+.stButton > button:hover {
+    transform: scale(1.05);
+    box-shadow: 0 0 35px rgba(79,195,255,0.55);
+}
+@media (max-width: 900px) {
+    h1 { font-size: 1.8rem !important; }
+    h2 { font-size: 1.5rem !important; }
+    p, label { font-size: 1.05rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+st.markdown("""
+    <style>
+    /* 🔒 Lock full viewport size and stop scroll jump */
+    html, body, [data-testid="stAppViewContainer"] {
+        height: 100vh !important;
+        width: 100vw !important;
+        overflow: hidden !important;
+    }
+    /* 💎 Freeze Streamlit column layout height */
+    [data-testid="stVerticalBlock"] {
+        height: 100vh !important;
+        overflow: hidden !important;
+    }
+    /* 🧩 Disable Streamlit’s rerender scroll reset */
+    [data-testid="stSidebar"], [data-testid="stHeader"], footer {
+        display: none !important;
+    }
+    /* 🌫️ Keep background stable on rerun */
+    [data-testid="stAppViewContainer"] > div:first-child {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 100vw; height: 100vh;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+    <style>
+    /* Lock the main block to one viewport and prevent scroll */
+    .block-container, [data-testid="stVerticalBlock"] {
+    height: 100vh !important;
+    overflow: hidden !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    }
+    /* Reserve space for alerts so height doesn't change on rerun */
+    .stAlert {
+    min-height: 56px;  /* adjust if your messages are taller */
+    }
+    /* Make form labels and helper text brighter on the glass */
+    label, .stMarkdown p {
+    color: #eaf3ff !important;
+    text-shadow: 0 0 6px rgba(0,0,0,0.25);
+    }
+    /* Inputs readable on glass */
+    .stTextInput > div > div > input {
+    background: rgba(255,255,255,0.12) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255,255,255,0.25) !important;
+    }
+    .stTextInput > div > div > input:focus {
+    border-color: #4fc3ff !important;
+    box-shadow: 0 0 10px rgba(79,195,255,0.45) !important;
+    }
+    /* Buttons pop */
+    .stButton > button {
+    background: linear-gradient(90deg, #4fc3ff, #007aff) !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    border: none !important;
+    border-radius: 10px !important;
+    padding: .9rem 0 !important;
+    box-shadow: 0 0 18px rgba(79,195,255,.25) !important;
+    }
+    .stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 22px rgba(79,195,255,.4) !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+    <style>
+    /* === FINAL LAYOUT STABILITY FIX === */
+
+    /* Fix both halves to the viewport (no jump or scroll on rerun) */
+    [data-testid="stAppViewContainer"] > div:first-child {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 100vw !important;
+        height: 100vh !important;
+        overflow: hidden !important;
+        background: #0b0b2a !important;
+    }
+
+    /* Left side image locked */
+    .image-container, .image-container img {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 55vw !important;
+        height: 100vh !important;
+        object-fit: cover !important;
+        filter: brightness(78%);
+        z-index: 1 !important;
+    }
+
+    /* Right glass panel locked next to image */
+    [data-testid="column"]:nth-child(2) {
+        position: fixed !important;
+        right: 0; top: 0;
+        width: 45vw !important;
+        height: 100vh !important;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        backdrop-filter: blur(20px) saturate(180%) !important;
+        -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+        border-left: 1px solid rgba(255,255,255,0.15) !important;
+        box-shadow: inset 0 0 25px rgba(255,255,255,0.05);
+        z-index: 2 !important;
+    }
+
+    /* Slight glow edge between halves */
+    [data-testid="column"]:nth-child(2)::before {
+        content: "";
+        position: absolute;
+        left: 0; top: 0;
+        width: 6px;
+        height: 100%;
+        background: linear-gradient(180deg, #ffffff40, #ffffff10);
+        box-shadow: 0 0 20px rgba(255,255,255,0.2);
+    }
+
+    /* Prevent Streamlit default column gap on rerun */
+    [data-testid="stHorizontalBlock"] {
+        margin: 0 !important;
+        gap: 0 !important;
+    }
+
+    /* Responsive layout: below 900px -> full width form */
+    @media (max-width: 900px) {
+        .image-container { display: none !important; }
+        [data-testid="column"]:nth-child(2) {
+            width: 100vw !important;
+            border-left: none !important;
+            background: rgba(255,255,255,0.1);
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
 # -----------------------------
 # Session defaults & helpers
 # -----------------------------
@@ -75,23 +375,7 @@ def _create_clients():
 
 supabase, admin_supabase = _create_clients()
 
-# -----------------------------
-# Styling (lean)
-# -----------------------------
-st.markdown("""
-<style>
-/* lock layout and simple glass right panel */
-html, body, [data-testid="stAppViewContainer"] { height: 100vh; overflow: hidden; }
-.block-container { padding: 0 1.25rem; }
-[data-testid="column"]:nth-child(2) {
-  display:flex; align-items:center; justify-content:center;
-  height:100vh; backdrop-filter: blur(18px) saturate(160%);
-  border-left: 1px solid rgba(255,255,255,0.15);
-}
-.stTextInput>div>div>input { border-radius:10px; padding:.8rem 1rem; }
-.stButton>button { width:100%; border-radius:10px; padding:.9rem 0; font-weight:700; }
-</style>
-""", unsafe_allow_html=True)
+
 
 # -----------------------------
 # Supabase wrapper helpers
@@ -222,7 +506,7 @@ def show_auth_page():
         st.experimental_set_query_params()
 
     # Layout
-    col1, col2 = st.columns([0.55, 0.45], gap="small")
+    col1, col2 = st.columns([0.47, 0.37], gap="small")
 
     with col1:
         _left_image_block()
