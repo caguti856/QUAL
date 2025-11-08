@@ -688,7 +688,7 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
 
     arows = []
     for attr in attributes:
-        avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"]
+        avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"
         r = scored[["ID","Staff ID"]].copy()
         r["Attribute"] = attr
         r["AvgScore"] = scored.get(avg_col)
