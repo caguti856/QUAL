@@ -4,26 +4,42 @@ from supabase import create_client, Client
 import os
 import base64
 
-# =========================
-# Credentials (no dotenv)
-# =========================
+# ---- at the top of login.py, replace your current init/creds section ----
+import streamlit as st
+from supabase import create_client, Client
+import os
+import base64
+
+# Read from Streamlit secrets first, fall back to env
 SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-SERVICE_ROLE_KEY = (
-    st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
-    or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = (
+st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 )
 
+# Create a PUBLIC client for normal auth (signup/login)
 supabase: Client | None = None
-admin_supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_ANON_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    except Exception as e:
+        st.error(f"Failed to init Supabase client (anon): {e}")
 
-if not SUPABASE_URL or not SERVICE_ROLE_KEY:
-    st.error(
-        "Supabase credentials missing. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY "
-        "in st.secrets or environment variables."
-    )
-else:
-    supabase = create_client(SUPABASE_URL, SERVICE_ROLE_KEY)
-    admin_supabase = create_client(SUPABASE_URL, SERVICE_ROLE_KEY)
+# Create a separate ADMIN client (optional) for password resets
+admin_supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        admin_supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    except Exception as e:
+        st.error(f"Failed to init Supabase admin client: {e}")
+
+# Early diagnostics shown in a collapsible block (optional)
+with st.expander("🔧 Supabase diagnostics", expanded=False):
+    st.write("URL set:", bool(SUPABASE_URL))
+    st.write("Anon key set:", bool(SUPABASE_ANON_KEY))
+    st.write("Service role key set:", bool(SUPABASE_SERVICE_ROLE_KEY))
+    if SUPABASE_URL and not SUPABASE_URL.startswith("https://"):
+        st.warning("SUPABASE_URL should start with https://")
 
 # Ensure session keys exist early
 st.session_state.setdefault("user_email", None)
@@ -196,9 +212,10 @@ st.markdown("""
 # =========================
 # Supabase helpers
 # =========================
+
 def sign_up(email: str, password: str):
     if not supabase:
-        st.error("Supabase not initialized.")
+        st.error("Supabase not initialized (anon client). Check SUPABASE_URL and SUPABASE_ANON_KEY in secrets.")
         return None
     return supabase.auth.sign_up({
         "email": email,
@@ -210,18 +227,37 @@ def sign_up(email: str, password: str):
 
 def sign_in(email: str, password: str):
     if not supabase:
-        st.error("Supabase not initialized.")
+        st.error("Supabase not initialized (anon client).")
         return None
     try:
         user = supabase.auth.sign_in_with_password({"email": email, "password": password})
         if user and user.user:
             st.session_state.user_email = user.user.email
             return user
-        else:
-            st.error("Invalid email or password.")
+        st.error("Invalid email or password.")
     except Exception as e:
         st.error(f"Login failed: {e}")
     return None
+
+def admin_reset_password(email: str, new_password: str) -> bool:
+    if not admin_supabase:
+        st.error("Admin client not available. Add SUPABASE_SERVICE_ROLE_KEY to secrets.")
+        return False
+    try:
+        # Supabase Python SDK 2.x: list_users returns object with .users
+        listing = admin_supabase.auth.admin.list_users()
+        users = getattr(listing, "users", None) or listing
+        user = next((u for u in users if getattr(u, "email", "").lower() == email.lower()), None)
+        if not user:
+            st.error("❌ No user found with that email.")
+            return False
+        admin_supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        st.success(f"✅ Password for **{email}** has been updated.")
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Password reset failed: {e}")
+        return False
+
 
 def sign_out():
     if not supabase:
@@ -232,26 +268,7 @@ def sign_out():
     finally:
         st.session_state.user_email = None
 
-def admin_reset_password(email: str, new_password: str) -> bool:
-    """Instantly reset user password using Supabase service role key."""
-    if not admin_supabase:
-        st.error("Supabase admin client not initialized.")
-        return False
-    try:
-        # list_users() may return a dict with 'users' depending on version
-        listing = admin_supabase.auth.admin.list_users()
-        users = getattr(listing, "users", None) or listing
-        user = next((u for u in users if getattr(u, "email", "").lower() == email.lower()), None)
-        if not user:
-            st.error("❌ No user found with that email.")
-            return False
-        admin_supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
-        st.success(f"✅ Password for **{email}** has been successfully updated!")
-        st.info("You can now log in with your new password.")
-        return True
-    except Exception as e:
-        st.error(f"⚠️ Password reset failed: {e}")
-        return False
+
 
 # =========================
 # UI
@@ -383,6 +400,22 @@ def show_auth_page():
             </a>
         </div>
         """, unsafe_allow_html=True)
+
+        # --- 👇 Add this tiny self-test expander here ---
+        with st.expander("Run a connection test"):
+            if st.button("Test Supabase auth ping"):
+                try:
+                    # This just checks the client exists and can be called.
+                    # It doesn't require a logged-in session.
+                    _ = getattr(supabase.auth, "get_user", None)
+                    if supabase is None:
+                        st.error("Anon client not initialized.")
+                    else:
+                        # If SDK v2: get_session() may exist; if not, just accessing auth is fine.
+                        st.success("✅ Supabase anon client is initialized and callable.")
+                except Exception as e:
+                    st.error(f"Anon client call failed: {e}")
+
 
 def show_main_app():
     st.title("Welcome to the Dashboard")
