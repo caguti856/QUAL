@@ -55,7 +55,12 @@ COVER_HTML = """
       <h2 style="margin:0; font-weight:800; letter-spacing:-.015em;">Thematic Analytics</h2>
     </div>
   </header>
-
+    <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:18px;">
+        <a role="button" href="?start=1" style="
+          background:#fff; color:#1a1a1a; padding:14px 22px; font-weight:800;
+          border-radius:14px; text-decoration:none; box-shadow:0 18px 40px rgba(0,0,0,.30);
+        ">🚀 Get Started</a>
+   </div>
   <!-- hero -->
   <main style="flex:1; display:flex; align-items:center; justify-content:center;">
     <section style="width:min(1100px, 100%); padding: clamp(16px, 5vw, 48px); text-align:center;">
@@ -67,14 +72,6 @@ COVER_HTML = """
       ">
         Consistent scoring.<br>Credible insights.<br>Bigger impact.
       </h1>
-
-      <p style="
-        margin:0 auto 28px auto; max-width: 820px;
-        font-size: clamp(16px, 1.6vw, 22px); line-height:1.55; color: var(--muted);
-      ">
-        From field voices to reliable evidence.
-      </p>
-      
     </section>
   </main>
 
@@ -114,16 +111,23 @@ if "auth_mode" not in st.session_state:
 
 # --- Show cover page with native Streamlit button ---
 def show_cover_page():
-    # Render HTML
-    components.html(COVER_HTML, height=650, scrolling=False)
-    st.write("")  # Add small padding
-    col1, col2, col3 = st.columns([3, 1, 3])
-    with col2:
-        clicked = st.button("🚀 Get Started", use_container_width=True)
-    if clicked:
+    # If user clicked the in-HTML button (?start=1), hide cover and go to login
+    qp = st.query_params
+    if qp.get("start") == "1":
         st.session_state.show_cover = False
         st.session_state.auth_mode = "login"
+        # clear the query param to keep the URL clean
+        try:
+            st.query_params.clear()
+        except Exception:
+            # older Streamlit:
+            st.experimental_set_query_params()
+
         st.rerun()
+
+    # Render the full-bleed cover
+    components.html(COVER_HTML, height=720, scrolling=False)
+
   
 
 def main():
