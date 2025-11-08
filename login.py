@@ -592,25 +592,7 @@ def show_auth_page():
                     st.session_state["auth_mode"] = "forgot"
                     st.rerun()
 
-        # ------------ connection self-test ------------
-        with st.expander("Run a connection test"):
-            
-                if not supabase:
-                    st.error("Anon client not initialized. Check st.secrets SUPABASE_URL and SUPABASE_ANON_KEY.")
-                else:
-                    try:
-                        # simple "ping" – if client exists, we consider it OK
-                        st.success("✅ Supabase anon client is initialized.")
-                    except Exception as e:
-                        st.error(f"Anon client call failed: {e}")
-
-            # Show what we detected (no secret values leaked)
-                st.caption("Detected keys (presence only):")
-                st.write({
-                    "SUPABASE_URL": bool(SUPABASE_URL),
-                    "SUPABASE_ANON_KEY": bool(SUPABASE_ANON_KEY),
-                    "SUPABASE_SERVICE_ROLE_KEY": bool(SERVICE_ROLE_KEY),
-                })
+       
 
         st.markdown("""
         <div class="dl-support" style="text-align:center; margin-top:1.2rem;">
