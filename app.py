@@ -32,67 +32,91 @@ COVER_HTML = """
   --care-orange:#EB7100;
   --care-deep:#090015;
   --text:#FFFFFF;
-  --muted:rgba(255,255,255,.75);
-  --card:#0B0712;
+  --muted:rgba(255,255,255,.78);
   --ring:rgba(235,113,0,.45);
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  min-height: 100vh; height: 100vh; width:100%;
+  min-height:100vh; height:100vh; width:100%;
   display:flex; flex-direction:column;
   background:
-    radial-gradient(1200px 600px at -10% -10%, rgba(235,113,0,.18), transparent 60%),
-    radial-gradient(900px 500px at 110% 0%, rgba(235,113,0,.12), transparent 55%),
-    linear-gradient(180deg, var(--care-orange) 0%, #D76400 26%, #B55500 60%, var(--care-deep) 100%);
-  color: var(--text);
+    radial-gradient(1100px 600px at 20% -10%, rgba(255,255,255,.08), transparent 60%),
+    radial-gradient(900px 500px at 110% 0%, rgba(255,255,255,.06), transparent 55%),
+    linear-gradient(180deg, #F07F1C 0%, #EB7100 22%, #C25E06 56%, #7C3A00 82%, var(--care-deep) 100%);
+  color:var(--text);
+  overflow:hidden;
 ">
 
-  <!-- header -->
+  <!-- Top bar -->
   <header style="
     display:flex; align-items:center; justify-content:space-between;
-    padding: 18px clamp(16px, 5vw, 48px); border-bottom: 1px solid rgba(255,255,255,.18);
+    padding:18px clamp(16px,5vw,48px); border-bottom:1px solid rgba(255,255,255,.12);
+    backdrop-filter:saturate(140%) blur(0px);
   ">
     <div style="display:flex; gap:.75rem; align-items:center;">
-      <div aria-hidden="true" style="width:36px;height:36px;border-radius:10px;background:#fff;opacity:.9;"></div>
-      <h2 style="margin:0; font-weight:800; letter-spacing:-.015em;">Thematic Analytics</h2>
+      <div aria-hidden="true" style="width:32px;height:32px;border-radius:9px;background:#fff; opacity:.9; box-shadow:0 6px 18px rgba(0,0,0,.25)"></div>
+      <h2 style="margin:0; font-weight:900; letter-spacing:-.015em;">Thematic Analytics</h2>
     </div>
+    <nav style="display:flex; gap:18px; opacity:.9">
+      <span style="font-size:.95rem;">CARE-ready</span>
+      <span style="font-size:.95rem;">WCAG AA</span>
+    </nav>
   </header>
-    <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:18px;">
-        <a role="button" href="?start=1" style="
-          background:#fff; color:#1a1a1a; padding:14px 22px; font-weight:800;
-          border-radius:14px; text-decoration:none; box-shadow:0 18px 40px rgba(0,0,0,.30);
-        ">🚀 Get Started</a>
-   </div>
-  <!-- hero -->
-  <main style="flex:1; display:flex; align-items:center; justify-content:center;">
-    <section style="width:min(1100px, 100%); padding: clamp(16px, 5vw, 48px); text-align:center;">
+
+  <!-- Hero -->
+  <main style="flex:1; display:grid; place-items:center; padding: clamp(12px,4vw,32px);">
+    <section style="text-align:center; max-width:1100px; padding:0 clamp(12px,4vw,40px);">
       <h1 style="
-        margin:0 0 16px 0;
-        font-size: clamp(36px, 6vw, 76px);
-        line-height:1.05; font-weight:900; letter-spacing:-.02em; text-wrap:balance;
-        text-shadow: 0 8px 28px rgba(0,0,0,.25);
+        margin:0 0 12px 0;
+        font-size:clamp(38px,6.5vw,86px);
+        line-height:1.02; font-weight:900; letter-spacing:-.02em; text-wrap:balance;
+        text-shadow:0 10px 32px rgba(0,0,0,.28);
       ">
-        Consistent scoring.<br>Credible insights.<br>Bigger impact.
+        Consistent scoring. <span style="opacity:.95">Credible insights.</span> Bigger impact.
       </h1>
+      <p style="
+        margin:8px auto 28px; max-width:800px;
+        font-size:clamp(16px,2.2vw,20px); line-height:1.6; color:var(--muted)
+      ">
+        Turn qualitative feedback into defensible, program-ready evidence—fast.
+      </p>
+
+      <!-- CTA group -->
+      <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
+        <a role="button" href="?start=1" style="
+          display:inline-flex; align-items:center; gap:.55rem;
+          background:#fff; color:#111; font-weight:800;
+          padding:14px 22px; border-radius:999px; text-decoration:none;
+          box-shadow:0 10px 28px rgba(0,0,0,.28);
+          transform: translateZ(0); transition: transform .15s ease, box-shadow .15s ease;
+        "
+           onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 16px 38px rgba(0,0,0,.32)'"
+           onmouseout="this.style.transform=''; this.style.boxShadow='0 10px 28px rgba(0,0,0,.28)'">
+          🚀 Get Started
+        </a>
+        <a role="button" href="#learn" style="
+          display:inline-flex; align-items:center; gap:.55rem;
+          background:transparent; color:#fff; border:2px solid rgba(255,255,255,.75);
+          font-weight:800; padding:12px 20px; border-radius:999px; text-decoration:none;
+        ">Learn more</a>
+      </div>
     </section>
   </main>
 
+  <!-- Footer -->
   <footer style="
-    border-top:1px solid rgba(255,255,255,.18);
-    padding: 18px clamp(16px, 5vw, 48px); text-align:center; color: rgba(255,255,255,.7);
+    border-top:1px solid rgba(255,255,255,.12);
+    padding:18px clamp(16px,5vw,48px); text-align:center; color:rgba(255,255,255,.72);
   ">
-    © 2025 CARE Thematic Analytics • WCAG contrast • Keyboard accessible
+    © 2025 CARE Thematic Analytics • High contrast • Keyboard accessible
   </footer>
 
   <style>
-    @media (max-width: 900px){
-      .cards { grid-template-columns: 1fr !important; }
-    }
-    a:focus-visible, button:focus-visible {
-      outline: 3px solid var(--ring); outline-offset: 3px; border-radius: 12px;
-    }
-    @media (prefers-reduced-motion: reduce){ * { transition:none !important; animation:none !important; } }
+    a:focus-visible, button:focus-visible { outline:3px solid var(--ring); outline-offset:3px; border-radius:14px; }
+    @media (max-width:780px){ nav{display:none} }
+    @media (prefers-reduced-motion: reduce){ *{transition:none !important; animation:none !important;} }
   </style>
 </div>
 """
+
 
 
 
