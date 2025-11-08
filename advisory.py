@@ -450,7 +450,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             dfcol = resolved_for_qid.get(qid)
             if not dfcol or dfcol not in df.columns: continue
 
-            ans = clean(resp.get(dfcol, "")); if not ans: continue
+            ans = clean(resp.get(dfcol, "")); 
+            if not ans: continue
             ai_flags.append(looks_ai_like(ans))
             vec = embed_cached(ans)
 
