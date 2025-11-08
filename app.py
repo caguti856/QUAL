@@ -4,17 +4,6 @@ import base64
 import streamlit as st
 from supabase import create_client, Client
 
-# ---- Allowlist / admin ----
-ALLOWED_DOMAIN = "care.org"
-ADMIN_EMAILS = {"caguti856@gmail.com"}  # you (and add more if needed)
-
-def is_allowed_email(email: str) -> bool:
-    e = (email or "").strip().lower()
-    return e.endswith("@" + ALLOWED_DOMAIN) or e in ADMIN_EMAILS
-
-def is_admin(email: str) -> bool:
-    return (email or "").strip().lower() in ADMIN_EMAILS
-
 st.markdown("""
     <style>
     /* Remove every possible top/bottom padding or margin */
@@ -396,53 +385,30 @@ def sign_up(email: str, password: str):
     if not supabase:
         st.error("Supabase anon client not initialized. Set secrets SUPABASE_URL and SUPABASE_ANON_KEY.")
         return None
-
-    if not is_allowed_email(email):
-        st.error(f"Only @{ALLOWED_DOMAIN} emails can sign up (or an approved admin).")
-        return None
-
     try:
         return supabase.auth.sign_up({
             "email": email,
             "password": password,
+            # redirect can be your deployed app url + mode=signup
             "options": {"emailRedirectTo": st.secrets.get("EMAIL_REDIRECT_URL", "")}
         })
     except Exception as e:
         st.error(f"Sign up failed: {e}")
         return None
 
-
 def sign_in(email: str, password: str):
     if not supabase:
         st.error("Supabase anon client not initialized. Set secrets SUPABASE_URL and SUPABASE_ANON_KEY.")
         return None
-
-    # Pre-check before calling Supabase (fast fail UX)
-    if not is_allowed_email(email):
-        st.error(f"Only @{ALLOWED_DOMAIN} emails can log in (or an approved admin).")
-        return None
-
     try:
         user = supabase.auth.sign_in_with_password({"email": email, "password": password})
         if user and getattr(user, "user", None):
-            # Extra safety: post-check
-            if not is_allowed_email(user.user.email):
-                try:
-                    supabase.auth.sign_out()
-                except Exception:
-                    pass
-                st.error(f"Access restricted to @{ALLOWED_DOMAIN} emails (or an approved admin).")
-                return None
-
             st.session_state["user_email"] = user.user.email
-            st.session_state["is_admin"] = is_admin(user.user.email)
             return user
-
         st.error("Invalid email or password.")
     except Exception as e:
         st.error(f"Login error: {e}")
     return None
-
 
 def sign_out():
     if not supabase:
