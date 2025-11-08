@@ -54,12 +54,6 @@ COVER_HTML = """
       <div aria-hidden="true" style="width:36px;height:36px;border-radius:10px;background:#fff;opacity:.9;"></div>
       <h2 style="margin:0; font-weight:800; letter-spacing:-.015em;">Thematic Analytics</h2>
     </div>
-
-    <nav style="display:flex; gap:28px;">
-      <a href="#" style="color:rgba(255,255,255,.8); text-decoration:none; font-weight:600;">Features</a>
-      <a href="#" style="color:rgba(255,255,255,.8); text-decoration:none; font-weight:600;">How it works</a>
-      <a href="#" style="color:rgba(255,255,255,.8); text-decoration:none; font-weight:600;">Support</a>
-    </nav>
   </header>
 
   <!-- hero -->
@@ -78,7 +72,7 @@ COVER_HTML = """
         margin:0 auto 28px auto; max-width: 820px;
         font-size: clamp(16px, 1.6vw, 22px); line-height:1.55; color: var(--muted);
       ">
-        From field voices to reliable evidence—so teams act faster and smarter.
+        From field voices to reliable evidence.
       </p>
 
       <!-- feature cards -->
@@ -94,7 +88,7 @@ COVER_HTML = """
         ">
           <div style="font-size:28px; margin-bottom:6px;">📝</div>
           <h3 style="margin:0 0 6px 0; font-size:20px; font-weight:800;">Collect Feedback</h3>
-          <p style="margin:0; color:rgba(255,255,255,.8)">Import transcripts, notes, and voice-to-text from the field.</p>
+          <p style="margin:0; color:rgba(255,255,255,.8)">Import data using api and score into different themes using machine learning algorithm.</p>
         </div>
 
         <div style="
@@ -118,17 +112,7 @@ COVER_HTML = """
         </div>
       </div>
 
-      <!-- buttons are just visual; actual action is your Streamlit button below -->
-      <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
-        <a role="button" href="#" style="
-          background:#fff; color:#1a1a1a; padding:14px 22px; font-weight:800;
-          border-radius:14px; text-decoration:none; box-shadow:0 18px 40px rgba(0,0,0,.30);
-        ">Get Started</a>
-        <a role="button" href="#" style="
-          background:transparent; color:#fff; padding:14px 22px; font-weight:800;
-          border-radius:14px; text-decoration:none; border:2px solid rgba(255,255,255,.6);
-        ">Learn more</a>
-      </div>
+      
     </section>
   </main>
 
