@@ -4,7 +4,6 @@
 import streamlit as st
 import json, re, unicodedata, time
 from pathlib import Path
-from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
@@ -23,11 +22,17 @@ KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
+# Repo layout:
+# QUAL/
+#   advisory.py
+#   CASES/Case1.txt
+#   DATASETS/Case1_mapping.csv
+#   DATASETS/Case1_exemplars.jsonl
 DATASETS_DIR     = Path("DATASETS")
-CASES_DIR        = DATASETS_DIR / "cases"  # .txt files per case
+CASES_DIR        = Path("CASES")  # .txt files per case (e.g., Case1.txt)
 
 # Online LLM (Hugging Face Inference API Router) — REQUIRED
-# Set in .streamlit/secrets.toml or Streamlit Cloud project settings, for example:
+# Example secrets.toml:
 # LLM_API_BASE = "https://router.huggingface.co/hf-inference"
 # LLM_API_KEY  = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
 # LLM_MODEL    = "HuggingFaceH4/zephyr-7b-beta"
@@ -384,10 +389,10 @@ def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> L
     if raw.startswith("[error]"):
         return LLMResult(None, raw, raw)
 
+    # strip code fences if any, then parse first {...}
     cleaned = raw.replace("```json", "").replace("```", "").strip()
     try:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
+        start = cleaned.find("{"); end = cleaned.rfind("}")
         if start >= 0 and end > start:
             blob = cleaned[start:end+1]
             data = json.loads(blob)
@@ -465,7 +470,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             st.warning(f"{len(missing_map_rows)} question_ids not found (showing up to 30).")
             st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
 
-    # pre-embed distinct answers
+    # pre-embed distinct answers to speed up
     distinct_answers = set()
     for _, resp in df.iterrows():
         for r in all_mapping:
@@ -798,7 +803,7 @@ def main():
     # --- choose case ---
     available = discover_cases()
     if not available:
-        st.error("No cases found in DATASETS/cases/*.txt")
+        st.error("No cases found in CASES/*.txt")
         st.stop()
 
     # allow query param (?case=Case1) if available, else first
@@ -832,16 +837,21 @@ def main():
     def run_pipeline():
         mapping = load_mapping_from_path(mapping_path)
         exemplars = read_jsonl_path(exemplars_path)
-        if not exemplars: st.error(f"Exemplars file is empty: {exemplars_path}"); st.stop()
+        if not exemplars:
+            st.error(f"Exemplars file is empty: {exemplars_path}")
+            st.stop()
 
         with st.spinner("Building semantic centroids..."):
             q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
         with st.spinner("Fetching Kobo submissions..."):
             df = fetch_kobo_dataframe()
-        if df.empty: st.warning("No Kobo submissions found."); st.stop()
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            st.stop()
 
-        st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
+        st.caption("Fetched sample:")
+        st.dataframe(df.head(), use_container_width=True)
 
         with st.spinner("Scoring with mandatory hybrid + routing..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, case_text)
@@ -851,10 +861,13 @@ def main():
         st.write(f"Auto-accepted rows: {len(autos_df)} · Needs review: {len(review_df)}")
         st.dataframe(scored_df.head(30), use_container_width=True)
 
-        st.download_button("⬇️ Download Excel (full scored)", data=to_excel_bytes(scored_df),
-                           file_name=f"{case_id}_Advisory_Scoring.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+        st.download_button(
+            "⬇️ Download Excel (full scored)",
+            data=to_excel_bytes(scored_df),
+            file_name=f"{case_id}_Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
         st.session_state["case_id"] = case_id
         st.session_state["scored_df"] = scored_df
@@ -889,8 +902,10 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Push all to Google Sheets", use_container_width=True):
-                    try: do_push()
-                    except Exception as e: st.error(f"Push failed: {e}")
+                    try:
+                        do_push()
+                    except Exception as e:
+                        st.error(f"Push failed: {e}")
             with col2:
                 st.caption(f"AUTO_RUN={AUTO_RUN}, AUTO_PUSH={AUTO_PUSH}")
 
