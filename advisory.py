@@ -738,13 +738,9 @@ def main():
 
         with st.spinner("Scoring (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
-        # === 🧹 Remove extra per-question columns ===
-        cols_to_keep = ["Date", "Staff ID", "Duration_min"]
-        cols_to_keep += [c for c in scored_df.columns if c.endswith("_Avg (0–3)") or c.endswith("_RANK")]
-        cols_to_keep += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
+        
 
-        # Keep only those columns in the final scored dataframe
-        scored_df = scored_df[cols_to_keep]
+        
 
 
         st.success("✅ Scoring complete.")
