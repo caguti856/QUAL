@@ -1,24 +1,22 @@
-# advisory.py — Kobo → TF-IDF+SVD centroids (offline) → AI detection → Excel/Sheets
-# No HuggingFace; No LLM; Fully offline scoring & AI-suspect signals.
-
+# advisory.py — Kobo → Centroid Scoring (+ per-answer AI detection) → Excel / Google Sheets
 import streamlit as st
+
 import gspread
 from google.oauth2.service_account import Credentials
 
-import json, re, unicodedata, math, hashlib
+import json, re, unicodedata, time
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
+from dataclasses import dataclass
 
+from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
-from sklearn.preprocessing import Normalizer
 
 # ==============================
-# CONSTANTS / PATHS
+# CONSTANTS / PATHS / SECRETS
 # ==============================
 KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
@@ -28,6 +26,7 @@ DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
 EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
+# Bands / labels
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
     ("Exemplary Thought Leader", 21, 24),
@@ -35,7 +34,6 @@ OVERALL_BANDS = [
     ("Emerging Advisor",        10, 15),
     ("Needs Capacity Support",   0,  9),
 ]
-
 ORDERED_ATTRS = [
     "Strategic & analytical thinking",
     "Credibility & trustworthiness",
@@ -47,25 +45,30 @@ ORDERED_ATTRS = [
     "Capacity strengthening & empowerment support",
 ]
 
-FUZZY_THRESHOLD     = 80
-MIN_QA_OVERLAP      = 0.05
+# Heuristics
+FUZZY_THRESHOLD = 80
+MIN_QA_OVERLAP  = 0.05
 
-# ---- AI detection tuning ----
+# AI detection
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
-NEAR_DUP_SIM         = float(st.secrets.get("NEAR_DUP_SIM", 0.92))
-MIN_ANS_LEN_FOR_AI   = int(st.secrets.get("MIN_ANS_LEN_FOR_AI", 60))
-MAX_SENT_AVG_LEN     = float(st.secrets.get("MAX_SENT_AVG_LEN", 40.0))
-MIN_TTR              = float(st.secrets.get("MIN_TTR", 0.35))
-MAX_TRANSITION_RATE  = float(st.secrets.get("MAX_TRANSITION_RATE", 0.4))
+TRANSITION_OPEN_RX = re.compile(
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
+    re.I
+)
+LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX = re.compile(r"^[-*•]\s", re.M)
+AI_BUZZWORDS = {
+    "minimum viable", "feedback loop", "trade-off", "evidence-based",
+    "stakeholder alignment", "learners’ agency", "norm shifts",
+    "quick win", "low-lift", "scalable", "best practice"
+}
 
-AI_TEMPLATE_PHRASES = [
-    "as an ai","as a language model","i do not have access","i cannot access","based on the provided",
-    "it is important to note","moving forward,","furthermore,","moreover,","in conclusion,",
-    "this response","holistic approach","key takeaways","robust framework",
-    "leveraging","best practices include","i recommend","i suggest",
-    "from a strategic perspective","evidence-based","data-driven","mitigation strategies",
+# Google Sheets
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
-AI_MARKDOWN_CUES = ["```","**","__","###","- ","* ","— ","––","___","…","----"]
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
 
 # ==============================
 # HELPERS
@@ -81,13 +84,87 @@ def try_dt(x):
     try: return pd.to_datetime(str(x), errors="coerce")
     except Exception: return None
 
+def cos_sim(a, b):
+    if a is None or b is None: return -1e9
+    return float(np.dot(a, b))
+
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-def kobo_url(asset_uid: str, kind: str = "submissions"):
-    return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
+AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
+def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
+
+def _avg_sentence_len(text: str) -> float:
+    s = re.split(r"[.!?]+", text)
+    s = [w for w in s if w.strip()]
+    if not s: return 0.0
+    tokens = re.findall(r"\w+", text)
+    return len(tokens) / max(len(s), 1)
+
+def _type_token_ratio(text: str) -> float:
+    toks = [t.lower() for t in re.findall(r"[a-z]+", text)]
+    if not toks: return 1.0
+    return len(set(toks)) / len(toks)
+
+def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
+    """Return (score in 0..1, flags[]) — higher means more AI-ish."""
+    t = clean(text)
+    flags = []
+    if not t:
+        return 0.0, flags
+
+    score = 0.0
+
+    # 1) Classic patterns
+    if looks_ai_like(t):
+        score += 0.35
+        flags.append("pattern:ai-boilerplate")
+
+    # 2) Transition/list scaffolding
+    if TRANSITION_OPEN_RX.search(t):
+        score += 0.15
+        flags.append("style:transition-opening")
+    if LIST_CUES_RX.search(t):
+        score += 0.15
+        flags.append("style:list-cues")
+
+    # 3) Buzzword density
+    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
+    if buzz_hits >= 1:
+        score += min(0.25, 0.08 * buzz_hits)
+        flags.append(f"lex:buzzwords({buzz_hits})")
+
+    # 4) Bulleted formatting
+    if BULLET_RX.search(t):
+        score += 0.08
+        flags.append("format:bullets")
+
+    # 5) Long, polished sentences
+    asl = _avg_sentence_len(t)  # tokens per sentence
+    if asl >= 26:
+        score += 0.18
+        flags.append(f"syntax:long-sentences(~{int(asl)})")
+    elif asl >= 18:
+        score += 0.10
+        flags.append(f"syntax:moderate-long(~{int(asl)})")
+
+    # 6) Low lexical variety in longer text
+    ttr = _type_token_ratio(t)
+    if ttr <= 0.45 and len(t) >= 180:
+        score += 0.10
+        flags.append(f"lex:low-variety(ttr={ttr:.2f})")
+
+    # 7) Low Q/A overlap (generic answer)
+    if question_hint:
+        overlap = qa_overlap(t, question_hint)
+        if overlap < 0.06:
+            score += 0.10
+            flags.append(f"qa:low-overlap({overlap:.2f})")
+
+    score = max(0.0, min(1.0, score))
+    return score, flags
 
 def show_status(ok: bool, msg: str) -> None:
     (st.success if ok else st.error)(msg)
@@ -111,6 +188,12 @@ def read_jsonl_path(path: Path) -> list[dict]:
         for line in f:
             if line.strip(): rows.append(json.loads(line))
     return rows
+
+# ==============================
+# KOBO FETCH
+# ==============================
+def kobo_url(asset_uid: str, kind: str = "submissions"):
+    return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_kobo_dataframe() -> pd.DataFrame:
@@ -144,7 +227,7 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# QUESTION_ID → KOBO COLUMN RESOLVER
+# QID → KOBO COLUMN RESOLVER
 # ==============================
 QID_PREFIX_TO_SECTION = {"SAT":"A1","CT":"A2","ECI":"A3","CSF":"A4","FCP":"A5","ERI":"A6","SOA":"A7","CSE":"A8"}
 QNUM_RX = re.compile(r"_Q(\d+)$")
@@ -205,43 +288,14 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
     return None
 
 # ==============================
-# OFFLINE EMBEDDINGS: TF-IDF + SVD (LSA)
+# EMBEDDINGS / CENTROIDS
 # ==============================
 @st.cache_resource(show_spinner=False)
-def build_text_encoder(corpus: list[str], n_components: int = 256):
-    """Fit a TF-IDF+SVD encoder on corpus; return (vectorize_fn)."""
-    corpus = [clean(t) for t in corpus if t and t.strip()]
-    if not corpus:
-        # fallback tiny corpus avoids SVD errors
-        corpus = ["placeholder"]
-    tfidf = TfidfVectorizer(
-        lowercase=True, strip_accents="unicode",
-        ngram_range=(1,2), min_df=1, max_df=0.98, max_features=100_000
-    )
-    X = tfidf.fit_transform(corpus)
-    k = min(n_components, min(X.shape)-1) if min(X.shape) > 1 else 1
-    svd = TruncatedSVD(n_components=k, random_state=0)
-    X_lsa = svd.fit_transform(X)
-    norm = Normalizer(copy=False)
-    X_lsa = norm.fit_transform(X_lsa)
+def get_embedder():
+    # Keep tiny, fast model (≈ 80ms per 20 texts locally). Caches in memory via Streamlit.
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-    def encode(texts: list[str]) -> np.ndarray:
-        if not texts: return np.zeros((0, k), dtype=np.float32)
-        Xt = tfidf.transform([clean(t) for t in texts])
-        Z = svd.transform(Xt)
-        Z = norm.transform(Z)
-        return Z.astype(np.float32)
-
-    return encode
-
-def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
-    if a is None or b is None: return -1e9
-    return float(np.dot(a, b))
-
-# ==============================
-# CENTROIDS (uses offline encoder)
-# ==============================
-def build_centroids(exemplars: list[dict], encode):
+def build_centroids(exemplars: list[dict]):
     by_qkey, by_attr, question_texts = {}, {}, []
     for e in exemplars:
         qid   = clean(e.get("question_id",""))
@@ -252,31 +306,45 @@ def build_centroids(exemplars: list[dict], encode):
         if not qid and not qtext: continue
         key = qid if qid else qtext
         if key not in by_qkey:
-            by_qkey[key] = {"attribute": attr, "question_text": qtext, "by_score": {0:[],1:[],2:[],3:[]}}
+            by_qkey[key] = {"attribute": attr, "question_text": qtext, "scores": [], "texts": []}
             if qtext: question_texts.append(qtext)
-        by_qkey[key]["by_score"][score].append(text)
+        by_qkey[key]["scores"].append(score)
+        by_qkey[key]["texts"].append(text)
         by_attr.setdefault(attr, {0:[],1:[],2:[],3:[]})
         by_attr[attr][score].append(text)
 
-    def centroid(texts):
-        texts = [t for t in texts if t]
-        if not texts: return None
-        M = encode(texts)
-        if M.size == 0: return None
-        c = M.mean(axis=0)
-        c /= (np.linalg.norm(c) + 1e-9)
-        return c
+    embedder = get_embedder()
 
-    q_centroids = {k:{sc:centroid(txts) for sc,txts in pack["by_score"].items()} for k,pack in by_qkey.items()}
-    attr_centroids = {attr:{sc:centroid(txts) for sc,txts in bucks.items()} for attr,bucks in by_attr.items()}
+    def centroid(texts):
+        if not texts: return None
+        embs = embedder.encode(texts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        return embs.mean(axis=0)
+
+    def build_centroids_for_q(texts, scores):
+        buckets = {0:[],1:[],2:[],3:[]}
+        for t,s in zip(texts, scores):
+            if t: buckets[int(s)].append(t)
+        return {sc: centroid(batch) for sc, batch in buckets.items()}
+
+    q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
+    attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
 
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
         sc = int(e.get("score",0)); txt = clean(e.get("text",""))
         if txt: global_buckets[sc].append(txt)
-    global_centroids = {sc:centroid(txts) for sc,txts in global_buckets.items()}
+    global_centroids = {sc: centroid(txts) for sc, txts in global_buckets.items()}
 
     return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
+
+_embed_cache: dict[str, np.ndarray] = {}
+def embed_cached(text: str):
+    t = clean(text)
+    if not t: return None
+    if t in _embed_cache: return _embed_cache[t]
+    vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+    _embed_cache[t] = vec
+    return vec
 
 def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
     qid = (qid or "").strip()
@@ -290,102 +358,10 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# AI DETECTION (heuristics + duplicates)
+# SCORING (+ per-answer AI detection)
 # ==============================
-SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
-WORD_RX    = re.compile(r"[A-Za-z']+")
-
-def norm_text(t: str) -> str:
-    t = clean(t).lower()
-    t = re.sub(r"[^\w\s]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-def trigram_set(t: str) -> set:
-    tokens = norm_text(t).split()
-    return set(zip(tokens, tokens[1:], tokens[2:])) if len(tokens) >= 3 else set()
-
-def type_token_ratio(t: str) -> float:
-    toks = WORD_RX.findall(t.lower())
-    if not toks: return 0.0
-    return len(set(toks)) / len(toks)
-
-def transition_rate(sentences: list[str]) -> float:
-    if not sentences: return 0.0
-    transitions = {"furthermore","moreover","additionally","however","therefore","thus","meanwhile","consequently","importantly",
-                   "in conclusion","in summary","to conclude","overall","first","second","third"}
-    hits = 0
-    for s in sentences:
-        s2 = s.strip().lower()
-        if any(s2.startswith(x) for x in transitions) or re.match(r"^\(?\d+[\).\s-]", s2):
-            hits += 1
-    return hits / len(sentences)
-
-def markdown_cues_ratio(t: str) -> float:
-    if not t: return 0.0
-    total = sum(t.count(c) for c in AI_MARKDOWN_CUES)
-    return min(1.0, total / max(1, len(t)//80))
-
-def template_phrase_hits(t: str) -> int:
-    tl = t.lower()
-    return sum(1 for p in AI_TEMPLATE_PHRASES if p in tl)
-
-def repetition_score(t: str) -> float:
-    toks = norm_text(t).split()
-    if len(toks) < 12: return 0.0
-    from collections import Counter
-    c = Counter(toks)
-    top2 = [n for (_, n) in c.most_common(2)]
-    rep = (sum(top2)/len(toks)) if top2 else 0.0
-    return min(1.0, rep)
-
-def ai_signal_score(answer: str, question_hint: str) -> tuple[float, list[str]]:
-    flags = []
-    a = clean(answer)
-    if len(a) < MIN_ANS_LEN_FOR_AI:
-        return 0.0, flags
-    sents = [s for s in SENT_SPLIT.split(a) if s.strip()]
-    avg_sent_len = (sum(len(WORD_RX.findall(s)) for s in sents)/max(1,len(sents))) if sents else 0.0
-    ttr = type_token_ratio(a)
-    trans = transition_rate(sents)
-    md = markdown_cues_ratio(a)
-    tpl = template_phrase_hits(a)
-    rep = repetition_score(a)
-    ov = qa_overlap(a, question_hint or "")
-
-    features = {
-        "avg_sent_len": min(1.0, max(0.0, (avg_sent_len - 20.0) / (MAX_SENT_AVG_LEN - 20.0))),
-        "low_ttr":      1.0 - max(MIN_TTR, min(1.0, ttr)) if ttr < 1.0 else 0.0,
-        "transitions":  min(1.0, trans / MAX_TRANSITION_RATE),
-        "markdown":     md,
-        "templates":    min(1.0, tpl / 3.0),
-        "repetition":   rep,
-        "low_overlap":  (1.0 - ov) if len(a) > 120 else 0.0,
-    }
-    w = {"avg_sent_len":0.14,"low_ttr":0.16,"transitions":0.12,"markdown":0.08,"templates":0.22,"repetition":0.16,"low_overlap":0.12}
-    score = sum(features[k]*w[k] for k in w)
-
-    if tpl >= 1: flags.append("template_phrases")
-    if md > 0: flags.append("markdown/formatting")
-    if trans > MAX_TRANSITION_RATE: flags.append("structured_transitions")
-    if avg_sent_len > MAX_SENT_AVG_LEN: flags.append("very_long_sentences")
-    if ttr < MIN_TTR: flags.append("low_lexical_diversity")
-    if rep > 0.18: flags.append("repetition")
-    if ov < 0.08: flags.append("low_QA_overlap")
-
-    return float(max(0.0, min(1.0, score))), flags
-
-# ==============================
-# SCORING (centroids via LSA) + AI DETECTION
-# ==============================
-def build_encoder_from_exemplars_and_answers(exemplars, answers_pool):
-    # Fit encoder on exemplars + answers (better coverage) — offline
-    corpus = [clean(e.get("text","")) for e in exemplars if clean(e.get("text",""))]
-    corpus += [t for t in answers_pool if t]
-    return build_text_encoder(corpus, n_components=256)
-
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
-                    encode, q_centroids, attr_centroids, global_centroids,
+                    q_centroids, attr_centroids, global_centroids,
                     by_qkey, question_texts):
 
     df_cols = list(df.columns)
@@ -406,197 +382,136 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
+    rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # Resolve Kobo columns
+    # resolve Kobo columns
     resolved_for_qid, missing_map_rows = {}, []
     for r in all_mapping:
-        qid   = r["question_id"]; qhint = r.get("prompt_hint","")
+        qid   = r["question_id"]
+        qhint = r.get("prompt_hint","")
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
         if hit: resolved_for_qid[qid] = hit
         else:   missing_map_rows.append((qid, qhint))
 
     with st.expander("🧭 Mapping → Kobo column resolution", expanded=False):
         if resolved_for_qid:
-            st.dataframe(pd.DataFrame(list(resolved_for_qid.items())[:60], columns=["question_id","kobo_column"]))
+            show = list(resolved_for_qid.items())[:60]
+            st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
         if missing_map_rows:
-            st.warning(f"{len(missing_map_rows)} question_ids not found (up to 30 shown).")
+            st.warning(f"{len(missing_map_rows)} question_ids not found (showing up to 30).")
             st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
 
-    # Collect answers (for duplicates and vectorization)
-    per_row_answers = []
-    distinct_texts = set()
+    # Pre-embed distinct answers (speed)
+    distinct_answers = set()
     for _, resp in df.iterrows():
-        arow = {}
         for r in all_mapping:
             qid = r["question_id"]; col = resolved_for_qid.get(qid)
             if col and col in df.columns:
-                txt = clean(resp.get(col, ""))
-                if txt: arow[qid] = txt; distinct_texts.add(txt)
-        per_row_answers.append(arow)
+                a = clean(resp.get(col, "")); 
+                if a: distinct_answers.add(a)
+    for t in distinct_answers: _ = embed_cached(t)
 
-    # Encode all distinct answers once
-    if distinct_texts:
-        A = encode(list(distinct_texts))
-        # map text -> vector
-        vec_map = {t: A[i] for i,t in enumerate(list(distinct_texts))}
-    else:
-        vec_map = {}
-
-    # Duplicate/near-duplicate clusters (trigram Jaccard, bucketed)
-    def norm_text(t: str) -> str:
-        t = clean(t).lower()
-        t = re.sub(r"[^\w\s]", " ", t)
-        t = re.sub(r"\s+", " ", t).strip()
-        return t
-    def trigram_set(t: str) -> set:
-        tokens = norm_text(t).split()
-        return set(zip(tokens, tokens[1:], tokens[2:])) if len(tokens) >= 3 else set()
-    trigram_index = {t: trigram_set(t) for t in distinct_texts}
-    def sig32(t: str) -> int:
-        return int(hashlib.md5(norm_text(t).encode("utf-8")).hexdigest()[:8], 16)
-    buckets = {}
-    for t in distinct_texts:
-        buckets.setdefault(sig32(t), []).append(t)
-    near_dup_map = {}
-    for _, group in buckets.items():
-        if len(group) == 1:
-            near_dup_map[group[0]] = (1, 0.0); continue
-        sets = {t: trigram_index[t] for t in group}
-        for t in group:
-            s = sets[t]
-            if not s: near_dup_map[t] = (len(group), 0.0); continue
-            sims = []
-            for u in group:
-                if u == t: continue
-                su = sets[u]
-                if not su: continue
-                inter = len(s & su); union = len(s | su) or 1
-                jacc = inter/union
-                if jacc >= NEAR_DUP_SIM: sims.append(jacc)
-            near_dup_map[t] = (max(1, 1+len(sims)), float(len(sims))/max(1, len(group)-1))
-
-    # ---------- Scoring ----------
-    rows_out = []
     for i, resp in df.iterrows():
         out = {}
         out["ID"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                      if pd.notna(dt_series.iloc[i]) else str(i))
-        staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id")), None)
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
         out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
-        ai_scores_local = []
-        ai_flags_local  = []
+        any_ai_suspected = False  # row-level
+
+        # cache question text per row for AI overlap
+        qtext_cache = {}
 
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             dfcol = resolved_for_qid.get(qid)
             if not dfcol or dfcol not in df.columns: continue
+
             ans = clean(resp.get(dfcol, "")); 
             if not ans: continue
+            vec = embed_cached(ans)
 
-            # AI detection per answer
-            ai_score, ai_flags = ai_signal_score(ans, qhint)
-            ai_scores_local.append(ai_score)
-            qn_str = qid.split("_Q")[-1] if "_Q" in (qid or "") else "?"
-            ai_flags_local.extend([f"{attr}_Q{qn_str}:{flag}" for flag in ai_flags])
-
-            # vector
-            vec = vec_map.get(ans)
             # only Q1..Q4
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
                 except: qn = None
-            if qn not in (1,2,3,4): 
-                continue
+            if qn not in (1,2,3,4): continue
 
-            # centroid band
+            # ----- centroid scoring -----
+            sims_q = sims_a = sims_g = {}
+            qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
+            if qkey and qkey not in qtext_cache:
+                qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
+            qtext_for_ai = qtext_cache.get(qkey, "") if qkey else qhint
+
             sc = None
             if vec is not None:
-                # question-level
-                sims = {}
-                qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
                 if qkey and qkey in q_centroids:
-                    sims = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        qtext = (by_qkey.get(qkey, {}) or {}).get("question_text","")
-                        if qa_overlap(ans, qtext or qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
-                # attribute-level
-                if sc is None and attr in attr_centroids:
-                    sims = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
-                # global-level
-                if sc is None:
-                    sims = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
+                    sims_q = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
+                if attr in attr_centroids:
+                    sims_a = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
+                sims_g = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
 
-            # write per-question columns (score + AI signals)
+                def _pick_best(d: dict[int,float]): 
+                    return max(d, key=d.get) if d else None
+
+                sc = _pick_best(sims_q)
+                if sc is None: sc = _pick_best(sims_a)
+                if sc is None: sc = _pick_best(sims_g)
+
+                # guard for generic / off-question responses
+                if sc is not None:
+                    base_qtext = qtext_cache.get(qkey, "")
+                    if qa_overlap(ans, base_qtext or qhint) < MIN_QA_OVERLAP:
+                        sc = min(sc, 1)
+
+            # ----- AI detection (per answer) -----
+            ai_score, ai_flags = ai_signal_score(ans, qtext_for_ai)
+            out[f"{attr}_AI_Qn{qn}_score"] = round(ai_score, 3)
+            out[f"{attr}_AI_Qn{qn}_flags"] = ";".join(ai_flags)
+            ai_sus = (ai_score >= AI_SUSPECT_THRESHOLD)
+            out[f"{attr}_AI_Qn{qn}_suspected"] = "yes" if ai_sus else "no"
+            any_ai_suspected = any_ai_suspected or ai_sus
+
+            # ----- write score -----
             sk = f"{attr}_Qn{qn}"
             rk = f"{attr}_Rubric_Qn{qn}"
-            ak = f"{attr}_AI_score_Qn{qn}"
-            af = f"{attr}_AI_flags_Qn{qn}"
-
             if sc is None:
                 out.setdefault(sk, ""); out.setdefault(rk, "")
             else:
-                out[sk]  = int(sc)
-                out[rk]  = BANDS[int(sc)]
+                out[sk] = int(sc)
+                out[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-            out[ak] = round(float(ai_score), 3)
-            out[af] = ";".join(sorted(set(ai_flags))) if ai_flags else ""
-
-        # Defaults for missing cells
+        # defaults for missing cells
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
-                out.setdefault(f"{attr}_AI_score_Qn{qn}", "")
-                out.setdefault(f"{attr}_AI_flags_Qn{qn}", "")
+                out.setdefault(f"{attr}_AI_Qn{qn}_score", "")
+                out.setdefault(f"{attr}_AI_Qn{qn}_flags", "")
+                out.setdefault(f"{attr}_AI_Qn{qn}_suspected", "")
 
-        # Attribute avgs + overall
+        # attribute avgs + overall
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
             if not scores:
                 out[f"{attr}_Avg (0–3)"] = ""
-                out[f"{attr}_RANK"]      = ""
+                out[f"{attr}_RANK"] = ""
             else:
                 avg = float(np.mean(scores)); band = int(round(avg))
                 overall_total += band
                 out[f"{attr}_Avg (0–3)"] = round(avg, 2)
-                out[f"{attr}_RANK"]      = BANDS[band]
+                out[f"{attr}_RANK"] = BANDS[band]
 
         out["Overall Total (0–24)"] = overall_total
         out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-
-        # Row-level AI aggregation
-        ai_scores_local = [s for s in ai_scores_local if isinstance(s,(int,float))]
-        out["AI_score_max"]  = round(max(ai_scores_local) if ai_scores_local else 0.0, 3)
-        out["AI_score_avg"]  = round(float(np.mean(ai_scores_local)) if ai_scores_local else 0.0, 3)
-        out["AI_flags_concat"] = ";".join(sorted(set(ai_flags_local))) if ai_flags_local else ""
-
-        # Duplicate cluster metrics
-        dup_sizes, dup_pcts = [], []
-        for txt in per_row_answers[i].values():
-            if not txt: continue
-            size, pct = near_dup_map.get(txt, (1,0.0))
-            dup_sizes.append(size); dup_pcts.append(pct)
-        out["DupClusterSize"] = max(dup_sizes) if dup_sizes else 1
-        out["NearDupPct"]     = round(max(dup_pcts), 3) if dup_pcts else 0.0
-
-        out["AI_suspected"] = bool(out["AI_score_max"] >= AI_SUSPECT_THRESHOLD or out["DupClusterSize"] >= 3 or out["NearDupPct"] >= 0.5)
+        out["AI_suspected"] = bool(any_ai_suspected)
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
@@ -606,16 +521,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 ordered += [
-                    f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}",
-                    f"{attr}_AI_score_Qn{qn}", f"{attr}_AI_flags_Qn{qn}",
+                    f"{attr}_Qn{qn}",
+                    f"{attr}_Rubric_Qn{qn}",
+                    f"{attr}_AI_Qn{qn}_score",
+                    f"{attr}_AI_Qn{qn}_flags",
+                    f"{attr}_AI_Qn{qn}_suspected",
                 ]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
-        ordered += [
-            "Overall Total (0–24)", "Overall Rank",
-            "DupClusterSize", "NearDupPct",
-            "AI_score_max", "AI_score_avg", "AI_flags_concat", "AI_suspected"
-        ]
+        ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
         extras = [c for c in cols if c not in ordered]
         return [c for c in ordered if c in cols] + extras
 
@@ -632,14 +546,8 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.getvalue()
 
 # ==============================
-# Google Sheets
+# Google Sheets (clean)
 # ==============================
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
-
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw: raise ValueError("gcp_service_account missing in secrets.")
     sa = dict(raw)
@@ -688,7 +596,7 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
     ws_name = DEFAULT_WS_NAME
-    if not key: raise ValueError("GSHEETS_SPREADSHEET_KEY not set in st.secrets.")
+    if not key: raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
     gc = gs_client()
     try:
         sh = gc.open_by_key(key)
@@ -721,7 +629,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"❌ {type(e).__name__}: {e}"
 
 # ==============================
-# STAR SCHEMA
+# Optional: star schema (unchanged)
 # ==============================
 def build_star_schema_from_scored(scored: pd.DataFrame):
     cols = list(scored.columns)
@@ -732,6 +640,7 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     attributes = sorted(set([attr_from_score_col(c) for c in qn_score_cols]) |
                         set([c.replace("_Avg (0–3)", "") for c in avg_cols]))
 
+    # Fact: per-question
     qrows = []
     for c in qn_score_cols:
         attr = attr_from_score_col(c)
@@ -746,6 +655,7 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         columns=["ID","Staff ID","Attribute","QuestionNo","Score","RubricBand"]
     )
 
+    # Fact: per-attribute
     arows = []
     for attr in attributes:
         avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"
@@ -757,8 +667,8 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         columns=["ID","Staff ID","Attribute","AvgScore","RankBand"]
     )
 
-    sub_cols = ["ID","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank",
-                "DupClusterSize","NearDupPct","AI_score_max","AI_score_avg","AI_suspected"]
+    # Submission-level
+    sub_cols = ["ID","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]
     for c in sub_cols:
         if c not in scored.columns: scored[c] = np.nan
     submission = scored[sub_cols].copy()
@@ -804,90 +714,72 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         .merge(submission[["ID","date_key"]], on="ID", how="left")
         [["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
     )
-    submission_out = submission[["ID","date_key","staff_key","Duration_min",
-                                 "Overall Total (0–24)","Overall Rank",
-                                 "DupClusterSize","NearDupPct","AI_score_max","AI_score_avg","AI_suspected"]]
-    return {"fact_attribute":fact_attribute,"fact_question":fact_question,
-            "dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
+    submission_out = submission[["ID","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
+    return {"fact_attribute":fact_attribute,"fact_question":fact_question,"dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
 
 # ==============================
-# UI
+# UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring + AI Detection (Offline — no HuggingFace)")
-    st.caption(f"AI_SUSPECT_THRESHOLD={AI_SUSPECT_THRESHOLD} · NEAR_DUP_SIM={NEAR_DUP_SIM}")
+    st.title("📊 Advisory Scoring: Kobo → Centroids + AI Detection → Sheets")
+    st.caption(f"AI_SUSPECT_THRESHOLD={AI_SUSPECT_THRESHOLD:.2f}")
 
-    # Load mapping/exemplars
-    try:
+    AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
+    AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
+
+    def run():
         mapping = load_mapping_from_path(MAPPING_PATH)
-    except Exception as e:
-        st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
-        st.stop()
-
-    try:
         exemplars = read_jsonl_path(EXEMPLARS_PATH)
         if not exemplars:
             st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
             st.stop()
-    except Exception as e:
-        st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
-        st.stop()
 
-    # Build encoder on exemplars + (later) answers
-    with st.spinner("Fetching Kobo submissions..."):
-        df = fetch_kobo_dataframe()
-    if df.empty:
-        st.warning("No Kobo submissions found.")
-        st.stop()
+        with st.spinner("Building semantic centroids..."):
+            q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
-    # Pool answers to include vocabulary in encoder
-    answers_pool = []
-    df_cols = list(df.columns)
-    tmp_map = mapping.to_dict(orient="records")
-    resolved = {}
-    for r in tmp_map:
-        qid = r["question_id"]; hit = resolve_kobo_column_for_mapping(df_cols, qid, r.get("prompt_hint",""))
-        if hit: resolved[qid] = hit
-    for _, row in df.iterrows():
-        for r in tmp_map:
-            col = resolved.get(r["question_id"])
-            if col and col in df.columns:
-                t = clean(row.get(col, ""))
-                if t: answers_pool.append(t)
+        with st.spinner("Fetching Kobo submissions..."):
+            df = fetch_kobo_dataframe()
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            st.stop()
 
-    with st.spinner("Building offline text encoder (TF-IDF+SVD)..."):
-        encode = build_encoder_from_exemplars_and_answers(exemplars, answers_pool)
+        st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
 
-    with st.spinner("Building centroids..."):
-        q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars, encode)
+        with st.spinner("Scoring (+ AI detection)..."):
+            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
-    st.caption("Fetched sample:")
-    st.dataframe(df.head(), use_container_width=True)
+        st.success("✅ Scoring complete.")
+        st.dataframe(scored_df.head(50), use_container_width=True)
 
-    with st.spinner("Scoring + AI detection..."):
-        scored_df = score_dataframe(df, mapping, encode, q_c, a_c, g_c, by_q, qtexts)
+        st.download_button(
+            "⬇️ Download Excel",
+            data=to_excel_bytes(scored_df),
+            file_name="Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
-    st.success("✅ Done.")
-    st.dataframe(scored_df.head(40), use_container_width=True)
+        st.session_state["scored_df"] = scored_df
 
-    st.download_button(
-        "⬇️ Download Excel",
-        data=to_excel_bytes(scored_df),
-        file_name="Advisory_Scoring_AI_Offline.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-
-    with st.expander("📤 Google Sheets export", expanded=True):
-        st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-        st.write("Worksheet name:", DEFAULT_WS_NAME)
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Upload to Google Sheets", use_container_width=True):
+        if AUTO_PUSH:
+            with st.spinner("📤 Sending scored table to Google Sheets..."):
                 ok, msg = upload_df_to_gsheets(scored_df)
+            show_status(ok, msg)
+
+    if AUTO_RUN and not st.session_state.get("auto_ran_once"):
+        st.session_state["auto_ran_once"] = True
+        run()
+
+    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+        run()
+
+    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
+        with st.expander("Google Sheets export", expanded=True):
+            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
+            st.write("Worksheet name:", DEFAULT_WS_NAME)
+            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
+                ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
                 show_status(ok, msg)
-        with col2:
-            st.caption("Tune AI_SUSPECT_THRESHOLD/NEAR_DUP_SIM in secrets for stricter or looser flags.")
 
 if __name__ == "__main__":
     main()
