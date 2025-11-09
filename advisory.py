@@ -1,25 +1,4 @@
-# advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM via Hugging Face Inference API)
-# -> Router -> Sheets, with CASE PACK switcher (one app, many cases)
-#
-# Repo layout (run Streamlit from the QUAL folder):
-# QUAL/
-#   advisory.py
-#   CASES/Case.txt
-#   DATASETS/Case_mapping.csv
-#   DATASETS/Case_exemplars.jsonl
-#
-# Add these in .streamlit/secrets.toml or Streamlit Cloud project settings:
-# KOBO_BASE = "https://kobo.care.org"
-# KOBO_ASSET_ID = "xxxxxx"
-# KOBO_TOKEN = "xxxxxx"
-# LLM_API_BASE = "https://router.huggingface.co/hf-inference"
-# LLM_API_KEY  = "hf_XXXXXXXXXXXXXXXXXXXX"
-# LLM_MODEL    = "HuggingFaceH4/zephyr-7b-beta"
-# GSHEETS_SPREADSHEET_KEY = "your-google-sheet-key"
-# GSHEETS_WORKSHEET_NAME  = "Advisory"
-# MIN_CONF_AUTO = 0.78
-# MAX_DISAGREE  = 1
-# gcp_service_account = { ... }  # full JSON for a service account
+
 
 import streamlit as st
 import json, re, unicodedata, time
@@ -48,8 +27,15 @@ KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 #   CASES/*.txt
 #   DATASETS/<case>_mapping.csv
 #   DATASETS/<case>_exemplars.jsonl
-DATASETS_DIR     = Path("DATASETS")
+
 CASES_DIR        = Path("CASES")  # .txt files per case (e.g., Case.txt)
+KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
+KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
+KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
+
+DATASETS_DIR     = Path("DATASETS")
+MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
+EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
 # Online LLM (Hugging Face Inference API Router) — REQUIRED
 # Example secrets.toml:
@@ -932,3 +918,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
