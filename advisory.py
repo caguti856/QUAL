@@ -27,8 +27,7 @@ DATASETS_DIR     = Path("DATASETS")
 CASES_DIR        = DATASETS_DIR / "cases"  # .txt files per case
 
 # Online LLM (Hugging Face Inference API Router) — REQUIRED
-# Set in .streamlit/secrets.toml for Streamlit Cloud or in local .streamlit/secrets.toml
-# Example:
+# Set in .streamlit/secrets.toml or Streamlit Cloud project settings, for example:
 # LLM_API_BASE = "https://router.huggingface.co/hf-inference"
 # LLM_API_KEY  = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
 # LLM_MODEL    = "HuggingFaceH4/zephyr-7b-beta"
@@ -270,7 +269,6 @@ def build_centroids(exemplars: list[dict]):
 
     q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
     attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
-
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
         sc = int(e.get("score",0)); txt = clean(e.get("text",""))
@@ -423,7 +421,7 @@ def _centroid_pick_with_conf(q_sims: dict[int,float], a_sims: dict[int,float], g
     return band, conf
 
 # ==============================
-# SCORER (MANDATORY HYBRID) — now accepts case_text
+# SCORER (MANDATORY HYBRID) — accepts case_text
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -803,7 +801,7 @@ def main():
         st.error("No cases found in DATASETS/cases/*.txt")
         st.stop()
 
-    # allow query param (?case=jesca_geda) if available, else first
+    # allow query param (?case=Case1) if available, else first
     try:
         qp_case = st.query_params.get("case", [""])[0]
     except Exception:
