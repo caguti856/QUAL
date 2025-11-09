@@ -1,23 +1,17 @@
 # advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM) -> Router -> Sheets
-# Online LLM is REQUIRED. Supports:
-#   • OpenAI-compatible /v1/chat/completions
-#   • Hugging Face Router text-generation (POST {BASE}/{MODEL})
-#
-# Case text is stored in secrets as CASE1 (string).
-# Local dataset files:
-#   DATASETS/mapping.csv
-#   DATASETS/advisory_exemplars_smart.cleaned.jsonl
+# Fast path: preprocessing first (mapping->answers->embeddings->centroids), disk caches, matrix sims, optional LLM skip/parallel.
 
 import streamlit as st
-import json, re, unicodedata, time
+import json, re, unicodedata, time, hashlib, pickle
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import gspread
 from google.oauth2.service_account import Credentials
-from dataclasses import dataclass
 
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
@@ -33,17 +27,32 @@ DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
 EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
-# Case text now comes from secrets (required)
-CASE1_TEXT       = (st.secrets.get("CASE1", "") or "").strip()
+CASE1_TEXT       = st.secrets.get("CASE1", "")  # case study text from secrets
 
-# Online LLM (OpenAI-compatible or HF Router) — REQUIRED
+# OpenAI-compatible LLM (REQUIRED unless centroid-only enabled)
 LLM_API_BASE     = (st.secrets.get("LLM_API_BASE", "") or "").rstrip("/")
 LLM_API_KEY      = st.secrets.get("LLM_API_KEY", "")
 LLM_MODEL        = st.secrets.get("LLM_MODEL", "")
 LLM_TEMPERATURE  = float(st.secrets.get("LLM_TEMPERATURE", 0.2))
 LLM_TIMEOUT_SEC  = int(st.secrets.get("LLM_TIMEOUT_SEC", 60))
 
-# Bands / labels
+# Knobs
+FUZZY_THRESHOLD  = 80
+MIN_QA_OVERLAP   = 0.05
+MIN_CONF_AUTO    = float(st.secrets.get("MIN_CONF_AUTO", 0.78))
+MAX_DISAGREE     = int(st.secrets.get("MAX_DISAGREE", 1))
+
+# Speed/Cost knobs
+SKIP_LLM_IF_CONF  = float(st.secrets.get("SKIP_LLM_IF_CONF", 0.86))   # if centroid conf >= this AND overlap ok => skip LLM
+SKIP_LLM_MIN_OVLP = float(st.secrets.get("SKIP_LLM_MIN_OVLP", 0.08))
+MAX_PARALLEL_LLM  = int(st.secrets.get("MAX_PARALLEL_LLM", 6))
+CENTROID_ONLY     = bool(st.secrets.get("CENTROID_ONLY", False))      # hard disable LLM (useful while routing is not ready)
+
+# Google Sheets
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
+
+# Labels
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
     ("Exemplary Thought Leader", 21, 24),
@@ -62,18 +71,16 @@ ORDERED_ATTRS = [
     "Capacity strengthening & empowerment support",
 ]
 
-# Heuristics + router thresholds
-FUZZY_THRESHOLD = 80
-MIN_QA_OVERLAP  = 0.05
-MIN_CONF_AUTO   = float(st.secrets.get("MIN_CONF_AUTO", 0.78))
-MAX_DISAGREE    = int(st.secrets.get("MAX_DISAGREE", 1))
-
-# Google Sheets
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
+# Caches
+CACHE_DIR = Path(".st_cache"); CACHE_DIR.mkdir(parents=True, exist_ok=True)
+def _cache_path(name: str) -> Path: return CACHE_DIR / f"{name}.pkl"
+def _save_pickle(p: Path, obj): 
+    with p.open("wb") as f: pickle.dump(obj, f)
+def _load_pickle(p: Path):
+    try:
+        with p.open("rb") as f: return pickle.load(f)
+    except Exception:
+        return None
 
 # ==============================
 # SMALL HELPERS
@@ -83,10 +90,6 @@ def clean(s):
     s = unicodedata.normalize("NFKC", str(s))
     return re.sub(r"\s+"," ", s).strip()
 
-def cos_sim(a, b):
-    if a is None or b is None: return -1e9
-    return float(np.dot(a, b))
-
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
@@ -94,9 +97,6 @@ def qa_overlap(ans: str, qtext: str) -> float:
 
 AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
 def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
-
-def show_status(ok: bool, msg: str) -> None:
-    (st.success if ok else st.error)(msg)
 
 # ==============================
 # LOADERS (mapping / exemplars)
@@ -125,7 +125,7 @@ def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_kobo_dataframe() -> pd.DataFrame:
+def fetch_kobo_dataframe(sample_n: int | None = None) -> pd.DataFrame:
     if not KOBO_ASSET_ID or not KOBO_TOKEN:
         st.warning("Set KOBO_ASSET_ID and KOBO_TOKEN in st.secrets.")
         return pd.DataFrame()
@@ -141,6 +141,8 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
             if not results and "results" not in payload: results = payload
             df = pd.DataFrame(results)
             if not df.empty: df.columns = [str(c).strip() for c in df.columns]
+            if sample_n and len(df) > sample_n:
+                df = df.sample(sample_n, random_state=42).reset_index(drop=True)
             return df
         except requests.HTTPError:
             if r.status_code in (401, 403):
@@ -217,27 +219,33 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
     return None
 
 # ==============================
-# EMBEDDINGS / CENTROIDS
+# EMBEDDINGS / CENTROIDS (CACHED)
 # ==============================
 @st.cache_resource(show_spinner=False)
 def get_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-def build_centroids(exemplars: list[dict]):
+def _build_centroids_cached(exemplars: list[dict]):
+    # cache key from exemplars length + simple hash
+    raw_key = json.dumps([e.get("question_id","")+e.get("question_text","")+str(e.get("score","")) for e in exemplars])[:200000]
+    key = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
+    cp = _cache_path(f"centroids_{key}")
+    cached = _load_pickle(cp)
+    if cached: return cached
+
     by_qkey, by_attr, question_texts = {}, {}, []
+    def C(x): return clean(x)
     for e in exemplars:
-        qid   = clean(e.get("question_id",""))
-        qtext = clean(e.get("question_text",""))
-        score = int(e.get("score",0))
-        text  = clean(e.get("text",""))
-        attr  = clean(e.get("attribute",""))
+        qid, qtext = C(e.get("question_id","")), C(e.get("question_text",""))
+        score, text = int(e.get("score",0)), C(e.get("text",""))
+        attr = C(e.get("attribute",""))
         if not qid and not qtext: continue
-        key = qid if qid else qtext
-        if key not in by_qkey:
-            by_qkey[key] = {"attribute": attr, "question_text": qtext, "scores": [], "texts": []}
+        keyq = qid if qid else qtext
+        if keyq not in by_qkey:
+            by_qkey[keyq] = {"attribute": attr, "question_text": qtext, "scores": [], "texts": []}
             if qtext: question_texts.append(qtext)
-        by_qkey[key]["scores"].append(score)
-        by_qkey[key]["texts"].append(text)
+        by_qkey[keyq]["scores"].append(score)
+        by_qkey[keyq]["texts"].append(text)
         by_attr.setdefault(attr, {0:[],1:[],2:[],3:[]})
         by_attr[attr][score].append(text)
 
@@ -245,7 +253,7 @@ def build_centroids(exemplars: list[dict]):
 
     def centroid(texts):
         if not texts: return None
-        embs = embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        embs = embedder.encode(texts, batch_size=128, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
         return embs.mean(axis=0)
 
     def build_centroids_for_q(texts, scores):
@@ -258,19 +266,26 @@ def build_centroids(exemplars: list[dict]):
     attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
-        sc = int(e.get("score",0)); txt = clean(e.get("text",""))
+        sc = int(e.get("score",0)); txt = C(e.get("text",""))
         if txt: global_buckets[sc].append(txt)
     global_centroids = {sc: centroid(txts) for sc, txts in global_buckets.items()}
-    return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
 
-_embed_cache: dict[str, np.ndarray] = {}
-def embed_cached(text: str):
-    t = clean(text)
-    if not t: return None
-    if t in _embed_cache: return _embed_cache[t]
-    vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-    _embed_cache[t] = vec
-    return vec
+    # also precompute band matrices
+    def _as_matrix(centroid_map: dict[int,np.ndarray]):
+        items = [(b,v) for b,v in centroid_map.items() if v is not None]
+        if not items:
+            return [], None
+        items.sort(key=lambda x:x[0])
+        bands = [b for b,_ in items]
+        mat = np.vstack([v for _,v in items])  # normalized
+        return bands, mat
+
+    attr_mats = {attr: _as_matrix(m) for attr, m in attr_centroids.items()}
+    glob_bands, glob_mat = _as_matrix(global_centroids)
+
+    result = (q_centroids, attr_centroids, global_centroids, by_qkey, question_texts, attr_mats, (glob_bands, glob_mat))
+    _save_pickle(cp, result)
+    return result
 
 def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
     qid = (qid or "").strip()
@@ -283,8 +298,27 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
             if clean(pack["question_text"]) == wanted: return k
     return None
 
+def embed_distinct_answers(df: pd.DataFrame, resolved_for_qid: dict[str,str]) -> dict[str, np.ndarray]:
+    texts = []
+    for _, row in df.iterrows():
+        for qid, col in resolved_for_qid.items():
+            if col in df.columns:
+                a = clean(row.get(col, ""))
+                if a: texts.append(a)
+    uniq = sorted(set(texts))
+    key = hashlib.md5(("\n".join(uniq)).encode("utf-8")).hexdigest()
+    cp = _cache_path(f"answer_vecs_{key}")
+    cached = _load_pickle(cp)
+    if cached is not None: return cached
+    if not uniq: return {}
+    embedder = get_embedder()
+    vecs = embedder.encode(uniq, batch_size=64, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+    ans2vec = {t:v for t,v in zip(uniq, vecs)}
+    _save_pickle(cp, ans2vec)
+    return ans2vec
+
 # ==============================
-# REQUIRED ONLINE LLM (OpenAI-compatible or HF Router)
+# REQUIRED ONLINE LLM (OpenAI-compatible)
 # ==============================
 @dataclass
 class LLMResult:
@@ -296,6 +330,7 @@ SYSTEM_PROMPT = (
     "You are a careful assessor. Score answers 0–3 using the rubric. "
     "Respond ONLY in compact JSON with keys: band (0..3) and reason (<=50 words)."
 )
+
 USER_TMPL = """CASE:
 {case}
 
@@ -315,90 +350,41 @@ Return JSON: {{"band":0-3,"reason":"<=50 words"}}.
 """
 
 def _assert_llm_ready():
+    if CENTROID_ONLY:
+        return
     if not LLM_API_BASE or not LLM_API_KEY or not LLM_MODEL:
-        raise RuntimeError("LLM_API_BASE, LLM_API_KEY, and LLM_MODEL must be set in st.secrets (online LLM is required).")
+        raise RuntimeError("LLM_API_BASE, LLM_API_KEY, and LLM_MODEL must be set in st.secrets (or set CENTROID_ONLY=true).")
 
-@st.cache_resource(show_spinner=False)
-def _llm_session_ready():
-    _assert_llm_ready()
-    return True
-
-def _is_hf_router() -> bool:
-    return "huggingface.co" in (LLM_API_BASE or "")
-
-def _call_openai_compatible(messages, temperature=LLM_TEMPERATURE, max_tokens=160) -> str:
+def _post_chat(messages, temperature=LLM_TEMPERATURE, max_tokens=160):
     url = f"{LLM_API_BASE}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": LLM_MODEL,
-        "temperature": float(temperature),
-        "max_tokens": int(max_tokens),
-        "messages": messages,
-    }
+    payload = {"model": LLM_MODEL, "temperature": float(temperature), "max_tokens": int(max_tokens), "messages": messages}
     r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
     if r.status_code == 429:
         time.sleep(2.0)
         r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
     r.raise_for_status()
-    data = r.json()
-    return data["choices"][0]["message"]["content"]
-
-def _call_hf_router(prompt: str, temperature=LLM_TEMPERATURE, max_new_tokens=200) -> str:
-    # HF router expects: POST {BASE}/{MODEL}
-    url = f"{LLM_API_BASE.rstrip('/')}/{LLM_MODEL}"
-    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "temperature": float(temperature),
-            "max_new_tokens": int(max_new_tokens),
-            "return_full_text": False
-        }
-    }
-    for attempt in range(2):
-        r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
-        if r.status_code in (200, 201):
-            data = r.json()
-            if isinstance(data, list) and data and "generated_text" in data[0]:
-                return data[0]["generated_text"]
-            if isinstance(data, dict) and "generated_text" in data:
-                return data["generated_text"]
-            return str(data)
-        if r.status_code in (422, 503, 524, 408, 429):
-            time.sleep(1.5)
-            continue
-        r.raise_for_status()
-    r.raise_for_status()
+    return r.json()
 
 def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> LLMResult:
-    _llm_session_ready()
-    user_payload = USER_TMPL.format(
-        case=(case_text or "").strip(),
-        question=(question_text or "").strip(),
-        answer=(answer_text or "").strip()
-    )
+    if CENTROID_ONLY:
+        return LLMResult(None, "LLM disabled (CENTROID_ONLY)", "")
+    user_payload = USER_TMPL.format(case=(case_text or "").strip(),
+                                    question=(question_text or "").strip(),
+                                    answer=(answer_text or "").strip())
     try:
-        if _is_hf_router():
-            full_prompt = (SYSTEM_PROMPT + "\n\n" + user_payload).strip()
-            text = _call_hf_router(full_prompt, temperature=LLM_TEMPERATURE, max_new_tokens=220)
-        else:
-            text = _call_openai_compatible(
-                messages=[{"role":"system","content":SYSTEM_PROMPT},
-                          {"role":"user","content":user_payload}],
-                temperature=LLM_TEMPERATURE,
-                max_tokens=200
-            )
+        resp = _post_chat(
+            messages=[{"role":"system","content":SYSTEM_PROMPT},
+                      {"role":"user","content":user_payload}]
+        )
+        text = resp["choices"][0]["message"]["content"].strip()
         raw = text
-        text = (text or "").replace("```json","").replace("```","").strip()
-        # Extract first JSON object
-        start = text.find("{"); end = text.rfind("}")
-        blob = text[start:end+1] if (start >= 0 and end > start) else text
-        data = json.loads(blob)
+        text = text.replace("```json","").replace("```","").strip()
+        data = json.loads(text)
         band = int(data.get("band")) if "band" in data else None
         reason = str(data.get("reason","")).strip()
-        if band not in (0,1,2,3):
-            return LLMResult(None, "LLM band invalid.", raw)
-        return LLMResult(band, reason[:140], raw)
+        if band not in (0,1,2,3): return LLMResult(None, "LLM band invalid.", raw)
+        return LLMResult(band, reason[:140] if reason else "", raw)
     except Exception as e:
         return LLMResult(None, f"LLM error: {e}", "")
 
@@ -406,41 +392,43 @@ def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> L
 # CONFIDENCE (centroids)
 # ==============================
 def _softmax_like(scores: dict[int, float]) -> dict[int, float]:
-    import math
     if not scores: return {}
     vals = list(scores.values()); m = max(vals)
-    exps = {k: math.exp(v - m) for k, v in scores.items()}
+    exps = {k: float(np.exp(v - m)) for k, v in scores.items()}
     s = sum(exps.values())
     return {k: (v/s) for k, v in exps.items()} if s > 0 else {k:0.0 for k in scores}
 
+def _sim_bands(vec: np.ndarray, bands, mat):
+    if mat is None: return {}
+    sims = mat @ vec  # normalized vectors => cosine
+    return {b: float(s) for b, s in zip(bands, sims)}
+
 def _centroid_pick_with_conf(q_sims: dict[int,float], a_sims: dict[int,float], g_sims: dict[int,float]):
-    # Weight the question-specific signal highest, then attribute, then global
     qw = 1.0 if q_sims else 0.0; aw = 0.6 if a_sims else 0.0; gw = 0.4 if g_sims else 0.0
     qp = _softmax_like(q_sims) if q_sims else {}
     ap = _softmax_like(a_sims) if a_sims else {}
     gp = _softmax_like(g_sims) if g_sims else {}
     mix = {b: qw*qp.get(b,0)+aw*ap.get(b,0)+gw*gp.get(b,0) for b in (0,1,2,3)}
-    band = max(mix, key=mix.get) if mix else None
-    conf = float(mix[band]) if band is not None else 0.0
+    if not mix: return None, 0.0
+    band = max(mix, key=mix.get); conf = float(mix[band])
     return band, conf
 
 # ==============================
-# SCORER (MANDATORY HYBRID)
+# SCORER (Preprocess-first, batched LLM)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
-                    q_centroids, attr_centroids, global_centroids,
-                    by_qkey, question_texts, case_text: str):
+                    q_centroids, by_qkey, question_texts,
+                    attr_mats, glob_pack,
+                    case_text: str):
 
     df_cols = list(df.columns)
-
-    with st.expander("🔎 Debug: Advisory section columns present", expanded=False):
+    with st.expander("🔎 Advisory-ish columns present", expanded=False):
         sample_cols = [c for c in df_cols if "/A" in c or "Advisory/" in c or c.startswith("A")]
         st.write(sample_cols[:80])
 
     staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id")), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
-
     start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
     end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
 
@@ -449,10 +437,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    rows_out = []
+    # --- PREPROCESSING #1: resolve Kobo columns once ---
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
-
-    # resolve Kobo columns
     resolved_for_qid, missing_map_rows = {}, []
     for r in all_mapping:
         qid   = r["question_id"]
@@ -469,16 +455,16 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             st.warning(f"{len(missing_map_rows)} question_ids not found (showing up to 30).")
             st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
 
-    # pre-embed distinct answers
-    distinct_answers = set()
-    for _, resp in df.iterrows():
-        for r in all_mapping:
-            qid = r["question_id"]; col = resolved_for_qid.get(qid)
-            if col and col in df.columns:
-                a = clean(resp.get(col, "")); 
-                if a: distinct_answers.add(a)
-    for t in distinct_answers: _ = embed_cached(t)
+    # --- PREPROCESSING #2: embed distinct answers (disk cache) ---
+    ans2vec = embed_distinct_answers(df, resolved_for_qid)
 
+    # convenience from centroid mats
+    attr_mats_local = attr_mats  # {attr: (bands, mat)}
+    glob_bands, glob_mat = glob_pack
+
+    # --- PREP LLM WORK QUEUE (first pass: compute centroid + routing decisions) ---
+    cells = {}   # key=(row_idx, attr, qn) -> info dict
+    rows_out = []
     for i, resp in df.iterrows():
         out = {}
         out["ID"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
@@ -497,8 +483,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             ans = clean(resp.get(dfcol, "")); 
             if not ans: continue
             ai_flags.append(looks_ai_like(ans))
-            vec = embed_cached(ans)
-
+            vec = ans2vec.get(ans)
             # only Q1..Q4
             qn = None
             if "_Q" in (qid or ""):
@@ -506,69 +491,54 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 except: qn = None
             if qn not in (1,2,3,4): continue
 
-            # ----- centroid branch -----
-            sims_q = sims_a = sims_g = {}
+            # centroid sims (matrix)
+            sims_q = {}
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
             if vec is not None:
                 if qkey and qkey in q_centroids:
-                    sims_q = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
-                if attr in attr_centroids:
-                    sims_a = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
-                sims_g = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
-            cent_band, cent_conf = _centroid_pick_with_conf(sims_q, sims_a, sims_g) if (sims_q or sims_a or sims_g) else (None, 0.0)
+                    # build once-per-qkey matrix lazily
+                    q_bands, q_mat = None, None
+                    # cache per-session in st.session_state
+                    qcache = st.session_state.setdefault("_qkey_mats", {})
+                    if qkey not in qcache:
+                        items = [(b,v) for b,v in q_centroids[qkey].items() if v is not None]
+                        if items:
+                            items.sort(key=lambda x:x[0])
+                            q_bands = [b for b,_ in items]
+                            q_mat   = np.vstack([v for _,v in items])
+                        qcache[qkey] = (q_bands, q_mat)
+                    q_bands, q_mat = qcache[qkey]
+                    sims_q = _sim_bands(vec, q_bands, q_mat) if q_mat is not None else {}
 
-            # ----- LLM branch (REQUIRED online) -----
+                bands_a, mat_a = attr_mats_local.get(attr, ([], None))
+                sims_a = _sim_bands(vec, bands_a, mat_a) if mat_a is not None else {}
+                sims_g = _sim_bands(vec, glob_bands, glob_mat) if glob_mat is not None else {}
+            else:
+                sims_a = sims_g = {}
+
+            cent_band, cent_conf = _centroid_pick_with_conf(sims_q, sims_a, sims_g)
+
             qtext_for_llm = (by_qkey.get(qkey, {}) or {}).get("question_text","") if qkey else ""
             if not qtext_for_llm: qtext_for_llm = qhint or ""
-            llm = llm_score_via_api(case_text, qtext_for_llm, ans)
 
-            # ----- guards -----
-            qtext = (by_qkey.get(qkey, {}) or {}).get("question_text","")
-            overlap = qa_overlap(ans, qtext or qhint)
+            qtext_full = (by_qkey.get(qkey, {}) or {}).get("question_text","")
+            overlap = qa_overlap(ans, qtext_full or qhint)
             risky = looks_ai_like(ans)
 
-            # ----- fusion (robust) -----
-            if cent_band is None and llm.band is None:
-                final_band = None
-                route, route_reason = "review", "No usable signals"
-                final_conf = 0.0
-            elif llm.band is None:
-                # LLM down/failed → rely on centroids only
-                final_band = cent_band
-                final_conf = min(cent_conf, 0.95)
-                if final_conf >= max(0.72, MIN_CONF_AUTO - 0.06):
-                    route, route_reason = "auto", "LLM unavailable; centroid high confidence"
-                else:
-                    route, route_reason = "review", "LLM unavailable; centroid low confidence"
-            elif cent_band is None:
-                # No centroid signal → rely on LLM only (conservative)
-                final_band = llm.band
-                final_conf = 0.60
-                route = "review" if final_conf < MIN_CONF_AUTO else "auto"
-                route_reason = "LLM only"
-            else:
-                # Both present → standard agreement logic
-                if abs(cent_band - llm.band) > MAX_DISAGREE:
-                    final_band = min(cent_band, llm.band)
-                    route, route_reason = "review", "LLM/centroid disagreement"
-                    final_conf = min(cent_conf, 0.6)
-                else:
-                    final_band = int(round((cent_band + llm.band)/2))
-                    final_conf = min(cent_conf, 0.95)
-                    route = "auto" if (final_conf >= MIN_CONF_AUTO) else "review"
-                    route_reason = "High confidence" if route=="auto" else "Low confidence"
+            # decide if we will call LLM
+            use_llm = (not CENTROID_ONLY)
+            if cent_band is not None and cent_conf >= SKIP_LLM_IF_CONF and overlap >= SKIP_LLM_MIN_OVLP and not risky:
+                use_llm = False
 
-            # enforce content/overlap guards
-            if overlap < MIN_QA_OVERLAP:
-                final_band = min(final_band if final_band is not None else 1, 1)
-                route, route_reason = "review", "Low Q/A overlap"
-                final_conf = min(final_conf, 0.65)
+            cells[(i,attr,qn)] = {
+                "ans": ans,
+                "qtext_for_llm": qtext_for_llm,
+                "cent_band": cent_band, "cent_conf": cent_conf,
+                "overlap": overlap, "risky": risky,
+                "use_llm": use_llm
+            }
 
-            if risky:
-                route, route_reason = "review", "AI-like pattern"
-                final_conf = min(final_conf, 0.6)
-
-            # write columns
+            # pre-fill columns; final fusion after LLM phase
             sk = f"{attr}_Qn{qn}"
             rk = f"{attr}_Rubric_Qn{qn}"
             ck = f"{attr}_Qn{qn}_Confidence"
@@ -579,22 +549,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             cb = f"{attr}_Centroid_Qn{qn}"
             cc = f"{attr}_CentroidConfidence_Qn{qn}"
 
-            if final_band is None:
-                out.setdefault(sk, ""); out.setdefault(rk, ""); out.setdefault(ck, "")
-                out.setdefault(tk, "review"); out.setdefault(rr, route_reason or "No signal")
-                out.setdefault(lk, llm.band if llm.band is not None else ""); out.setdefault(lr, llm.reason or "")
-                out.setdefault(cb, cent_band if cent_band is not None else ""); out.setdefault(cc, round(cent_conf,3) if cent_band is not None else "")
-            else:
-                out[sk] = int(final_band)
-                out[rk] = BANDS[int(final_band)]
-                out[ck] = round(float(final_conf), 3)
-                out[tk] = route
-                out[rr] = route_reason
-                out[lk] = llm.band if llm.band is not None else ""
-                out[lr] = llm.reason or ""
-                out[cb] = cent_band if cent_band is not None else ""
-                out[cc] = round(cent_conf,3) if cent_band is not None else ""
-                per_attr.setdefault(attr, []).append(int(final_band))
+            out.setdefault(sk, ""); out.setdefault(rk, ""); out.setdefault(ck, "")
+            out.setdefault(tk, "review"); out.setdefault(rr, "Incomplete signals")
+            out.setdefault(lk, ""); out.setdefault(lr, "")
+            out.setdefault(cb, cent_band if cent_band is not None else "")
+            out.setdefault(cc, round(cent_conf,3) if cent_band is not None else "")
 
         # defaults for missing cells
         for attr in ORDERED_ATTRS:
@@ -604,23 +563,105 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     col = f"{attr}{suffix.replace('{n}', str(qn))}"
                     out.setdefault(col, "")
 
-        # attribute avgs + overall
+        out["_per_attr_scores"] = {}   # temp bag
+        out["_ai_flags"] = ai_flags
+        rows_out.append(out)
+
+    # --- LLM PHASE (batched & parallel) ---
+    def _llm_batch_call(jobs):
+        results = {}
+        if not jobs: return results
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_LLM) as ex:
+            futs = {}
+            for key, cell in jobs.items():
+                futs[ex.submit(llm_score_via_api, case_text, cell["qtext_for_llm"], cell["ans"])] = key
+            for fut in as_completed(futs):
+                key = futs[fut]
+                try:
+                    results[key] = fut.result()
+                except Exception as e:
+                    results[key] = LLMResult(None, f"LLM error: {e}", "")
+        return results
+
+    jobs = {k:v for k,v in cells.items() if v["use_llm"]}
+    llm_out = _llm_batch_call(jobs)
+
+    # --- FUSION PHASE (final bands, routes, reasons) ---
+    for (i, attr, qn), info in cells.items():
+        row = rows_out[i]
+        sk = f"{attr}_Qn{qn}"
+        rk = f"{attr}_Rubric_Qn{qn}"
+        ck = f"{attr}_Qn{qn}_Confidence"
+        tk = f"{attr}_Qn{qn}_Route"
+        rr = f"{attr}_Qn{qn}_RouteReason"
+        lk = f"{attr}_LLM_Qn{qn}"
+        lr = f"{attr}_LLM_reason_Qn{qn}"
+        cb = f"{attr}_Centroid_Qn{qn}"
+        cc = f"{attr}_CentroidConfidence_Qn{qn}"
+
+        cent_band, cent_conf = info["cent_band"], info["cent_conf"]
+        overlap, risky = info["overlap"], info["risky"]
+        if info["use_llm"]:
+            llm = llm_out.get((i,attr,qn), LLMResult(None,"LLM missing",""))
+        else:
+            llm = LLMResult(cent_band, "High centroid confidence; LLM skipped", "")
+
+        # fusion
+        if cent_band is None or llm.band is None:
+            final_band = min(cent_band if cent_band is not None else 3,
+                             llm.band   if llm.band   is not None else 3) if (cent_band is not None or llm.band is not None) else None
+            route, route_reason = "review", "Incomplete signals"
+            final_conf = min(cent_conf or 0.0, 0.6)
+        else:
+            if abs(cent_band - llm.band) > MAX_DISAGREE:
+                final_band = min(cent_band, llm.band)
+                route, route_reason = "review", "LLM/centroid disagreement"
+                final_conf = min(cent_conf, 0.6)
+            else:
+                final_band = int(round((cent_band + llm.band)/2))
+                final_conf = min(cent_conf or 0.0, 0.95)
+                route = "auto" if (final_conf >= MIN_CONF_AUTO) else "review"
+                route_reason = "High confidence" if route=="auto" else "Low confidence"
+
+        if overlap < MIN_QA_OVERLAP:
+            final_band = min(final_band if final_band is not None else 1, 1)
+            route, route_reason = "review", "Low Q/A overlap"
+            final_conf = min(final_conf, 0.65)
+
+        if risky:
+            route, route_reason = "review", "AI-like pattern"
+            final_conf = min(final_conf, 0.6)
+
+        if final_band is not None:
+            row[sk] = int(final_band)
+            row[rk] = BANDS[int(final_band)]
+            row[ck] = round(float(final_conf), 3)
+            row[tk] = route
+            row[rr] = route_reason
+            row[lk] = llm.band if llm.band is not None else ""
+            row[lr] = llm.reason or ""
+            row[cb] = cent_band if cent_band is not None else ""
+            row[cc] = round(cent_conf,3) if cent_band is not None else ""
+            row["_per_attr_scores"].setdefault(attr, []).append(int(final_band))
+
+    # --- rollups ---
+    for row in rows_out:
         overall_total = 0
         for attr in ORDERED_ATTRS:
-            scores = per_attr.get(attr, [])
+            scores = row["_per_attr_scores"].get(attr, [])
             if not scores:
-                out[f"{attr}_Avg (0–3)"] = ""
-                out[f"{attr}_RANK"] = ""
+                row[f"{attr}_Avg (0–3)"] = ""
+                row[f"{attr}_RANK"] = ""
             else:
                 avg = float(np.mean(scores)); band = int(round(avg))
                 overall_total += band
-                out[f"{attr}_Avg (0–3)"] = round(avg, 2)
-                out[f"{attr}_RANK"] = BANDS[band]
-
-        out["Overall Total (0–24)"] = overall_total
-        out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        out["AI_suspected"] = bool(any(ai_flags))
-        rows_out.append(out)
+                row[f"{attr}_Avg (0–3)"] = round(avg, 2)
+                row[f"{attr}_RANK"] = BANDS[band]
+        row["Overall Total (0–24)"] = overall_total
+        row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        row["AI_suspected"] = bool(any(row["_ai_flags"]))
+        # cleanup
+        del row["_per_attr_scores"]; del row["_ai_flags"]
 
     res_df = pd.DataFrame(rows_out)
 
@@ -788,31 +829,25 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     dim_attribute = pd.DataFrame({"attribute_name": attributes})
     if not dim_attribute.empty:
         dim_attribute["attribute_key"] = dim_attribute["attribute_name"].astype("category").cat.codes + 1
-    dim_attribute = dim_attribute[["attribute_key","attribute_name"]] if not dim_attribute.empty else pd.DataFrame(columns=["attribute_key","attribute_name"])
+        dim_attribute = dim_attribute[["attribute_key","attribute_name"]]
 
-    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"])) if not dim_staff.empty else {}
-    attr_map  = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"])) if not dim_attribute.empty else {}
+    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"]))
+    attr_map  = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"]))
 
-    submission["staff_key"] = submission["Staff ID"].map(staff_map) if not submission.empty else pd.Series(dtype="Int64")
+    submission["staff_key"] = submission["Staff ID"].map(staff_map)
 
-    fact_attribute = (pd.DataFrame(columns=["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"])
-        if not arows else
-        pd.concat(arows, ignore_index=True)
-        .assign(staff_key=lambda d: d["Staff ID"].map(staff_map),
-                attribute_key=lambda d: d["Attribute"].map(attr_map))
+    fact_attribute = (fact_attribute
+        .assign(staff_key=fact_attribute["Staff ID"].map(staff_map),
+                attribute_key=fact_attribute["Attribute"].map(attr_map))
         .merge(submission[["ID","date_key"]], on="ID", how="left")
         [["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
     )
-
-    fact_question = (pd.DataFrame(columns=["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"])
-        if not qrows else
-        pd.concat(qrows, ignore_index=True)
-        .assign(staff_key=lambda d: d["Staff ID"].map(staff_map),
-                attribute_key=lambda d: d["Attribute"].map(attr_map))
+    fact_question = (fact_question
+        .assign(staff_key=fact_question["Staff ID"].map(staff_map),
+                attribute_key=fact_question["Attribute"].map(attr_map))
         .merge(submission[["ID","date_key"]], on="ID", how="left")
         [["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
     )
-
     submission_out = submission[["ID","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
     return {"fact_attribute":fact_attribute,"fact_question":fact_question,"dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
 
@@ -820,60 +855,63 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
 # UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring — REQUIRED Hybrid (Centroids + Online LLM) → Router → Sheets")
-    st.caption(f"MIN_CONF_AUTO={MIN_CONF_AUTO} · MAX_DISAGREE={MAX_DISAGREE} · Model: {LLM_MODEL or 'unset'}")
+    st.title("📊 Advisory Scoring — Hybrid (Centroids + Online LLM) → Router → Sheets")
+    st.caption(f"MIN_CONF_AUTO={MIN_CONF_AUTO} · MAX_DISAGREE={MAX_DISAGREE} · Model: {LLM_MODEL or 'unset'} · CENTROID_ONLY={CENTROID_ONLY}")
 
-    # Ensure LLM + case text are configured
+    # Ensure LLM is configured or explicitly disabled
     try:
         _assert_llm_ready()
     except Exception as e:
-        st.error(str(e)); st.stop()
+        st.error(str(e))
+        st.stop()
 
-    if not CASE1_TEXT:
-        st.error("CASE1 (case study text) is missing or empty in st.secrets."); st.stop()
+    # Case text
+    case_text = (CASE1_TEXT or "").strip()
+    if not case_text:
+        st.error("CASE1 is missing or empty in st.secrets. Add the case study text under the key CASE1.")
+        st.stop()
+
+    # Optional sample parameter for dev speed (?sample=30)
+    try:
+        qp = st.query_params
+        sample_n = int(qp.get("sample", [0])[0]) if qp and qp.get("sample") else None
+    except Exception:
+        sample_n = None
 
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
-    AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
     PUSH_STAR = bool(st.secrets.get("PUSH_STAR_SCHEMA", True))
 
-    # Quick environment summary
-    with st.expander("⚙️ Runtime config", expanded=False):
-        st.write({
-            "LLM_API_BASE": LLM_API_BASE,
-            "LLM_MODEL": LLM_MODEL,
-            "RouterMode": "HF Router" if "huggingface.co" in (LLM_API_BASE or "") else "OpenAI-compatible",
-            "MIN_CONF_AUTO": MIN_CONF_AUTO,
-            "MAX_DISAGREE": MAX_DISAGREE,
-        })
-
     def run_pipeline():
-        # 1) Load config files
-        mapping = load_mapping_from_path(MAPPING_PATH)
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars:
-            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-            st.stop()
+        with st.spinner("1) Loading mapping…"):
+            mapping = load_mapping_from_path(MAPPING_PATH)
 
-        # 2) Build centroids
-        with st.spinner("Building semantic centroids..."):
-            q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
-
-        # 3) Fetch Kobo
-        with st.spinner("Fetching Kobo submissions..."):
-            df = fetch_kobo_dataframe()
+        with st.spinner("2) Fetching Kobo submissions…"):
+            df = fetch_kobo_dataframe(sample_n=sample_n)
         if df.empty:
-            st.warning("No Kobo submissions found."); st.stop()
+            st.warning("No Kobo submissions found.")
+            st.stop()
+        st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
 
-        st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
+        # Preprocessing-first: resolve columns + embed unique answers BEFORE centroids
+        # (answer cache doesn't depend on exemplars; speeds up iteration)
+        df_cols = list(df.columns)
+        resolved_for_qid = {}
+        all_map = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
+        for r in all_map:
+            qid   = r["question_id"]; qhint = r.get("prompt_hint","")
+            hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+            if hit: resolved_for_qid[qid] = hit
+        with st.spinner("3) Pre-embedding distinct answers…"):
+            _ = embed_distinct_answers(df, resolved_for_qid)
 
-        # 4) Score (hybrid)
-        with st.spinner("Scoring with hybrid (centroids + online LLM) and routing..."):
-            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, CASE1_TEXT)
+        with st.spinner("4) Building semantic centroids… (cached)"):
+            q_c, a_c, g_c, by_q, qtexts, attr_mats, glob_pack = _build_centroids_cached(read_jsonl_path(EXEMPLARS_PATH))
 
-        # 5) Split + outputs
+        with st.spinner("5) Scoring with hybrid + routing…"):
+            scored_df = score_dataframe(df, mapping, q_c, by_q, qtexts, attr_mats, glob_pack, case_text)
+
         autos_df, review_df = split_auto_review(scored_df)
-        st.success("✅ Scoring complete.")
+        st.success("✅ Done.")
         st.write(f"Auto-accepted rows: {len(autos_df)} · Needs review: {len(review_df)}")
         st.dataframe(scored_df.head(30), use_container_width=True)
 
@@ -896,7 +934,6 @@ def main():
     if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
         run_pipeline()
 
-    # 6) Sheets export
     if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
         with st.expander("📤 Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
@@ -906,22 +943,20 @@ def main():
                 ws = _open_ws_by_key(); sh = ws.spreadsheet
                 push_sheet_tab(sh, DEFAULT_WS_NAME, st.session_state["scored_df"])
                 push_sheet_tab(sh, "autos_accepted", st.session_state["autos_df"])
-                push_sheet_tab(sh, "review_queue",  st.session_state["review_df"])
+                push_sheet_tab(sh, "review_queue", st.session_state["review_df"])
                 if PUSH_STAR:
                     st.info("Building star schema…")
                     for title, tdf in build_star_schema_from_scored(st.session_state["scored_df"]).items():
                         push_sheet_tab(sh, title, tdf)
-                st.success("✅ Wrote scored, autos_accepted, review_queue" + (" + star schema" if PUSH_STAR else "") + " to Google Sheets.")
+                st.success("✅ Pushed scored, autos_accepted, review_queue" + (" + star schema" if PUSH_STAR else "") + " to Google Sheets.")
 
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Push all to Google Sheets", use_container_width=True):
-                    try:
-                        do_push()
-                    except Exception as e:
-                        st.error(f"Push failed: {e}")
+                    try: do_push()
+                    except Exception as e: st.error(f"Push failed: {e}")
             with col2:
-                st.caption(f"AUTO_RUN={AUTO_RUN}, AUTO_PUSH={AUTO_PUSH}")
+                st.caption(f"CENTROID_ONLY={CENTROID_ONLY} · SKIP_LLM_IF_CONF={SKIP_LLM_IF_CONF} · MAX_PARALLEL_LLM={MAX_PARALLEL_LLM}")
 
 if __name__ == "__main__":
     main()
