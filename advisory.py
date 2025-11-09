@@ -1,5 +1,12 @@
 # advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM) -> Router -> Sheets
-# LLM is OpenAI-compatible (/v1/chat/completions). Online model REQUIRED.
+# Online LLM is REQUIRED. Supports:
+#   • OpenAI-compatible /v1/chat/completions
+#   • Hugging Face Router text-generation (POST {BASE}/{MODEL})
+#
+# Case text is stored in secrets as CASE1 (string).
+# Local dataset files:
+#   DATASETS/mapping.csv
+#   DATASETS/advisory_exemplars_smart.cleaned.jsonl
 
 import streamlit as st
 import json, re, unicodedata, time
@@ -22,15 +29,14 @@ KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
-# Local dataset files
 DATASETS_DIR     = Path("DATASETS")
 MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
 EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
-# Case text now comes from secrets
-CASE1_TEXT       = st.secrets.get("CASE1", "")
+# Case text now comes from secrets (required)
+CASE1_TEXT       = (st.secrets.get("CASE1", "") or "").strip()
 
-# Online LLM (OpenAI-compatible) — REQUIRED
+# Online LLM (OpenAI-compatible or HF Router) — REQUIRED
 LLM_API_BASE     = (st.secrets.get("LLM_API_BASE", "") or "").rstrip("/")
 LLM_API_KEY      = st.secrets.get("LLM_API_KEY", "")
 LLM_MODEL        = st.secrets.get("LLM_MODEL", "")
@@ -56,7 +62,7 @@ ORDERED_ATTRS = [
     "Capacity strengthening & empowerment support",
 ]
 
-# Heuristics + router
+# Heuristics + router thresholds
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 MIN_CONF_AUTO   = float(st.secrets.get("MIN_CONF_AUTO", 0.78))
@@ -250,7 +256,6 @@ def build_centroids(exemplars: list[dict]):
 
     q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
     attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
-
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
         sc = int(e.get("score",0)); txt = clean(e.get("text",""))
@@ -279,7 +284,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# REQUIRED ONLINE LLM (OpenAI-compatible)
+# REQUIRED ONLINE LLM (OpenAI-compatible or HF Router)
 # ==============================
 @dataclass
 class LLMResult:
@@ -291,7 +296,6 @@ SYSTEM_PROMPT = (
     "You are a careful assessor. Score answers 0–3 using the rubric. "
     "Respond ONLY in compact JSON with keys: band (0..3) and reason (<=50 words)."
 )
-
 USER_TMPL = """CASE:
 {case}
 
@@ -319,12 +323,12 @@ def _llm_session_ready():
     _assert_llm_ready()
     return True
 
-def _post_chat(messages, temperature=LLM_TEMPERATURE, max_tokens=160):
+def _is_hf_router() -> bool:
+    return "huggingface.co" in (LLM_API_BASE or "")
+
+def _call_openai_compatible(messages, temperature=LLM_TEMPERATURE, max_tokens=160) -> str:
     url = f"{LLM_API_BASE}/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": LLM_MODEL,
         "temperature": float(temperature),
@@ -336,26 +340,65 @@ def _post_chat(messages, temperature=LLM_TEMPERATURE, max_tokens=160):
         time.sleep(2.0)
         r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    return data["choices"][0]["message"]["content"]
+
+def _call_hf_router(prompt: str, temperature=LLM_TEMPERATURE, max_new_tokens=200) -> str:
+    # HF router expects: POST {BASE}/{MODEL}
+    url = f"{LLM_API_BASE.rstrip('/')}/{LLM_MODEL}"
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "temperature": float(temperature),
+            "max_new_tokens": int(max_new_tokens),
+            "return_full_text": False
+        }
+    }
+    for attempt in range(2):
+        r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
+        if r.status_code in (200, 201):
+            data = r.json()
+            if isinstance(data, list) and data and "generated_text" in data[0]:
+                return data[0]["generated_text"]
+            if isinstance(data, dict) and "generated_text" in data:
+                return data["generated_text"]
+            return str(data)
+        if r.status_code in (422, 503, 524, 408, 429):
+            time.sleep(1.5)
+            continue
+        r.raise_for_status()
+    r.raise_for_status()
 
 def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> LLMResult:
     _llm_session_ready()
-    user_payload = USER_TMPL.format(case=(case_text or "").strip(),
-                                    question=(question_text or "").strip(),
-                                    answer=(answer_text or "").strip())
+    user_payload = USER_TMPL.format(
+        case=(case_text or "").strip(),
+        question=(question_text or "").strip(),
+        answer=(answer_text or "").strip()
+    )
     try:
-        resp = _post_chat(
-            messages=[{"role":"system","content":SYSTEM_PROMPT},
-                      {"role":"user","content":user_payload}]
-        )
-        text = resp["choices"][0]["message"]["content"].strip()
+        if _is_hf_router():
+            full_prompt = (SYSTEM_PROMPT + "\n\n" + user_payload).strip()
+            text = _call_hf_router(full_prompt, temperature=LLM_TEMPERATURE, max_new_tokens=220)
+        else:
+            text = _call_openai_compatible(
+                messages=[{"role":"system","content":SYSTEM_PROMPT},
+                          {"role":"user","content":user_payload}],
+                temperature=LLM_TEMPERATURE,
+                max_tokens=200
+            )
         raw = text
-        text = text.replace("```json","").replace("```","").strip()
-        data = json.loads(text)
+        text = (text or "").replace("```json","").replace("```","").strip()
+        # Extract first JSON object
+        start = text.find("{"); end = text.rfind("}")
+        blob = text[start:end+1] if (start >= 0 and end > start) else text
+        data = json.loads(blob)
         band = int(data.get("band")) if "band" in data else None
         reason = str(data.get("reason","")).strip()
-        if band not in (0,1,2,3): return LLMResult(None, "LLM band invalid.", raw)
-        return LLMResult(band, reason[:140] if reason else "", raw)
+        if band not in (0,1,2,3):
+            return LLMResult(None, "LLM band invalid.", raw)
+        return LLMResult(band, reason[:140], raw)
     except Exception as e:
         return LLMResult(None, f"LLM error: {e}", "")
 
@@ -371,16 +414,18 @@ def _softmax_like(scores: dict[int, float]) -> dict[int, float]:
     return {k: (v/s) for k, v in exps.items()} if s > 0 else {k:0.0 for k in scores}
 
 def _centroid_pick_with_conf(q_sims: dict[int,float], a_sims: dict[int,float], g_sims: dict[int,float]):
+    # Weight the question-specific signal highest, then attribute, then global
     qw = 1.0 if q_sims else 0.0; aw = 0.6 if a_sims else 0.0; gw = 0.4 if g_sims else 0.0
     qp = _softmax_like(q_sims) if q_sims else {}
     ap = _softmax_like(a_sims) if a_sims else {}
     gp = _softmax_like(g_sims) if g_sims else {}
     mix = {b: qw*qp.get(b,0)+aw*ap.get(b,0)+gw*gp.get(b,0) for b in (0,1,2,3)}
-    band = max(mix, key=mix.get); conf = float(mix[band])
+    band = max(mix, key=mix.get) if mix else None
+    conf = float(mix[band]) if band is not None else 0.0
     return band, conf
 
 # ==============================
-# SCORER (MANDATORY HYBRID) — accepts case_text
+# SCORER (MANDATORY HYBRID)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -482,13 +527,27 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             overlap = qa_overlap(ans, qtext or qhint)
             risky = looks_ai_like(ans)
 
-            # ----- fusion (must use both) -----
-            if cent_band is None or llm.band is None:
-                final_band = min(cent_band if cent_band is not None else 3,
-                                 llm.band if llm.band is not None else 3) if (cent_band is not None or llm.band is not None) else None
-                route, route_reason = "review", "Incomplete signals"
-                final_conf = min(cent_conf, 0.6)
+            # ----- fusion (robust) -----
+            if cent_band is None and llm.band is None:
+                final_band = None
+                route, route_reason = "review", "No usable signals"
+                final_conf = 0.0
+            elif llm.band is None:
+                # LLM down/failed → rely on centroids only
+                final_band = cent_band
+                final_conf = min(cent_conf, 0.95)
+                if final_conf >= max(0.72, MIN_CONF_AUTO - 0.06):
+                    route, route_reason = "auto", "LLM unavailable; centroid high confidence"
+                else:
+                    route, route_reason = "review", "LLM unavailable; centroid low confidence"
+            elif cent_band is None:
+                # No centroid signal → rely on LLM only (conservative)
+                final_band = llm.band
+                final_conf = 0.60
+                route = "review" if final_conf < MIN_CONF_AUTO else "auto"
+                route_reason = "LLM only"
             else:
+                # Both present → standard agreement logic
                 if abs(cent_band - llm.band) > MAX_DISAGREE:
                     final_band = min(cent_band, llm.band)
                     route, route_reason = "review", "LLM/centroid disagreement"
@@ -499,6 +558,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     route = "auto" if (final_conf >= MIN_CONF_AUTO) else "review"
                     route_reason = "High confidence" if route=="auto" else "Low confidence"
 
+            # enforce content/overlap guards
             if overlap < MIN_QA_OVERLAP:
                 final_band = min(final_band if final_band is not None else 1, 1)
                 route, route_reason = "review", "Low Q/A overlap"
@@ -728,25 +788,31 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     dim_attribute = pd.DataFrame({"attribute_name": attributes})
     if not dim_attribute.empty:
         dim_attribute["attribute_key"] = dim_attribute["attribute_name"].astype("category").cat.codes + 1
-        dim_attribute = dim_attribute[["attribute_key","attribute_name"]]
+    dim_attribute = dim_attribute[["attribute_key","attribute_name"]] if not dim_attribute.empty else pd.DataFrame(columns=["attribute_key","attribute_name"])
 
-    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"]))
-    attr_map  = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"]))
+    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"])) if not dim_staff.empty else {}
+    attr_map  = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"])) if not dim_attribute.empty else {}
 
-    submission["staff_key"] = submission["Staff ID"].map(staff_map)
+    submission["staff_key"] = submission["Staff ID"].map(staff_map) if not submission.empty else pd.Series(dtype="Int64")
 
-    fact_attribute = (fact_attribute
-        .assign(staff_key=fact_attribute["Staff ID"].map(staff_map),
-                attribute_key=fact_attribute["Attribute"].map(attr_map))
+    fact_attribute = (pd.DataFrame(columns=["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"])
+        if not arows else
+        pd.concat(arows, ignore_index=True)
+        .assign(staff_key=lambda d: d["Staff ID"].map(staff_map),
+                attribute_key=lambda d: d["Attribute"].map(attr_map))
         .merge(submission[["ID","date_key"]], on="ID", how="left")
         [["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
     )
-    fact_question = (fact_question
-        .assign(staff_key=fact_question["Staff ID"].map(staff_map),
-                attribute_key=fact_question["Attribute"].map(attr_map))
+
+    fact_question = (pd.DataFrame(columns=["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"])
+        if not qrows else
+        pd.concat(qrows, ignore_index=True)
+        .assign(staff_key=lambda d: d["Staff ID"].map(staff_map),
+                attribute_key=lambda d: d["Attribute"].map(attr_map))
         .merge(submission[["ID","date_key"]], on="ID", how="left")
         [["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
     )
+
     submission_out = submission[["ID","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
     return {"fact_attribute":fact_attribute,"fact_question":fact_question,"dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
 
@@ -754,48 +820,58 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
 # UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring: REQUIRED Hybrid (Centroids + Online LLM) → Router → Sheets")
+    st.title("📊 Advisory Scoring — REQUIRED Hybrid (Centroids + Online LLM) → Router → Sheets")
     st.caption(f"MIN_CONF_AUTO={MIN_CONF_AUTO} · MAX_DISAGREE={MAX_DISAGREE} · Model: {LLM_MODEL or 'unset'}")
 
-    # Ensure LLM is configured
+    # Ensure LLM + case text are configured
     try:
         _assert_llm_ready()
     except Exception as e:
-        st.error(str(e))
-        st.stop()
+        st.error(str(e)); st.stop()
 
-    # Load case text from secrets
-    case_text = (CASE1_TEXT or "").strip()
-    if not case_text:
-        st.error("CASE1 is missing or empty in st.secrets. Add the case study text under the key CASE1.")
-        st.stop()
+    if not CASE1_TEXT:
+        st.error("CASE1 (case study text) is missing or empty in st.secrets."); st.stop()
 
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
     AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
     PUSH_STAR = bool(st.secrets.get("PUSH_STAR_SCHEMA", True))
 
+    # Quick environment summary
+    with st.expander("⚙️ Runtime config", expanded=False):
+        st.write({
+            "LLM_API_BASE": LLM_API_BASE,
+            "LLM_MODEL": LLM_MODEL,
+            "RouterMode": "HF Router" if "huggingface.co" in (LLM_API_BASE or "") else "OpenAI-compatible",
+            "MIN_CONF_AUTO": MIN_CONF_AUTO,
+            "MAX_DISAGREE": MAX_DISAGREE,
+        })
+
     def run_pipeline():
+        # 1) Load config files
         mapping = load_mapping_from_path(MAPPING_PATH)
         exemplars = read_jsonl_path(EXEMPLARS_PATH)
         if not exemplars:
             st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
             st.stop()
 
+        # 2) Build centroids
         with st.spinner("Building semantic centroids..."):
             q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
+        # 3) Fetch Kobo
         with st.spinner("Fetching Kobo submissions..."):
             df = fetch_kobo_dataframe()
         if df.empty:
-            st.warning("No Kobo submissions found.")
-            st.stop()
+            st.warning("No Kobo submissions found."); st.stop()
 
         st.caption("Fetched sample:")
         st.dataframe(df.head(), use_container_width=True)
 
-        with st.spinner("Scoring with mandatory hybrid + routing..."):
-            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, case_text)
+        # 4) Score (hybrid)
+        with st.spinner("Scoring with hybrid (centroids + online LLM) and routing..."):
+            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, CASE1_TEXT)
 
+        # 5) Split + outputs
         autos_df, review_df = split_auto_review(scored_df)
         st.success("✅ Scoring complete.")
         st.write(f"Auto-accepted rows: {len(autos_df)} · Needs review: {len(review_df)}")
@@ -820,6 +896,7 @@ def main():
     if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
         run_pipeline()
 
+    # 6) Sheets export
     if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
         with st.expander("📤 Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
@@ -829,7 +906,7 @@ def main():
                 ws = _open_ws_by_key(); sh = ws.spreadsheet
                 push_sheet_tab(sh, DEFAULT_WS_NAME, st.session_state["scored_df"])
                 push_sheet_tab(sh, "autos_accepted", st.session_state["autos_df"])
-                push_sheet_tab(sh, "review_queue", st.session_state["review_df"])
+                push_sheet_tab(sh, "review_queue",  st.session_state["review_df"])
                 if PUSH_STAR:
                     st.info("Building star schema…")
                     for title, tdf in build_star_schema_from_scored(st.session_state["scored_df"]).items():
@@ -844,7 +921,7 @@ def main():
                     except Exception as e:
                         st.error(f"Push failed: {e}")
             with col2:
-                st.caption(f"AUTO_RUN={{AUTO_RUN}}, AUTO_PUSH={{AUTO_PUSH}}")
+                st.caption(f"AUTO_RUN={AUTO_RUN}, AUTO_PUSH={AUTO_PUSH}")
 
 if __name__ == "__main__":
     main()
