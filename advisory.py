@@ -1,15 +1,16 @@
-# advisory.py — Kobo → Centroid Scoring (+ row-level AI flag only) → Excel / Google Sheets
+# advisory.py — Kobo → Centroid Scoring (+ per-answer AI detection) → Excel / Google Sheets
 import streamlit as st
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-import json, re, unicodedata
+import json, re, unicodedata, time
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
+from dataclasses import dataclass
 
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
@@ -48,7 +49,7 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# Row-level AI detection (no per-question columns)
+# AI detection
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
 TRANSITION_OPEN_RX = re.compile(
     r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
@@ -107,52 +108,63 @@ def _type_token_ratio(text: str) -> float:
     if not toks: return 1.0
     return len(set(toks)) / len(toks)
 
-def ai_signal_score(text: str, question_hint: str = "") -> float:
-    """Return score in 0..1 — higher means more AI-ish. (Row-level use only.)"""
+def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
+    """Return (score in 0..1, flags[]) — higher means more AI-ish."""
     t = clean(text)
+    flags = []
     if not t:
-        return 0.0
+        return 0.0, flags
 
     score = 0.0
 
     # 1) Classic patterns
     if looks_ai_like(t):
         score += 0.35
+        flags.append("pattern:ai-boilerplate")
 
     # 2) Transition/list scaffolding
     if TRANSITION_OPEN_RX.search(t):
         score += 0.15
+        flags.append("style:transition-opening")
     if LIST_CUES_RX.search(t):
         score += 0.15
+        flags.append("style:list-cues")
 
     # 3) Buzzword density
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits >= 1:
         score += min(0.25, 0.08 * buzz_hits)
+        flags.append(f"lex:buzzwords({buzz_hits})")
 
     # 4) Bulleted formatting
     if BULLET_RX.search(t):
         score += 0.08
+        flags.append("format:bullets")
 
     # 5) Long, polished sentences
     asl = _avg_sentence_len(t)  # tokens per sentence
     if asl >= 26:
         score += 0.18
+        flags.append(f"syntax:long-sentences(~{int(asl)})")
     elif asl >= 18:
         score += 0.10
+        flags.append(f"syntax:moderate-long(~{int(asl)})")
 
     # 6) Low lexical variety in longer text
     ttr = _type_token_ratio(t)
     if ttr <= 0.45 and len(t) >= 180:
         score += 0.10
+        flags.append(f"lex:low-variety(ttr={ttr:.2f})")
 
     # 7) Low Q/A overlap (generic answer)
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06:
             score += 0.10
+            flags.append(f"qa:low-overlap({overlap:.2f})")
 
-    return max(0.0, min(1.0, score))
+    score = max(0.0, min(1.0, score))
+    return score, flags
 
 def show_status(ok: bool, msg: str) -> None:
     (st.success if ok else st.error)(msg)
@@ -280,6 +292,7 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
 # ==============================
 @st.cache_resource(show_spinner=False)
 def get_embedder():
+    # Keep tiny, fast model (≈ 80ms per 20 texts locally). Caches in memory via Streamlit.
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 def build_centroids(exemplars: list[dict]):
@@ -345,7 +358,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (row-level AI only)
+# SCORING (+ per-answer AI detection)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -401,13 +414,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     for i, resp in df.iterrows():
         out = {}
-        out["ID"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
+        out["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                      if pd.notna(dt_series.iloc[i]) else str(i))
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
         out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
         any_ai_suspected = False  # row-level
+
+        # cache question text per row for AI overlap
         qtext_cache = {}
 
         for r in all_mapping:
@@ -454,10 +469,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     if qa_overlap(ans, base_qtext or qhint) < MIN_QA_OVERLAP:
                         sc = min(sc, 1)
 
-            # ----- AI detection (row-level only) -----
-            ai_score = ai_signal_score(ans, qtext_for_ai)
-            if ai_score >= AI_SUSPECT_THRESHOLD:
-                any_ai_suspected = True
+            # ----- AI detection (per answer) -----
+            ai_score, ai_flags = ai_signal_score(ans, qtext_for_ai)
+            out[f"{attr}_AI_Qn{qn}_score"] = round(ai_score, 3)
+            out[f"{attr}_AI_Qn{qn}_flags"] = ";".join(ai_flags)
+            ai_sus = (ai_score >= AI_SUSPECT_THRESHOLD)
+            out[f"{attr}_AI_Qn{qn}_suspected"] = "yes" if ai_sus else "no"
+            any_ai_suspected = any_ai_suspected or ai_sus
 
             # ----- write score -----
             sk = f"{attr}_Qn{qn}"
@@ -469,11 +487,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # defaults for missing cells (no AI detail cols)
-        for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
-                out.setdefault(f"{attr}_Qn{qn}", "")
-                out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
+       
 
         # attribute avgs + overall
         overall_total = 0
@@ -496,10 +510,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     res_df = pd.DataFrame(rows_out)
 
     def order_cols(cols):
-        ordered = ["ID","Staff ID","Duration_min"]
+        ordered = ["Date","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
-                ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
+                ordered += [
+                    f"{attr}_Qn{qn}",
+                    f"{attr}_Rubric_Qn{qn}",
+                    
+                ]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
         ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
@@ -632,16 +650,16 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     arows = []
     for attr in attributes:
         avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"
-        r = scored[["ID","Staff ID"]].copy()
+        r = scored[["Date","Staff ID"]].copy()
         r["Attribute"] = attr
         r["AvgScore"] = scored.get(avg_col); r["RankBand"] = scored.get(rank_col)
         arows.append(r)
     fact_attribute = pd.concat(arows, ignore_index=True) if arows else pd.DataFrame(
-        columns=["ID","Staff ID","Attribute","AvgScore","RankBand"]
+        columns=["Date","Staff ID","Attribute","AvgScore","RankBand"]
     )
 
     # Submission-level
-    sub_cols = ["ID","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]
+    sub_cols = ["Date","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]
     for c in sub_cols:
         if c not in scored.columns: scored[c] = np.nan
     submission = scored[sub_cols].copy()
@@ -649,7 +667,7 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     def _to_dt(x):
         try: return pd.to_datetime(x)
         except: return pd.NaT
-    submission["DateTimeUTC"] = submission["ID"].apply(_to_dt)
+    submission["DateTimeUTC"] = submission["Date"].apply(_to_dt)
     submission["date_key"] = submission["DateTimeUTC"].dt.strftime("%Y%m%d").astype("Int64")
 
     dim_date = submission[["date_key","DateTimeUTC"]].dropna(subset=["date_key"]).drop_duplicates().copy()
@@ -678,24 +696,24 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
     fact_attribute = (fact_attribute
         .assign(staff_key=fact_attribute["Staff ID"].map(staff_map),
                 attribute_key=fact_attribute["Attribute"].map(attr_map))
-        .merge(submission[["ID","date_key"]], on="ID", how="left")
-        [["ID","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
+        .merge(submission[["Date","date_key"]], on="Date", how="left")
+        [["Date","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
     )
     fact_question = (fact_question
         .assign(staff_key=fact_question["Staff ID"].map(staff_map),
                 attribute_key=fact_question["Attribute"].map(attr_map))
-        .merge(submission[["ID","date_key"]], on="ID", how="left")
-        [["ID","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
+        .merge(submission[["Date","date_key"]], on="Date", how="left")
+        [["Date","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
     )
-    submission_out = submission[["ID","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
+    submission_out = submission[["Date","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
     return {"fact_attribute":fact_attribute,"fact_question":fact_question,"dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
 
 # ==============================
 # UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring: Kobo → Centroids + Row-level AI Flag → Sheets")
-    st.caption(f"AI_SUSPECT_THRESHOLD={AI_SUSPECT_THRESHOLD:.2f}")
+    st.title("📊 Advisory Scoring")
+    
 
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
     AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
@@ -718,7 +736,7 @@ def main():
 
         st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
 
-        with st.spinner("Scoring (+ row-level AI flag)..."):
+        with st.spinner("Scoring (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
         st.success("✅ Scoring complete.")
