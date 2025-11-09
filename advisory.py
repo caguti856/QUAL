@@ -1,5 +1,25 @@
 # advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM via Hugging Face Inference API)
 # -> Router -> Sheets, with CASE PACK switcher (one app, many cases)
+#
+# Repo layout (run Streamlit from the QUAL folder):
+# QUAL/
+#   advisory.py
+#   CASES/Case.txt
+#   DATASETS/Case_mapping.csv
+#   DATASETS/Case_exemplars.jsonl
+#
+# Add these in .streamlit/secrets.toml or Streamlit Cloud project settings:
+# KOBO_BASE = "https://kobo.care.org"
+# KOBO_ASSET_ID = "xxxxxx"
+# KOBO_TOKEN = "xxxxxx"
+# LLM_API_BASE = "https://router.huggingface.co/hf-inference"
+# LLM_API_KEY  = "hf_XXXXXXXXXXXXXXXXXXXX"
+# LLM_MODEL    = "HuggingFaceH4/zephyr-7b-beta"
+# GSHEETS_SPREADSHEET_KEY = "your-google-sheet-key"
+# GSHEETS_WORKSHEET_NAME  = "Advisory"
+# MIN_CONF_AUTO = 0.78
+# MAX_DISAGREE  = 1
+# gcp_service_account = { ... }  # full JSON for a service account
 
 import streamlit as st
 import json, re, unicodedata, time
@@ -25,11 +45,11 @@ KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 # Repo layout:
 # QUAL/
 #   advisory.py
-#   CASES/Case1.txt
-#   DATASETS/Case1_mapping.csv
-#   DATASETS/Case1_exemplars.jsonl
+#   CASES/*.txt
+#   DATASETS/<case>_mapping.csv
+#   DATASETS/<case>_exemplars.jsonl
 DATASETS_DIR     = Path("DATASETS")
-CASES_DIR        = Path("CASES")  # .txt files per case (e.g., Case1.txt)
+CASES_DIR        = Path("CASES")  # .txt files per case (e.g., Case.txt)
 
 # Online LLM (Hugging Face Inference API Router) — REQUIRED
 # Example secrets.toml:
@@ -85,6 +105,7 @@ def _read_text(p: Path) -> str:
 
 def discover_cases():
     CASES_DIR.mkdir(parents=True, exist_ok=True)
+    # Returns ["Case", "Case1", ...] from CASES/*.txt
     return sorted([p.stem for p in CASES_DIR.glob("*.txt")])
 
 def resolve_case_assets(case_id: str):
@@ -806,7 +827,7 @@ def main():
         st.error("No cases found in CASES/*.txt")
         st.stop()
 
-    # allow query param (?case=Case1) if available, else first
+    # allow query param (?case=Case) if available, else first
     try:
         qp_case = st.query_params.get("case", [""])[0]
     except Exception:
