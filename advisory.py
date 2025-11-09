@@ -470,12 +470,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         sc = min(sc, 1)
 
             # ----- AI detection (per answer) -----
-            ai_score, ai_flags = ai_signal_score(ans, qtext_for_ai)
-            out[f"{attr}_AI_Qn{qn}_score"] = round(ai_score, 3)
-            out[f"{attr}_AI_Qn{qn}_flags"] = ";".join(ai_flags)
-            ai_sus = (ai_score >= AI_SUSPECT_THRESHOLD)
-            out[f"{attr}_AI_Qn{qn}_suspected"] = "yes" if ai_sus else "no"
-            any_ai_suspected = any_ai_suspected or ai_sus
+            # ----- AI detection (row-level only; no per-question cols) -----
+            ai_score, _ = ai_signal_score(ans, qtext_for_ai)
+            if ai_score >= AI_SUSPECT_THRESHOLD:
+                any_ai_suspected = True
+
 
             # ----- write score -----
             sk = f"{attr}_Qn{qn}"
@@ -638,12 +637,12 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
         try: qn = int(c.split("_Qn")[1])
         except: continue
         rubric_col = f"{attr}_Rubric_Qn{qn}"
-        r = scored[["ID","Staff ID"]].copy()
+        r = scored[["Date","Staff ID"]].copy()
         r["Attribute"] = attr; r["QuestionNo"] = qn
         r["Score"] = scored[c]; r["RubricBand"] = scored[rubric_col] if rubric_col in scored.columns else np.nan
         qrows.append(r)
     fact_question = pd.concat(qrows, ignore_index=True) if qrows else pd.DataFrame(
-        columns=["ID","Staff ID","Attribute","QuestionNo","Score","RubricBand"]
+        columns=["Date","Staff ID","Attribute","QuestionNo","Score","RubricBand"]
     )
 
     # Fact: per-attribute
@@ -739,9 +738,6 @@ def main():
         with st.spinner("Scoring (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
         
-
-        
-
 
         st.success("✅ Scoring complete.")
         st.dataframe(scored_df.head(50), use_container_width=True)
