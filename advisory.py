@@ -1,6 +1,5 @@
-# advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM) -> Router -> Sheets
-# The LLM is hosted (OpenAI-compatible /v1/chat/completions). No offline model.
-# Any failure to call the LLM = hard error (no silent fallback).
+# advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM via Hugging Face Inference API) -> Router -> Sheets
+# Online-only scoring: uses HF Inference API (no local model). LLM call is required.
 
 import streamlit as st
 import json, re, unicodedata, time
@@ -30,12 +29,12 @@ EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
 
 ASSESSMENT_CASE_TEXT = st.secrets.get("ASSESSMENT_CASE_TEXT", "")  # Jesca–GEDA case for grounding
 
-# Online LLM (OpenAI-compatible) — REQUIRED
-LLM_API_BASE     = st.secrets.get("LLM_API_BASE", "").rstrip("/")
+# Online LLM (Hugging Face Inference API) — REQUIRED
+LLM_API_BASE     = (st.secrets.get("LLM_API_BASE", "") or "").rstrip("/")
 LLM_API_KEY      = st.secrets.get("LLM_API_KEY", "")
-LLM_MODEL        = st.secrets.get("LLM_MODEL", "")
+LLM_MODEL        = st.secrets.get("LLM_MODEL", "")  # e.g. "HuggingFaceH4/zephyr-7b-beta"
 LLM_TEMPERATURE  = float(st.secrets.get("LLM_TEMPERATURE", 0.2))
-LLM_TIMEOUT_SEC  = int(st.secrets.get("LLM_TIMEOUT_SEC", 60))
+LLM_TIMEOUT_SEC  = int(st.secrets.get("LLM_TIMEOUT_SEC", 90))
 
 # Bands / labels
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
@@ -279,7 +278,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# REQUIRED ONLINE LLM (OpenAI-compatible)
+# REQUIRED ONLINE LLM (HF Inference API)
 # ==============================
 @dataclass
 class LLMResult:
@@ -287,9 +286,9 @@ class LLMResult:
     reason: str
     raw: str
 
-SYSTEM_PROMPT = (
-    "You are a careful assessor. Score answers 0–3 using the rubric. "
-    "Respond ONLY in compact JSON with keys: band (0..3) and reason (<=50 words)."
+SYSTEM_HEADER = (
+    "You are a careful assessor. Score answers 0–3 using the rubric.\n"
+    "Return ONLY compact JSON with keys: band (0..3) and reason (<=50 words).\n"
 )
 
 USER_TMPL = """CASE:
@@ -319,46 +318,75 @@ def _llm_session_ready():
     _assert_llm_ready()
     return True
 
-def _post_chat(messages, temperature=LLM_TEMPERATURE, max_tokens=160):
-    url = f"{LLM_API_BASE}/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json",
-    }
+def _hf_generate(prompt: str, max_new_tokens: int = 200, temperature: float = 0.2):
+    """
+    Hugging Face Inference API call (text-generation style).
+    Many instruct/chat models accept a plain prompt and produce text.
+    """
+    url = f"{LLM_API_BASE}/{LLM_MODEL}"
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}"}
     payload = {
-        "model": LLM_MODEL,
-        "temperature": float(temperature),
-        "max_tokens": int(max_tokens),
-        "messages": messages,
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
+            "return_full_text": False
+        }
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
-    if r.status_code == 429:
-        # gentle backoff once
-        time.sleep(2.0)
+    # retry a couple times for cold starts/queue
+    for attempt in range(3):
         r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
-    r.raise_for_status()
-    return r.json()
+        if r.status_code in (200, 201):
+            try:
+                data = r.json()
+                # common formats:
+                # - [{"generated_text": "..."}]
+                # - {"generated_text": "..."}
+                if isinstance(data, list) and data and "generated_text" in data[0]:
+                    return data[0]["generated_text"]
+                if isinstance(data, dict) and "generated_text" in data:
+                    return data["generated_text"]
+                # some servers just return a string-like structure
+                return str(data)
+            except Exception as e:
+                return f"[error] Parse error: {e}"
+        if r.status_code in (422, 503, 524, 408, 429):
+            time.sleep(2 + attempt)
+            continue
+        return f"[error] {r.status_code}: {r.text[:400]}"
+    return "[error] HF request failed after retries."
 
 def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> LLMResult:
     _llm_session_ready()
-    user_payload = USER_TMPL.format(case=(case_text or "").strip(),
-                                    question=(question_text or "").strip(),
-                                    answer=(answer_text or "").strip())
+    user_payload = USER_TMPL.format(
+        case=(case_text or "").strip(),
+        question=(question_text or "").strip(),
+        answer=(answer_text or "").strip()
+    )
+    prompt = SYSTEM_HEADER + "\n" + user_payload
+    text = _hf_generate(prompt, max_new_tokens=220, temperature=LLM_TEMPERATURE)
+    raw = text if isinstance(text, str) else str(text)
+
+    if raw.startswith("[error]"):
+        return LLMResult(None, raw, raw)
+
+    # models may wrap JSON in code fences; strip if present
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
+    # naive: take first {...}
     try:
-        resp = _post_chat(
-            messages=[{"role":"system","content":SYSTEM_PROMPT},
-                      {"role":"user","content":user_payload}]
-        )
-        text = resp["choices"][0]["message"]["content"].strip()
-        raw = text
-        text = text.replace("```json","").replace("```","").strip()
-        data = json.loads(text)
-        band = int(data.get("band")) if "band" in data else None
-        reason = str(data.get("reason","")).strip()
-        if band not in (0,1,2,3): return LLMResult(None, "LLM band invalid.", raw)
-        return LLMResult(band, reason[:140] if reason else "", raw)
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            blob = cleaned[start:end+1]
+            data = json.loads(blob)
+            band = int(data.get("band")) if "band" in data else None
+            reason = str(data.get("reason", "")).strip()
+            if band not in (0,1,2,3):
+                return LLMResult(None, "LLM band invalid.", raw)
+            return LLMResult(band, reason[:140], raw)
     except Exception as e:
-        return LLMResult(None, f"LLM error: {e}", "")
+        return LLMResult(None, f"Parse error: {e}", raw)
+    return LLMResult(None, "Unrecognized response.", raw)
 
 # ==============================
 # CONFIDENCE (centroids)
