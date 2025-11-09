@@ -1,5 +1,5 @@
-# advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM via Hugging Face Inference API) -> Router -> Sheets
-# Online-only scoring: uses HF Inference API (no local model). LLM call is required.
+# advisory.py — Kobo -> REQUIRED Hybrid (Centroids + Online LLM via Hugging Face Inference API)
+# -> Router -> Sheets, with CASE PACK switcher (one app, many cases)
 
 import streamlit as st
 import json, re, unicodedata, time
@@ -24,15 +24,17 @@ KOBO_ASSET_ID    = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
 
 DATASETS_DIR     = Path("DATASETS")
-MAPPING_PATH     = DATASETS_DIR / "mapping.csv"
-EXEMPLARS_PATH   = DATASETS_DIR / "advisory_exemplars_smart.cleaned.jsonl"
+CASES_DIR        = DATASETS_DIR / "cases"  # .txt files per case
 
-ASSESSMENT_CASE_TEXT = st.secrets.get("ASSESSMENT_CASE_TEXT", "")  # Jesca–GEDA case for grounding
-
-# Online LLM (Hugging Face Inference API) — REQUIRED
+# Online LLM (Hugging Face Inference API Router) — REQUIRED
+# Set in .streamlit/secrets.toml for Streamlit Cloud or in local .streamlit/secrets.toml
+# Example:
+# LLM_API_BASE = "https://router.huggingface.co/hf-inference"
+# LLM_API_KEY  = "hf_XXXXXXXXXXXXXXXXXXXXXXXX"
+# LLM_MODEL    = "HuggingFaceH4/zephyr-7b-beta"
 LLM_API_BASE     = (st.secrets.get("LLM_API_BASE", "") or "").rstrip("/")
 LLM_API_KEY      = st.secrets.get("LLM_API_KEY", "")
-LLM_MODEL        = st.secrets.get("LLM_MODEL", "")  # e.g. "HuggingFaceH4/zephyr-7b-beta"
+LLM_MODEL        = st.secrets.get("LLM_MODEL", "")
 LLM_TEMPERATURE  = float(st.secrets.get("LLM_TEMPERATURE", 0.2))
 LLM_TIMEOUT_SEC  = int(st.secrets.get("LLM_TIMEOUT_SEC", 90))
 
@@ -67,6 +69,25 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
+
+# ==============================
+# CASE PACK SWITCHER
+# ==============================
+def _read_text(p: Path) -> str:
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+def discover_cases():
+    CASES_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted([p.stem for p in CASES_DIR.glob("*.txt")])
+
+def resolve_case_assets(case_id: str):
+    case_txt = CASES_DIR / f"{case_id}.txt"
+    mapping_path = DATASETS_DIR / f"{case_id}_mapping.csv"
+    exemplars_path = DATASETS_DIR / f"{case_id}_exemplars.jsonl"
+    return case_txt, mapping_path, exemplars_path
 
 # ==============================
 # SMALL HELPERS
@@ -318,12 +339,12 @@ def _llm_session_ready():
     _assert_llm_ready()
     return True
 
-def _hf_generate(prompt: str, max_new_tokens: int = 200, temperature: float = 0.2):
+def _hf_generate(model_id: str, prompt: str, max_new_tokens: int = 200, temperature: float = 0.2):
     """
-    Hugging Face Inference API call (text-generation style).
-    Many instruct/chat models accept a plain prompt and produce text.
+    Hugging Face Inference API Router call (text-generation style).
+    Endpoint example: https://router.huggingface.co/hf-inference/<model_id>
     """
-    url = f"{LLM_API_BASE}/{LLM_MODEL}"
+    url = f"{LLM_API_BASE}/{model_id}"
     headers = {"Authorization": f"Bearer {LLM_API_KEY}"}
     payload = {
         "inputs": prompt,
@@ -333,20 +354,15 @@ def _hf_generate(prompt: str, max_new_tokens: int = 200, temperature: float = 0.
             "return_full_text": False
         }
     }
-    # retry a couple times for cold starts/queue
     for attempt in range(3):
         r = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SEC)
         if r.status_code in (200, 201):
             try:
                 data = r.json()
-                # common formats:
-                # - [{"generated_text": "..."}]
-                # - {"generated_text": "..."}
                 if isinstance(data, list) and data and "generated_text" in data[0]:
                     return data[0]["generated_text"]
                 if isinstance(data, dict) and "generated_text" in data:
                     return data["generated_text"]
-                # some servers just return a string-like structure
                 return str(data)
             except Exception as e:
                 return f"[error] Parse error: {e}"
@@ -364,15 +380,13 @@ def llm_score_via_api(case_text: str, question_text: str, answer_text: str) -> L
         answer=(answer_text or "").strip()
     )
     prompt = SYSTEM_HEADER + "\n" + user_payload
-    text = _hf_generate(prompt, max_new_tokens=220, temperature=LLM_TEMPERATURE)
+    text = _hf_generate(LLM_MODEL, prompt, max_new_tokens=220, temperature=LLM_TEMPERATURE)
     raw = text if isinstance(text, str) else str(text)
 
     if raw.startswith("[error]"):
         return LLMResult(None, raw, raw)
 
-    # models may wrap JSON in code fences; strip if present
     cleaned = raw.replace("```json", "").replace("```", "").strip()
-    # naive: take first {...}
     try:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
@@ -409,11 +423,11 @@ def _centroid_pick_with_conf(q_sims: dict[int,float], a_sims: dict[int,float], g
     return band, conf
 
 # ==============================
-# SCORER (MANDATORY HYBRID)
+# SCORER (MANDATORY HYBRID) — now accepts case_text
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
-                    by_qkey, question_texts):
+                    by_qkey, question_texts, case_text: str):
 
     df_cols = list(df.columns)
 
@@ -504,7 +518,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             # ----- LLM branch (REQUIRED online) -----
             qtext_for_llm = (by_qkey.get(qkey, {}) or {}).get("question_text","") if qkey else ""
             if not qtext_for_llm: qtext_for_llm = qhint or ""
-            llm = llm_score_via_api(ASSESSMENT_CASE_TEXT, qtext_for_llm, ans)
+            llm = llm_score_via_api(case_text, qtext_for_llm, ans)
 
             # ----- guards -----
             qtext = (by_qkey.get(qkey, {}) or {}).get("question_text","")
@@ -783,7 +797,27 @@ def build_star_schema_from_scored(scored: pd.DataFrame):
 # UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring: REQUIRED Hybrid (Centroids + Online LLM) → Router → Sheets")
+    # --- choose case ---
+    available = discover_cases()
+    if not available:
+        st.error("No cases found in DATASETS/cases/*.txt")
+        st.stop()
+
+    # allow query param (?case=jesca_geda) if available, else first
+    try:
+        qp_case = st.query_params.get("case", [""])[0]
+    except Exception:
+        qp_case = ""
+    default_idx = available.index(qp_case) if qp_case in available else 0
+    case_id = st.sidebar.selectbox("Case", available, index=default_idx, key="case_id")
+
+    case_txt_path, mapping_path, exemplars_path = resolve_case_assets(case_id)
+    case_text = _read_text(case_txt_path)
+    if not case_text:
+        st.error(f"Case text not found or empty: {case_txt_path}")
+        st.stop()
+
+    st.title(f"📊 Advisory Scoring — {case_id}")
     st.caption(f"MIN_CONF_AUTO={MIN_CONF_AUTO} · MAX_DISAGREE={MAX_DISAGREE} · Model: {LLM_MODEL or 'unset'}")
 
     # Hard-require LLM secrets up front (fail fast)
@@ -798,9 +832,9 @@ def main():
     PUSH_STAR = bool(st.secrets.get("PUSH_STAR_SCHEMA", True))
 
     def run_pipeline():
-        mapping = load_mapping_from_path(MAPPING_PATH)
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars: st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}"); st.stop()
+        mapping = load_mapping_from_path(mapping_path)
+        exemplars = read_jsonl_path(exemplars_path)
+        if not exemplars: st.error(f"Exemplars file is empty: {exemplars_path}"); st.stop()
 
         with st.spinner("Building semantic centroids..."):
             q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
@@ -812,7 +846,7 @@ def main():
         st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
 
         with st.spinner("Scoring with mandatory hybrid + routing..."):
-            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
+            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, case_text)
 
         autos_df, review_df = split_auto_review(scored_df)
         st.success("✅ Scoring complete.")
@@ -820,9 +854,11 @@ def main():
         st.dataframe(scored_df.head(30), use_container_width=True)
 
         st.download_button("⬇️ Download Excel (full scored)", data=to_excel_bytes(scored_df),
-                           file_name="Advisory_Scoring.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           file_name=f"{case_id}_Advisory_Scoring.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
 
+        st.session_state["case_id"] = case_id
         st.session_state["scored_df"] = scored_df
         st.session_state["autos_df"]  = autos_df
         st.session_state["review_df"] = review_df
@@ -837,18 +873,20 @@ def main():
     if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
         with st.expander("📤 Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-            st.write("Worksheet name:", DEFAULT_WS_NAME)
+            st.write("Worksheet base:", DEFAULT_WS_NAME)
+            cid = st.session_state.get("case_id", case_id)
 
             def do_push():
                 ws = _open_ws_by_key(); sh = ws.spreadsheet
-                push_sheet_tab(sh, DEFAULT_WS_NAME, st.session_state["scored_df"])
-                push_sheet_tab(sh, "autos_accepted", st.session_state["autos_df"])
-                push_sheet_tab(sh, "review_queue", st.session_state["review_df"])
+                base = f"{DEFAULT_WS_NAME}_{cid}"
+                push_sheet_tab(sh, base, st.session_state["scored_df"])
+                push_sheet_tab(sh, base + "_autos",  st.session_state["autos_df"])
+                push_sheet_tab(sh, base + "_review", st.session_state["review_df"])
                 if PUSH_STAR:
                     st.info("Building star schema…")
                     for title, tdf in build_star_schema_from_scored(st.session_state["scored_df"]).items():
-                        push_sheet_tab(sh, title, tdf)
-                st.success("✅ Wrote scored, autos_accepted, review_queue" + (" + star schema" if PUSH_STAR else "") + " to Google Sheets.")
+                        push_sheet_tab(sh, f"{base}_{title}", tdf)
+                st.success(f"✅ Wrote tabs for case '{cid}'")
 
             col1, col2 = st.columns(2)
             with col1:
