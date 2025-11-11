@@ -1,4 +1,4 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, full tables, AI tripwires, auto-push)
+# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, per-question scores, AI last)
 
 import streamlit as st
 import gspread
@@ -23,7 +23,7 @@ KOBO_TOKEN      = st.secrets.get("KOBO_TOKEN", "")
 AUTO_PUSH       = bool(st.secrets.get("AUTO_PUSH", False))
 AUTO_RUN        = True  # no buttons
 
-DATASETS_DIR    = Path("DATASETS")  # change to Path("/mnt/data") if needed
+DATASETS_DIR    = Path("DATASETS")
 MAPPING_PATH    = DATASETS_DIR / "mapping1.csv"
 EXEMPLARS_PATH  = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
@@ -48,6 +48,13 @@ ORDERED_ATTRS = [
 ]
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
+
+# passthrough source columns we keep (front of table)
+PASSTHROUGH_HINTS = [
+    "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
+    "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
+    "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid"
+]
 
 # ==============================
 # AI DETECTION (aggressive)
@@ -324,14 +331,23 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (fast + slim export)
+# SCORING (per-question + averages; with passthrough)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
                     by_qkey, question_texts):
 
     df_cols = list(df.columns)
-    staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id")), None)
+
+    # identify passthrough columns (front)
+    def want_col(c):
+        lc = c.strip().lower()
+        return any(h in lc for h in PASSTHROUGH_HINTS)
+    passthrough_cols = [c for c in df_cols if want_col(c)]
+    # ensure uniqueness order
+    seen = set(); passthrough_cols = [x for x in passthrough_cols if not (x in seen or seen.add(x))]
+
+    staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
@@ -343,7 +359,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # resolve Kobo columns once
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
@@ -362,13 +377,19 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if a: distinct_answers.add(a)
     embed_many(list(distinct_answers))
 
-    rows_out = []
+    out_rows = []
     for i, resp in df.iterrows():
-        out = {}
-        out["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
+        row = {}
+
+        # passthrough first (source columns)
+        for c in passthrough_cols:
+            row[c] = resp.get(c, "")
+
+        # convenience cols
+        row["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                        if pd.notna(dt_series.iloc[i]) else str(i))
-        out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
-        out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
+        row["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
+        row["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
         any_ai = False
@@ -412,37 +433,75 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
+            # per-answer AI suspicion
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
-            if sc is not None:
+            # write per-question score & rubric ONLY for Q1..Q4
+            qn = None
+            if "_Q" in (qid or ""):
+                try: qn = int(qid.split("_Q")[-1])
+                except: qn = None
+            if qn in (1,2,3,4) and sc is not None:
+                sk = f"{attr}_Qn{qn}"
+                rk = f"{attr}_Rubric_Qn{qn}"
+                row[sk] = int(sc)
+                row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
+        # fill missing Qn/rubric fields to keep stable shape
+        for attr in ORDERED_ATTRS:
+            for qn in (1,2,3,4):
+                row.setdefault(f"{attr}_Qn{qn}", "")
+                row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
+
+        # attribute averages + ranks
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
             if not scores:
-                out[f"{attr}_Avg (0–3)"] = ""
-                out[f"{attr}_RANK"]      = ""
+                row[f"{attr}_Avg (0–3)"] = ""
+                row[f"{attr}_RANK"]      = ""
             else:
                 avg = float(np.mean(scores)); band = int(round(avg))
                 overall_total += band
-                out[f"{attr}_Avg (0–3)"] = round(avg, 2)
-                out[f"{attr}_RANK"]      = BANDS[band]
+                row[f"{attr}_Avg (0–3)"] = round(avg, 2)
+                row[f"{attr}_RANK"]      = BANDS[band]
 
-        out["Overall Total (0–24)"] = overall_total
-        out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        out["AI_suspected"] = bool(any_ai)
-        rows_out.append(out)
+        row["Overall Total (0–24)"] = overall_total
+        row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        row["AI_suspected"] = bool(any_ai)
+        out_rows.append(row)
 
-    slim = pd.DataFrame(rows_out)
-    cols = ["Date","Staff ID","Duration_min"]
-    for a in ORDERED_ATTRS:
-        cols += [f"{a}_Avg (0–3)", f"{a}_RANK"]
-    cols += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
-    slim = slim.reindex(columns=[c for c in cols if c in slim.columns])
-    return slim
+    res = pd.DataFrame(out_rows)
+
+    # ---- final column order ----
+    # 1) Source passthrough
+    front = [c for c in passthrough_cols if c in res.columns]
+    # 2) Convenience
+    front += [c for c in ["Date","Staff ID","Duration_min"] if c in res.columns]
+    # 3) Per-question blocks
+    mid_q = []
+    for attr in ORDERED_ATTRS:
+        for qn in (1,2,3,4):
+            mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
+    mid_q = [c for c in mid_q if c in res.columns]
+    # 4) Attribute avgs + ranks
+    mid_a = []
+    for attr in ORDERED_ATTRS:
+        mid_a += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
+    mid_a = [c for c in mid_a if c in res.columns]
+    # 5) Overall then AI (AI must be right after Overall Rank AND be the last column)
+    tail = [c for c in ["Overall Total (0–24)","Overall Rank"] if c in res.columns]
+    tail_ai = ["AI_suspected"] if "AI_suspected" in res.columns else []
+
+    ordered = front + mid_q + mid_a + tail + tail_ai
+    extras = [c for c in res.columns if c not in ordered]
+    # extras are not appended to keep AI as last; they remain “backend” (not shown)
+    res = res.reindex(columns=ordered)
+
+    return res
 
 # ==============================
 # EXPORTS / SHEETS
@@ -530,9 +589,9 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # MAIN (auto-run, full tables)
 # ==============================
 def main():
-    st.title("📊 Thought Leadership Scoring — Auto (Full Tables)")
+    st.title("📊 Thought Leadership Scoring — Auto (Full Source + Per-Question)")
 
-    # load mapping + exemplars
+    # mapping + exemplars
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
     except Exception as e:
@@ -556,7 +615,7 @@ def main():
         st.warning("No Kobo submissions found.")
         return
 
-    # === SHOW FULL FETCHED DATASET ===
+    # show full fetched dataset
     st.subheader("Fetched dataset (all rows)")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
     st.dataframe(df, use_container_width=True)
@@ -566,12 +625,10 @@ def main():
 
     st.success("✅ Scoring complete.")
 
-    # === SHOW FULL SCORED TABLE ===
     st.subheader("Scored table (all rows)")
-    st.caption(f"Rows: {len(scored):,}  •  Columns: {len(scored.columns):,}  •  `AI_Suspected` follows `Overall Rank` and is last.")
+    st.caption("Per-question scores (Qn1..Qn4) + Rubrics, averages per attribute, Overall Rank, and AI_Suspected right after Overall Rank (and last).")
     st.dataframe(scored, use_container_width=True)
 
-    # downloads
     st.download_button(
         "⬇️ Download Excel",
         data=to_excel_bytes(scored),
