@@ -1,4 +1,4 @@
-# file: leadership.py — Thought Leadership Scoring with auto-push to Google Sheets (AI detector hardened)
+# file: leadership.py — Thought Leadership Scoring (auto-run + auto-push, no buttons)
 
 import streamlit as st
 
@@ -21,8 +21,6 @@ from rapidfuzz import fuzz, process
 KOBO_BASE         = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID1    = st.secrets.get("KOBO_ASSET_ID1", "")
 KOBO_TOKEN        = st.secrets.get("KOBO_TOKEN", "")
-AUTO_RUN          = bool(st.secrets.get("AUTO_RUN", False))
-AUTO_PUSH         = bool(st.secrets.get("AUTO_PUSH", False))
 
 DATASETS_DIR      = Path("DATASETS")
 MAPPING_PATH      = DATASETS_DIR / "mapping1.csv"
@@ -49,61 +47,48 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# ---- AI detection (HARDENED) ----
-AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.66))
-MIN_AI_LEN           = int(st.secrets.get("MIN_AI_LEN", 120))  # avoid flagging very short ops notes
-
-# Style scaffolds
+# ---- AI detection (rich) ----
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
 TRANSITION_OPEN_RX = re.compile(
-    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
-    re.I
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I
 )
 LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
-NUMBERED_LIST_RX = re.compile(r"(?m)^\s*(?:\d+[\.\)]|[a-zA-Z][\.\)])\s+\S")
-BULLET_RX = re.compile(r"(?m)^\s*[-*•]\s+")
-
-# Buzzwords (extendable)
+BULLET_RX = re.compile(r"(?m)^\s*[-*•●▪◦]\s+")
+NUMBERED_LIST_RX = re.compile(r"(?m)^\s*(?:\d+\.|\(\d+\))\s+")  # 1.  2.  (1) (2)
+CODE_FENCE_RX = re.compile(r"(?s)```.+?```|`[^`]+`")
+OVER_SYMBOL_RX = re.compile(r"[~^_=*#@]{4,}")  # repeated symbols
+ELLIPSIS_RX = re.compile(r"\.{3,}|…{1,}")     # ... or …
+EMDASH_BLOCK_RX = re.compile(r"[—–-]{3,}")    # many dashes
+AI_BOILER_RX = re.compile(r"\b(?:as an ai|i am an ai|ai language model)\b", re.I)
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
     "stakeholder alignment", "learners’ agency", "norm shifts",
-    "quick win", "low-lift", "scalable", "best practice", "holistic approach",
-    "leverage synergies", "paradigm shift"
+    "quick win", "low-lift", "scalable", "best practice"
 }
 
-# Markdown / code / citations / symbols
-CODE_FENCE_RX     = re.compile(r"(?s)```.+?```")
-MD_HEADING_RX     = re.compile(r"(?m)^\s{0,3}#{1,6}\s+\S")
-TABLE_PIPE_RX     = re.compile(r"(?m)^\s*\|.*\|\s*$")
-LINK_MD_RX        = re.compile(r"\[[^\]]{1,80}\]\([^) ]{3,200}\)")
-CITATION_RX       = re.compile(r"\[(?:\d+|[^\]]{1,20})\]")  # [1], [ref]
-FOOTNOTE_RX       = re.compile(r"\[\^[^\]]+\]")
-XML_JSON_RX       = re.compile(r"(?s)<[a-zA-Z][^>]*>.*?</[a-zA-Z]+>|\{\s*\"[^\"]+\"\s*:\s*.+?\}")
-PUNCT_BURST_RX    = re.compile(r"(?:[!?]{3,}|\.{4,}|—{2,}|-{3,}|_{3,}|={3,}|~{3,})")
-EMOJI_RX          = re.compile(r"[\U0001F300-\U0001FAFF\U00002702-\U000027B0]")  # broad emoji blocks
+# ==============================
+# HELPERS
+# ==============================
+def clean(s):
+    if s is None: return ""
+    s = unicodedata.normalize("NFKC", str(s))
+    return re.sub(r"\s+"," ", s).strip()
 
-# “As an AI…” & LLM tells
-AI_TELLS_RX = re.compile(
-    r"(?:\bas an ai\b|\bas an ai language model\b|\bi cannot (?:browse|provide)|\bi don't have (?:access|the ability)|\bmy training data\b|\bchatgpt\b|\bgpt-?\d\b|\bopenai\b|\bthis model\b)",
-    re.I
-)
+def try_dt(x):
+    if pd.isna(x): return None
+    if isinstance(x, (pd.Timestamp, datetime)): return pd.to_datetime(x)
+    try: return pd.to_datetime(str(x), errors="coerce")
+    except Exception: return None
 
-# Legacy obvious lines
-AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+def cos_sim(a, b):
+    # relies on normalize_embeddings=True -> dot == cosine
+    if a is None or b is None: return -1e9
+    return float(np.dot(a, b))
 
-# Domain jargon to reduce false positives
-DOMAIN_JARGON = {
-    "weekly field pulses", "fortnightly", "sensemaking", "huddles",
-    "net price", "transport share", "aggregation schedule",
-    "sprint", "whatsapp", "photo logs", "enumerators", "baseline",
-    "uids", "imei", "enumeration area", "district health", "commodity stock"
-}
-
-def _symbol_density(t: str) -> float:
-    """Proportion of non-alnum, non-space chars (higher => more machine/markdowny)."""
-    if not t: return 0.0
-    tot = len(t)
-    sym = sum(1 for ch in t if not ch.isalnum() and not ch.isspace())
-    return sym / max(tot, 1)
+def qa_overlap(ans: str, qtext: str) -> float:
+    at = set(re.findall(r"\w+", (ans or "").lower()))
+    qt = set(re.findall(r"\w+", (qtext or "").lower()))
+    return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
 def _avg_sentence_len(text: str) -> float:
     s = re.split(r"[.!?]+", text or "")
@@ -117,37 +102,8 @@ def _type_token_ratio(text: str) -> float:
     if not toks: return 1.0
     return len(set(toks)) / len(toks)
 
-def qa_overlap(ans: str, qtext: str) -> float:
-    at = set(re.findall(r"\w+", (ans or "").lower()))
-    qt = set(re.findall(r"\w+", (qtext or "").lower()))
-    return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
-
-def clean(s):
-    if s is None: return ""
-    s = unicodedata.normalize("NFKC", str(s))
-    return re.sub(r"\s+"," ", s).strip()
-
-def looks_ai_like(t):  # quick gate
-    t = clean(t)
-    return bool(AI_RX.search(t) or AI_TELLS_RX.search(t))
-
-# Human evidence deductions (why: cut false positives on ops notes)
-def _human_adjustments(text: str) -> float:
-    t = (text or "").lower()
-    adjust = 0.0
-    if re.search(r"\b\d{1,4}(\.\d+)?\b", t):  # numbers
-        adjust -= 0.04
-    if re.search(r"\d+%|≥|≤|\bper\s*cent\b", t):
-        adjust -= 0.05
-    hits = sum(1 for term in DOMAIN_JARGON if term in t)
-    if hits:
-        adjust -= min(0.24, 0.06 * hits)
-    if len(t) < 140:  # terse tactical notes
-        adjust -= 0.04
-    return adjust
-
 def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
-    """Heuristic AI-ishness in [0,1]; higher => more AI-like."""
+    """Heuristic AI-ishness in [0,1]. Stronger on symbol-heavy, templated, listy, buzzwordy text."""
     t = clean(text)
     flags = []
     if not t:
@@ -155,63 +111,39 @@ def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str
 
     score = 0.0
 
-    # Hard tells & boilerplate
-    if looks_ai_like(t):
+    if AI_BOILER_RX.search(t):
         score += 0.35; flags.append("pattern:ai-boilerplate")
-    if AI_TELLS_RX.search(t):
-        score += 0.20; flags.append("pattern:ai-tells")
-
-    # Structure/scaffolding
     if TRANSITION_OPEN_RX.search(t):
         score += 0.12; flags.append("style:transition-opening")
-    if LIST_CUES_RX.search(t):
-        score += 0.10; flags.append("style:list-cues")
-    if NUMBERED_LIST_RX.search(t):
-        score += 0.08; flags.append("format:numbered-list")
+    if LIST_CUES_RX.search(t) or NUMBERED_LIST_RX.search(t):
+        score += 0.15; flags.append("style:list-cues")
     if BULLET_RX.search(t):
-        score += 0.08; flags.append("format:bullets")
+        score += 0.10; flags.append("format:bullets")
+    if CODE_FENCE_RX.search(t):
+        score += 0.10; flags.append("format:code-fence")
+    if ELLIPSIS_RX.search(t) or EMDASH_BLOCK_RX.search(t) or OVER_SYMBOL_RX.search(t):
+        score += 0.10; flags.append("format:symbol-heaviness")
 
-    # Markdown/code/citation/symbolic artifacts
-    if CODE_FENCE_RX.search(t):   score += 0.12; flags.append("md:code-fence")
-    if MD_HEADING_RX.search(t):   score += 0.06; flags.append("md:heading")
-    if TABLE_PIPE_RX.search(t):   score += 0.08; flags.append("md:table")
-    if LINK_MD_RX.search(t):      score += 0.05; flags.append("md:link")
-    if CITATION_RX.search(t) or FOOTNOTE_RX.search(t):
-        score += 0.06; flags.append("md:citation")
-    if XML_JSON_RX.search(t):     score += 0.08; flags.append("fmt:xml-json")
-    if PUNCT_BURST_RX.search(t):  score += 0.06; flags.append("fmt:punct-burst")
-    if EMOJI_RX.search(t):        score += 0.04; flags.append("fmt:emoji")
-
-    # Buzzwords
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits >= 1:
         score += min(0.25, 0.08 * buzz_hits)
         flags.append(f"lex:buzzwords({buzz_hits})")
 
-    # Sentence-level signals
     asl = _avg_sentence_len(t)
-    if asl >= 26: score += 0.16; flags.append(f"syntax:long-sent(~{int(asl)})")
-    elif asl >= 18: score += 0.09; flags.append(f"syntax:mod-long(~{int(asl)})")
+    if asl >= 26:
+        score += 0.18; flags.append(f"syntax:long-sentences(~{int(asl)})")
+    elif asl >= 18:
+        score += 0.10; flags.append(f"syntax:moderate-long(~{int(asl)})")
 
     ttr = _type_token_ratio(t)
     if ttr <= 0.45 and len(t) >= 180:
         score += 0.10; flags.append(f"lex:low-variety(ttr={ttr:.2f})")
 
-    # Symbol density (markdowny / templated feel)
-    sym = _symbol_density(t)
-    if sym >= 0.18: score += 0.10; flags.append(f"fmt:symbol-density({sym:.2f})")
-    elif sym >= 0.12: score += 0.05; flags.append(f"fmt:symbol-density({sym:.2f})")
-
-    # Genericity vs question
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06:
             score += 0.10; flags.append(f"qa:low-overlap({overlap:.2f})")
 
-    # Human-evidence deductions (counterweight)
-    score += _human_adjustments(t)
-
-    # Clip
     score = max(0.0, min(1.0, score))
     return score, flags
 
@@ -339,11 +271,14 @@ def _score_kobo_header(col: str, token: str) -> int:
 def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
     bases = build_kobo_base_from_qid(question_id) or []
     variants = []
-    for base in bases: variants.extend(expand_possible_kobo_columns(base))
+    for base in bases:
+        variants.extend(expand_possible_kobo_columns(base))
     for v in variants:
-        if v in df_cols: return v
+        if v in df_cols:
+            return v
     for c in df_cols:
-        if any(c.startswith(b) for b in bases): return c
+        if any(c.startswith(b) for b in bases):
+            return c
     token = None
     if question_id:
         qid = question_id.strip().upper()
@@ -362,7 +297,8 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
         for col, score, _ in hits:
-            if score >= 80: return col
+            if score >= 80:
+                return col
     return None
 
 # ==============================
@@ -532,9 +468,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
 
-            # per-answer AI signal (gate with MIN_AI_LEN)
+            # per-answer AI signal
             ai_score, _ = ai_signal_score(ans, qtext_for_ai)
-            if ai_score >= AI_SUSPECT_THRESHOLD and len(ans) >= MIN_AI_LEN:
+            if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai_suspected = True
 
             # write score
@@ -552,7 +488,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[sk] = int(sc); out[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # placeholders
+        # ensure all Qn placeholders exist
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
@@ -607,7 +543,7 @@ def _ensure_ai_last(df: pd.DataFrame,
     return out[cols]
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    df_out = _ensure_ai_last(df)
+    df_out = _ensure_ai_last(df)  # match Sheets shape
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df_out.to_excel(writer, index=False)
@@ -682,6 +618,12 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     except Exception: pass
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Dynamic-width writer:
+      - Keeps ALL columns.
+      - Forces last column to be `AI_Suspected`.
+      - Uses start-only A1 ranges so Sheets auto-expands to row width.
+    """
     try:
         ws = _open_ws_by_key()
         df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
@@ -706,7 +648,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         data_payload = []
         start_row = 1
         for chunk in _chunk(all_rows, 10_000):
-            a1_start = f"'{ws.title}'!A{start_row}"
+            a1_start = f"'{ws.title}'!A{start_row}"  # start-only range
             data_payload.append({"range": a1_start, "values": chunk})
             start_row += len(chunk)
 
@@ -717,75 +659,68 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"❌ {type(e).__name__}: {e}"
 
 # ==============================
-# UI / MAIN
+# UI / MAIN (AUTO)
 # ==============================
 def main():
-    st.title("📊 Thought Leadership Scoring")
+    st.title("📊 Thought Leadership Scoring (Auto)")
+    # Prevent multiple runs/pushes on Streamlit reruns.
+    if st.session_state.get("_leadership_done"):
+        st.info("Already processed in this session.")
+        if "scored_df" in st.session_state:
+            st.dataframe(st.session_state["scored_df"].head(50), use_container_width=True)
+            st.download_button("⬇️ Download Excel",
+                               data=to_excel_bytes(st.session_state["scored_df"]),
+                               file_name="Leadership_Scoring.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+        return
 
-    push_override = st.checkbox("Auto-push to Google Sheets after scoring", value=AUTO_PUSH)
-
-    def run():
-        try:
-            mapping = load_mapping_from_path(MAPPING_PATH)
-        except Exception as e:
-            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
+    # Load mapping & exemplars
+    with st.spinner("Loading mapping & exemplars..."):
+        mapping = load_mapping_from_path(MAPPING_PATH)
+        exemplars = read_jsonl_path(EXEMPLARS_PATH)
+        if not exemplars:
+            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
             st.stop()
 
-        try:
-            exemplars = read_jsonl_path(EXEMPLARS_PATH)
-            if not exemplars:
-                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-                st.stop()
-        except Exception as e:
-            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
-            st.stop()
+    # Build centroids
+    with st.spinner("Building semantic centroids..."):
+        q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
-        with st.spinner("Building semantic centroids..."):
-            q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
+    # Fetch Kobo
+    with st.spinner("Fetching Kobo submissions..."):
+        df = fetch_kobo_dataframe()
+    if df.empty:
+        st.warning("No Kobo submissions found.")
+        st.stop()
 
-        with st.spinner("Fetching Kobo submissions..."):
-            df = fetch_kobo_dataframe()
-        if df.empty:
-            st.warning("No Kobo submissions found.")
-            st.stop()
+    st.caption("Fetched sample:")
+    st.dataframe(df.head(), use_container_width=True)
 
-        st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
+    # Score
+    with st.spinner("Scoring responses (+ AI detection)..."):
+        scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
-        with st.spinner("Scoring responses (+ AI detection)..."):
-            scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
+    st.success("✅ Scoring complete.")
+    st.dataframe(scored_df.head(50), use_container_width=True)
 
-        st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True)
-        st.session_state["scored_df"] = scored_df
+    # Auto push
+    with st.spinner("📤 Sending scored table to Google Sheets..."):
+        ok, msg = upload_df_to_gsheets(scored_df)
+    show_status(ok, msg)
 
-        st.download_button(
-            "⬇️ Download Excel",
-            data=to_excel_bytes(scored_df),
-            file_name="Leadership_Scoring.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+    # Download
+    st.download_button(
+        "⬇️ Download Excel",
+        data=to_excel_bytes(scored_df),
+        file_name="Leadership_Scoring.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
 
-        if push_override:
-            with st.spinner("📤 Sending scored table to Google Sheets..."):
-                ok, msg = upload_df_to_gsheets(scored_df)
-            show_status(ok, msg)
-
-    if AUTO_RUN and not st.session_state.get("auto_ran_once"):
-        st.session_state["auto_ran_once"] = True
-        run()
-
-    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
-        run()
-
-    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None and not push_override:
-        with st.expander("Google Sheets export", expanded=True):
-            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
-            st.write("Worksheet name:", DEFAULT_WS_NAME)
-            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
-                ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                show_status(ok, msg)
+    # mark done
+    st.session_state["_leadership_done"] = True
+    st.session_state["scored_df"] = scored_df
 
 if __name__ == "__main__":
     main()
