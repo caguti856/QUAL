@@ -1,4 +1,4 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, per-question scores, AI last)
+# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, Date→Duration→Care_Staff first, AI last)
 
 import streamlit as st
 import gspread
@@ -55,6 +55,12 @@ PASSTHROUGH_HINTS = [
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
     "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid"
 ]
+
+# EXCLUDE these specific raw source cols from the visible table (your list)
+_EXCLUDE_SOURCE_COLS_LOWER = {
+    "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
+    "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
+}
 
 # ==============================
 # AI DETECTION (aggressive)
@@ -339,7 +345,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    # identify passthrough columns (front)
+    # identify passthrough columns (keep original order)
     def want_col(c):
         lc = c.strip().lower()
         return any(h in lc for h in PASSTHROUGH_HINTS)
@@ -361,6 +367,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
+    # mapping resolution
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
@@ -383,19 +390,21 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     for i, resp in df.iterrows():
         row = {}
 
-        # Date then Care_Staff (value comes from care_staff if present, else staff id)
+        # Date, Duration, Care_Staff
         row["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                        if pd.notna(dt_series.iloc[i]) else str(i))
+        row["Duration"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(resp.get(who_col)) if who_col else ""
 
-        # passthrough original source columns in their original order
+        # passthrough original source columns (minus excluded list, and not duplicating the first three)
         for c in passthrough_cols:
-            if c not in ("Date","Care_Staff"):  # don’t duplicate our first two
-                row[c] = resp.get(c, "")
-
-        # convenience calc (duration)
-        row["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
+            lc = c.strip().lower()
+            if lc in _EXCLUDE_SOURCE_COLS_LOWER:  # explicitly drop these
+                continue
+            if c in ("Date","Duration","Care_Staff"):
+                continue
+            row[c] = resp.get(c, "")
 
         per_attr = {}
         any_ai = False
@@ -483,12 +492,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     res = pd.DataFrame(out_rows)
 
     # ---- final column order ----
-    # 1) Date, Care_Staff
-    ordered = [c for c in ["Date","Care_Staff"] if c in res.columns]
+    # 1) Date, Duration, Care_Staff
+    ordered = [c for c in ["Date","Duration","Care_Staff"] if c in res.columns]
 
-    # 2) All original source columns (in original order), excluding Date/Care_Staff
-    source_cols = list(df.columns)
-    ordered += [c for c in source_cols if c not in ("Date","Care_Staff") and c in res.columns]
+    # 2) All original source columns (original order), minus excluded ones and minus our first three
+    source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
+    source_cols = [c for c in source_cols if c not in ("Date","Duration","Care_Staff")]
+    ordered += [c for c in source_cols if c in res.columns]
 
     # 3) Per-question blocks
     mid_q = []
@@ -508,7 +518,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     if "AI_suspected" in res.columns:
         ordered += ["AI_suspected"]
 
-    # show only these columns (extras intentionally hidden so AI stays last)
+    # enforce ordering (extras, if any, are hidden to keep AI last)
     res = res.reindex(columns=ordered)
 
     return res
@@ -636,7 +646,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Per-question scores (Qn1..Qn4) + Rubrics, averages per attribute, Overall Rank, and AI_suspected right after Overall Rank (and last).")
+    st.caption("Date → Duration → Care_Staff, then original source columns (minus your excluded set), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
