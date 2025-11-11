@@ -337,7 +337,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (per-question + averages; with passthrough)
+# SCORING (per-question + averages; dynamic Qn)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -376,6 +376,17 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
         if hit: resolved_for_qid[qid] = hit
 
+    # collect all question numbers present per attribute (dynamic)
+    QNUM_RX_LOCAL = re.compile(r"_Q(\d+)$", re.I)
+    attr_to_qnums: dict[str, set[int]] = {a: set() for a in ORDERED_ATTRS}
+    for r in all_mapping:
+        qid = (r.get("question_id") or "").strip()
+        attr = r["attribute"]
+        m = QNUM_RX_LOCAL.search(qid)
+        if m:
+            try: attr_to_qnums[attr].add(int(m.group(1)))
+            except: pass
+
     # batch-embed all distinct answers once
     distinct_answers = set()
     for _, row in df.iterrows():
@@ -385,6 +396,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 a = clean(row.get(col, ""))
                 if a: distinct_answers.add(a)
     embed_many(list(distinct_answers))
+
+    def _best_sim(vec, cent_dict):
+        best_s, best_v = None, -1e9
+        for s, c in cent_dict.items():
+            if c is None: continue
+            v = float(np.dot(vec, c))
+            if v > best_v: best_v, best_s = v, s
+        return best_s
 
     out_rows = []
     for i, resp in df.iterrows():
@@ -400,13 +419,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         # passthrough original source columns (minus excluded set and our first three)
         for c in passthrough_cols:
             lc = c.strip().lower()
-            if lc in _EXCLUDE_SOURCE_COLS_LOWER:
-                continue
-            if c in ("Date","Duration","Care_Staff"):
-                continue
+            if lc in _EXCLUDE_SOURCE_COLS_LOWER: continue
+            if c in ("Date","Duration","Care_Staff"): continue
             row[c] = resp.get(c, "")
 
-        per_attr = {}
+        per_attr = {a: [] for a in ORDERED_ATTRS}
         any_ai = False
         qtext_cache = {}
 
@@ -432,46 +449,37 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             sc = None
             if vec is not None:
-                def best_sim(cent_dict):
-                    best_s, best_v = None, -1e9
-                    for s, c in cent_dict.items():
-                        if c is None: continue
-                        v = float(np.dot(vec, c))
-                        if v > best_v: best_v, best_s = v, s
-                    return best_s
                 if qkey and qkey in q_centroids:
-                    sc = best_sim(q_centroids[qkey])
+                    sc = _best_sim(vec, q_centroids[qkey])
                 if sc is None and attr in attr_centroids:
-                    sc = best_sim(attr_centroids[attr])
+                    sc = _best_sim(vec, attr_centroids[attr])
                 if sc is None:
-                    sc = best_sim(global_centroids)
+                    sc = _best_sim(vec, global_centroids)
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # per-answer AI suspicion
+            # AI suspicion
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
-            # write per-question score & rubric ONLY for Q1..Q4
-            qn = None
-            if "_Q" in (qid or ""):
-                try: qn = int(qid.split("_Q")[-1])
-                except: qn = None
-            if qn in (1,2,3,4) and sc is not None:
+            # write per-question score & rubric (for ANY Qn found)
+            m = QNUM_RX_LOCAL.search(qid or "")
+            qn = int(m.group(1)) if m else None
+            if sc is not None and qn is not None:
                 sk = f"{attr}_Qn{qn}"
                 rk = f"{attr}_Rubric_Qn{qn}"
                 row[sk] = int(sc)
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields to keep stable shape
+        # fill missing Qn/rubric fields to keep stable shape (all qnums from mapping)
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            for qn in sorted(attr_to_qnums[attr]):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # attribute averages + ranks
+        # attribute averages + ranks (over all scored items)
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -491,7 +499,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     res = pd.DataFrame(out_rows)
 
-    # ---- final column order ----
+    # ---- final column order (dynamic) ----
     # 1) Date, Duration, Care_Staff
     ordered = [c for c in ["Date","Duration","Care_Staff"] if c in res.columns]
 
@@ -500,10 +508,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     source_cols = [c for c in source_cols if c not in ("Date","Duration","Care_Staff")]
     ordered += [c for c in source_cols if c in res.columns]
 
-    # 3) Per-question blocks
+    # 3) Per-question blocks (dynamic qn sets)
     mid_q = []
     for attr in ORDERED_ATTRS:
-        for qn in (1,2,3,4):
+        for qn in sorted(attr_to_qnums[attr]):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
     ordered += [c for c in mid_q if c in res.columns]
 
@@ -646,7 +654,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Date → Duration → Care_Staff, then original source columns (minus your excluded set), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
+    st.caption("Date → Duration → Care_Staff, then original source columns (minus excluded), dynamic per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
