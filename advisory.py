@@ -557,13 +557,34 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
+# --- REPLACE your existing _to_a1_col with this bug-fixed version ---
 def _to_a1_col(n: int) -> str:
+    """1-based column index -> A1 letters (A, B, ..., Z, AA, AB, ...)."""
+    if n <= 0:
+        raise ValueError("Column index must be positive (1-based).")
     s = []
     while n > 0:
         n, r = divmod(n - 1, 26)
         s.append(chr(65 + r))
-        n //= 26
     return ''.join(reversed(s))
+# --- ADD this helper (place it near your other Sheets helpers) ---
+def _ensure_ai_last(df: pd.DataFrame,
+                    export_name: str = "AI_Suspected",
+                    source_name: str = "AI_suspected") -> pd.DataFrame:
+    """
+    Ensure a column named `export_name` exists and is LAST.
+    - Renames `source_name` -> `export_name` if present.
+    - Creates empty `export_name` if missing.
+    Why: consumer expects `AI_Suspected` (casing), and it must be the last column.
+    """
+    out = df.copy()
+    if export_name not in out.columns:
+        if source_name in out.columns:
+            out = out.rename(columns={source_name: export_name})
+        else:
+            out[export_name] = ""
+    cols = [c for c in out.columns if c != export_name] + [export_name]
+    return out[cols]
 
 def _chunk(iterable, n):
     for i in range(0, len(iterable), n):
@@ -598,114 +619,58 @@ def _open_ws_by_key() -> gspread.Worksheet:
         st.warning(f"Worksheet '{ws_name}' not found. Creating it…")
         return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
 
+# --- REPLACE your upload_df_to_gsheets with this dynamic-width version ---
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Dynamic-width writer:
+      - Keeps ALL columns from `df`.
+      - Forces last column to be `AI_Suspected` (export casing).
+      - Uses start-only A1 ranges (e.g., 'Sheet'!A{row}) so Sheets auto-expands
+        to the row width — no 'tried writing to column [G]' errors.
+    """
     try:
         ws = _open_ws_by_key()
-        header = df.columns.astype(str).tolist()
-        values = df.astype(object).where(pd.notna(df), "").values.tolist()
-        all_rows = [header] + values
+
+        # Shape columns: AI_Suspected last
+        df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
+
+        # Prepare payload
+        header = df_out.columns.astype(str).tolist()
+        n_cols = len(header)
+        if n_cols == 0:
+            return False, "❌ No columns to write."
+
+        values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
+
+        # Normalize width to header length (safety)
+        def _norm(row):
+            r = list(row)
+            if len(r) < n_cols: return r + [""] * (n_cols - len(r))
+            if len(r) > n_cols: return r[:n_cols]
+            return r
+        values = [_norm(r) for r in values]
+
+        # Clear then batch write with start-only ranges
         ws.clear()
-        col_end = _to_a1_col(len(header))
-        data_payload, start_row = [], 1
-        for rows in _chunk(all_rows, 10000):
-            end_row = start_row + len(rows) - 1
-            a1_range = f"'{ws.title}'!A{start_row}:{col_end}{end_row}"
-            data_payload.append({"range": a1_range, "values": rows})
-            start_row = end_row + 1
-        ws.spreadsheet.values_batch_update(body={"valueInputOption":"USER_ENTERED","data":data_payload})
-        _post_write_formatting(ws, len(header))
-        return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
+        all_rows = [header] + values
+
+        data_payload = []
+        start_row = 1
+        for i in range(0, len(all_rows), 10_000):
+            chunk = all_rows[i:i+10_000]
+            a1_start = f"'{ws.title}'!A{start_row}"  # no end column on purpose
+            data_payload.append({"range": a1_start, "values": chunk})
+            start_row += len(chunk)
+
+        ws.spreadsheet.values_batch_update(
+            body={"valueInputOption": "USER_ENTERED", "data": data_payload}
+        )
+
+        _post_write_formatting(ws, n_cols)
+        return True, f"✅ Wrote {len(values)} rows × {n_cols} cols to '{ws.title}' (last='AI_Suspected')."
+
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
-
-# ==============================
-# Optional: star schema (unchanged)
-# ==============================
-def build_star_schema_from_scored(scored: pd.DataFrame):
-    cols = list(scored.columns)
-    qn_score_cols = [c for c in cols if "_Qn" in c and not c.endswith(")")]
-    avg_cols = [c for c in cols if c.endswith("_Avg (0–3)")]
-
-    def attr_from_score_col(c): return c.split("_Qn")[0]
-    attributes = sorted(set([attr_from_score_col(c) for c in qn_score_cols]) |
-                        set([c.replace("_Avg (0–3)", "") for c in avg_cols]))
-
-    # Fact: per-question
-    qrows = []
-    for c in qn_score_cols:
-        attr = attr_from_score_col(c)
-        try: qn = int(c.split("_Qn")[1])
-        except: continue
-        rubric_col = f"{attr}_Rubric_Qn{qn}"
-        r = scored[["Date","Staff ID"]].copy()
-        r["Attribute"] = attr; r["QuestionNo"] = qn
-        r["Score"] = scored[c]; r["RubricBand"] = scored[rubric_col] if rubric_col in scored.columns else np.nan
-        qrows.append(r)
-    fact_question = pd.concat(qrows, ignore_index=True) if qrows else pd.DataFrame(
-        columns=["Date","Staff ID","Attribute","QuestionNo","Score","RubricBand"]
-    )
-
-    # Fact: per-attribute
-    arows = []
-    for attr in attributes:
-        avg_col = f"{attr}_Avg (0–3)"; rank_col = f"{attr}_RANK"
-        r = scored[["Date","Staff ID"]].copy()
-        r["Attribute"] = attr
-        r["AvgScore"] = scored.get(avg_col); r["RankBand"] = scored.get(rank_col)
-        arows.append(r)
-    fact_attribute = pd.concat(arows, ignore_index=True) if arows else pd.DataFrame(
-        columns=["Date","Staff ID","Attribute","AvgScore","RankBand"]
-    )
-
-    # Submission-level
-    sub_cols = ["Date","Staff ID","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]
-    for c in sub_cols:
-        if c not in scored.columns: scored[c] = np.nan
-    submission = scored[sub_cols].copy()
-
-    def _to_dt(x):
-        try: return pd.to_datetime(x)
-        except: return pd.NaT
-    submission["DateTimeUTC"] = submission["Date"].apply(_to_dt)
-    submission["date_key"] = submission["DateTimeUTC"].dt.strftime("%Y%m%d").astype("Int64")
-
-    dim_date = submission[["date_key","DateTimeUTC"]].dropna(subset=["date_key"]).drop_duplicates().copy()
-    if not dim_date.empty:
-        dt = pd.to_datetime(dim_date["DateTimeUTC"])
-        dim_date["year"] = dt.dt.year; dim_date["quarter"] = dt.dt.quarter
-        dim_date["month"] = dt.dt.month; dim_date["day"] = dt.dt.day
-        dim_date["week"] = dt.dt.isocalendar().week.astype(int)
-        dim_date["dow"] = dt.dt.dayofweek
-        dim_date["month_name"] = dt.dt.month_name(); dim_date["dow_name"] = dt.dt.day_name()
-
-    dim_staff = submission[["Staff ID"]].rename(columns={"Staff ID":"staff_natural_key"}).drop_duplicates()
-    dim_staff["staff_key"] = dim_staff["staff_natural_key"].astype("category").cat.codes + 1
-    dim_staff = dim_staff[["staff_key","staff_natural_key"]]
-
-    dim_attribute = pd.DataFrame({"attribute_name": attributes})
-    if not dim_attribute.empty:
-        dim_attribute["attribute_key"] = dim_attribute["attribute_name"].astype("category").cat.codes + 1
-        dim_attribute = dim_attribute[["attribute_key","attribute_name"]]
-
-    staff_map = dict(zip(dim_staff["staff_natural_key"], dim_staff["staff_key"]))
-    attr_map  = dict(zip(dim_attribute["attribute_name"], dim_attribute["attribute_key"]))
-
-    submission["staff_key"] = submission["Staff ID"].map(staff_map)
-
-    fact_attribute = (fact_attribute
-        .assign(staff_key=fact_attribute["Staff ID"].map(staff_map),
-                attribute_key=fact_attribute["Attribute"].map(attr_map))
-        .merge(submission[["Date","date_key"]], on="Date", how="left")
-        [["Date","date_key","staff_key","attribute_key","AvgScore","RankBand"]]
-    )
-    fact_question = (fact_question
-        .assign(staff_key=fact_question["Staff ID"].map(staff_map),
-                attribute_key=fact_question["Attribute"].map(attr_map))
-        .merge(submission[["Date","date_key"]], on="Date", how="left")
-        [["Date","date_key","staff_key","attribute_key","QuestionNo","Score","RubricBand"]]
-    )
-    submission_out = submission[["Date","date_key","staff_key","Duration_min","Overall Total (0–24)","Overall Rank","AI_suspected"]]
-    return {"fact_attribute":fact_attribute,"fact_question":fact_question,"dim_staff":dim_staff,"dim_attribute":dim_attribute,"dim_date":dim_date,"submission":submission_out}
 
 # ==============================
 # UI / MAIN
