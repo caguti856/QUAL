@@ -1,4 +1,4 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, per-question scores, AI last)
+# file: leadership.py — Thought Leadership Scoring (auto-run, Date → Staff_ID, keep all cols after Staff_ID)
 
 import streamlit as st
 import gspread
@@ -48,13 +48,6 @@ ORDERED_ATTRS = [
 ]
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
-
-# passthrough source columns we keep (front of table)
-PASSTHROUGH_HINTS = [
-    "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
-    "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
-    "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid"
-]
 
 # ==============================
 # AI DETECTION (aggressive)
@@ -331,7 +324,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (per-question + averages; with passthrough)
+# SCORING (with Date → Staff_ID ordering)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -339,18 +332,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    # identify passthrough columns (front)
-    def want_col(c):
-        lc = c.strip().lower()
-        return any(h in lc for h in PASSTHROUGH_HINTS)
-    passthrough_cols = [c for c in df_cols if want_col(c)]
-    # ensure uniqueness order
-    seen = set(); passthrough_cols = [x for x in passthrough_cols if not (x in seen or seen.add(x))]
-
+    # find Staff ID column in raw df
     staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
+    staff_idx = df.columns.get_loc(staff_id_col) if staff_id_col in df.columns else 0
+
+    # “keep all columns the same, but start with Date then Staff_ID; drop any before Staff ID”
+    kept_source_cols = [c for c in df.columns[staff_idx:]]
+
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
-
     start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
     end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
 
@@ -360,6 +350,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
+
+    # map Kobo columns
     resolved_for_qid = {}
     for r in all_mapping:
         qid   = r["question_id"]
@@ -367,7 +359,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
         if hit: resolved_for_qid[qid] = hit
 
-    # batch-embed all distinct answers once
+    # embed answers once
     distinct_answers = set()
     for _, row in df.iterrows():
         for r in all_mapping:
@@ -381,27 +373,33 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     for i, resp in df.iterrows():
         row = {}
 
-        # passthrough first (source columns)
-        for c in passthrough_cols:
-            row[c] = resp.get(c, "")
-
-        # convenience cols
+        # 1) Fixed heads
         row["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                        if pd.notna(dt_series.iloc[i]) else str(i))
-        row["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
+        row["Staff_ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
+
+        # 2) Keep all original columns from Staff ID onward (raw names/order)
+        for c in kept_source_cols:
+            # avoid duplicating Staff_ID if raw name differs
+            if staff_id_col and c == staff_id_col:
+                row[c] = row["Staff_ID"]
+            else:
+                row[c] = resp.get(c, "")
+
+        # 3) Convenience
         row["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
         any_ai = False
         qtext_cache = {}
-
-        # row answers cache
+        # cache row answers
         row_answers = {}
         for r in all_mapping:
             qid = r["question_id"]; col = resolved_for_qid.get(qid)
             if col and col in df.columns:
                 row_answers[qid] = clean(resp.get(col, ""))
 
+        # score each mapped Q
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
@@ -419,9 +417,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if vec is not None:
                 def best_sim(cent_dict):
                     best_s, best_v = None, -1e9
-                    for s, c in cent_dict.items():
-                        if c is None: continue
-                        v = float(np.dot(vec, c))
+                    for s, cvec in cent_dict.items():
+                        if cvec is None: continue
+                        v = float(np.dot(vec, cvec))
                         if v > best_v: best_v, best_s = v, s
                     return best_s
                 if qkey and qkey in q_centroids:
@@ -433,12 +431,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # per-answer AI suspicion
-            ai_score = ai_signal_score(ans, qhint_full)
-            if ai_score >= AI_SUSPECT_THRESHOLD:
+            # AI suspicion
+            if ai_signal_score(ans, qhint_full) >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
-            # write per-question score & rubric ONLY for Q1..Q4
+            # write per-question only for Q1..Q4
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
@@ -450,13 +447,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields to keep stable shape
+        # fill missing per-question fields for shape
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # attribute averages + ranks
+        # attribute avgs + overall
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -471,58 +468,49 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         row["Overall Total (0–24)"] = overall_total
         row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        row["AI_suspected"] = bool(any_ai)
+        row["AI_Suspected"] = bool(any_ai)  # final column later
         out_rows.append(row)
 
     res = pd.DataFrame(out_rows)
 
-    # ---- final column order ----
-    # 1) Source passthrough
-    front = [c for c in passthrough_cols if c in res.columns]
-    # 2) Convenience
-    front += [c for c in ["Date","Staff ID","Duration_min"] if c in res.columns]
-    # 3) Per-question blocks
+    # ---- final order ----
+    # start with Date, Staff_ID
+    ordered = ["Date","Staff_ID"]
+
+    # then all original columns from Staff ID onward (keep original order, skip if already included)
+    tail_source = [c for c in kept_source_cols if c not in ("Date","Staff_ID")]
+    ordered += [c for c in tail_source if c in res.columns]
+
+    # scoring: per-question blocks
     mid_q = []
     for attr in ORDERED_ATTRS:
         for qn in (1,2,3,4):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
-    mid_q = [c for c in mid_q if c in res.columns]
-    # 4) Attribute avgs + ranks
+    ordered += [c for c in mid_q if c in res.columns]
+
+    # attribute avgs + ranks
     mid_a = []
     for attr in ORDERED_ATTRS:
         mid_a += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
-    mid_a = [c for c in mid_a if c in res.columns]
-    # 5) Overall then AI (AI must be right after Overall Rank AND be the last column)
-    tail = [c for c in ["Overall Total (0–24)","Overall Rank"] if c in res.columns]
-    tail_ai = ["AI_suspected"] if "AI_suspected" in res.columns else []
+    ordered += [c for c in mid_a if c in res.columns]
 
-    ordered = front + mid_q + mid_a + tail + tail_ai
-    extras = [c for c in res.columns if c not in ordered]
-    # extras are not appended to keep AI as last; they remain “backend” (not shown)
-    res = res.reindex(columns=ordered)
+    # overall then AI_Suspected (AI last)
+    ordered += [c for c in ["Overall Total (0–24)","Overall Rank"] if c in res.columns]
+    if "AI_Suspected" in res.columns:
+        ordered += ["AI_Suspected"]
+
+    # reindex strictly (extras are intentionally dropped from display to keep AI last)
+    res = res.reindex(columns=[c for c in ordered if c in res.columns])
 
     return res
 
 # ==============================
 # EXPORTS / SHEETS
 # ==============================
-def _ensure_ai_last(df: pd.DataFrame,
-                    export_name: str = "AI_Suspected",
-                    source_name: str = "AI_suspected") -> pd.DataFrame:
-    out = df.copy()
-    if export_name not in out.columns:
-        if source_name in out.columns:
-            out = out.rename(columns={source_name: export_name})
-        else:
-            out[export_name] = ""
-    cols = [c for c in out.columns if c != export_name] + [export_name]
-    return out[cols]
-
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    df_out = _ensure_ai_last(df)
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
-        df_out.to_excel(w, index=False)
+        df.to_excel(w, index=False)
     return bio.getvalue()
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
@@ -573,15 +561,14 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     try:
         ws = _open_ws_by_key()
-        df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
-        header = df_out.columns.astype(str).tolist()
-        values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
+        header = df.columns.astype(str).tolist()
+        values = df.astype(object).where(pd.notna(df), "").values.tolist()
         ws.clear()
         ws.spreadsheet.values_batch_update(
             body={"valueInputOption":"USER_ENTERED","data":[{"range": f"'{ws.title}'!A1","values":[header]+values}]}
         )
         _post_write_formatting(ws, len(header))
-        return True, f"✅ Wrote {len(values)} rows × {len(header)} cols to '{ws.title}' (last='AI_Suspected')."
+        return True, f"✅ Wrote {len(values)} rows × {len(header)} cols to '{ws.title}' (AI_Suspected last)."
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
 
@@ -589,7 +576,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # MAIN (auto-run, full tables)
 # ==============================
 def main():
-    st.title("📊 Thought Leadership Scoring — Auto (Full Source + Per-Question)")
+    st.title("📊 Thought Leadership Scoring — Auto (Date → Staff_ID → rest)")
 
     # mapping + exemplars
     try:
@@ -615,7 +602,7 @@ def main():
         st.warning("No Kobo submissions found.")
         return
 
-    # show full fetched dataset
+    # show full fetched dataset (raw)
     st.subheader("Fetched dataset (all rows)")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
     st.dataframe(df, use_container_width=True)
@@ -626,7 +613,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Per-question scores (Qn1..Qn4) + Rubrics, averages per attribute, Overall Rank, and AI_Suspected right after Overall Rank (and last).")
+    st.caption("Starts with Date, then Staff_ID, then all original columns from Staff ID onward, then scores. `AI_Suspected` is last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
@@ -638,7 +625,7 @@ def main():
     )
     st.download_button(
         "⬇️ Download CSV",
-        data=_ensure_ai_last(scored).to_csv(index=False).encode("utf-8"),
+        data=scored.to_csv(index=False).encode("utf-8"),
         file_name="Leadership_Scoring.csv",
         mime="text/csv",
         use_container_width=True
