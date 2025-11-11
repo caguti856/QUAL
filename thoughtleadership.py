@@ -49,6 +49,20 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
+# ---- AI detection (rich) ----
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
+TRANSITION_OPEN_RX = re.compile(
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I
+)
+LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX = re.compile(r"^[-*•]\s", re.M)
+AI_BUZZWORDS = {
+    "minimum viable", "feedback loop", "trade-off", "evidence-based",
+    "stakeholder alignment", "learners’ agency", "norm shifts",
+    "quick win", "low-lift", "scalable", "best practice"
+}
+AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
+
 # ==============================
 # HELPERS
 # ==============================
@@ -72,8 +86,61 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
 def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
+
+def _avg_sentence_len(text: str) -> float:
+    s = re.split(r"[.!?]+", text or "")
+    s = [w for w in s if w.strip()]
+    if not s: return 0.0
+    tokens = re.findall(r"\w+", text or "")
+    return len(tokens) / max(len(s), 1)
+
+def _type_token_ratio(text: str) -> float:
+    toks = [t.lower() for t in re.findall(r"[a-z]+", text or "")]
+    if not toks: return 1.0
+    return len(set(toks)) / len(toks)
+
+def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
+    """Heuristic AI-ishness in [0,1]."""
+    t = clean(text)
+    flags = []
+    if not t:
+        return 0.0, flags
+
+    score = 0.0
+    if looks_ai_like(t):
+        score += 0.35; flags.append("pattern:ai-boilerplate")
+
+    if TRANSITION_OPEN_RX.search(t):
+        score += 0.15; flags.append("style:transition-opening")
+    if LIST_CUES_RX.search(t):
+        score += 0.15; flags.append("style:list-cues")
+
+    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
+    if buzz_hits >= 1:
+        score += min(0.25, 0.08 * buzz_hits)
+        flags.append(f"lex:buzzwords({buzz_hits})")
+
+    if BULLET_RX.search(t):
+        score += 0.08; flags.append("format:bullets")
+
+    asl = _avg_sentence_len(t)
+    if asl >= 26:
+        score += 0.18; flags.append(f"syntax:long-sentences(~{int(asl)})")
+    elif asl >= 18:
+        score += 0.10; flags.append(f"syntax:moderate-long(~{int(asl)})")
+
+    ttr = _type_token_ratio(t)
+    if ttr <= 0.45 and len(t) >= 180:
+        score += 0.10; flags.append(f"lex:low-variety(ttr={ttr:.2f})")
+
+    if question_hint:
+        overlap = qa_overlap(t, question_hint)
+        if overlap < 0.06:
+            score += 0.10; flags.append(f"qa:low-overlap({overlap:.2f})")
+
+    score = max(0.0, min(1.0, score))
+    return score, flags
 
 def show_status(ok: bool, msg: str) -> None:
     (st.success if ok else st.error)(msg)
@@ -216,9 +283,11 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
             sect = QID_PREFIX_TO_SECTION.get(prefix)
             if sect: token = f"{sect}_{qn}"
     if token:
+        best, bs = None, 0
         for c in df_cols:
-            if token in c:
-                return c
+            sc = _score_kobo_header(c, token)
+            if sc > bs: bs, best = sc, c
+        if best and bs >= 82: return best
     hint = clean(prompt_hint or "")
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
@@ -267,7 +336,6 @@ def build_centroids(exemplars: list[dict]):
 
     q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
     attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
-
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
         sc = int(e.get("score",0)); txt = clean(e.get("text",""))
@@ -347,7 +415,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
-        ai_flags = []
+        any_ai_suspected = False
+        qtext_cache = {}
 
         # pre-embed answers in this row
         tmp_answers = {}
@@ -365,10 +434,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             ans = clean(resp.get(dfcol, ""))
             if not ans: continue
-            ai_flags.append(looks_ai_like(ans))
             vec = embed_cached(ans)
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
+            if qkey and qkey not in qtext_cache:
+                qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
+            qtext_for_ai = qtext_cache.get(qkey, "") if qkey else qhint
 
             sc = None
             if vec is not None:
@@ -376,8 +447,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sims = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
                     if sims:
                         sc = max(sims, key=sims.get)
-                        qtext = (by_qkey.get(qkey, {}) or {}).get("question_text","")
-                        if qa_overlap(ans, qtext or qhint) < MIN_QA_OVERLAP:
+                        base_q = qtext_cache.get(qkey, "")
+                        if qa_overlap(ans, base_q or qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
                 if sc is None and attr in attr_centroids:
                     sims = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
@@ -392,6 +463,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                         if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
                             sc = min(sc, 1)
 
+            # per-answer AI signal
+            ai_score, _ = ai_signal_score(ans, qtext_for_ai)
+            if ai_score >= AI_SUSPECT_THRESHOLD:
+                any_ai_suspected = True
+
+            # write score
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
@@ -406,11 +483,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[sk] = int(sc); out[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
+        # ensure all Qn placeholders exist
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
+        # attribute avgs + overall
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -425,7 +504,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         out["Overall Total (0–24)"] = overall_total
         out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        out["AI_suspected"] = bool(any(ai_flags))
+        out["AI_suspected"] = bool(any_ai_suspected)
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
@@ -611,7 +690,7 @@ def main():
         st.caption("Fetched sample:")
         st.dataframe(df.head(), use_container_width=True)
 
-        with st.spinner("Scoring responses..."):
+        with st.spinner("Scoring responses (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
         st.success("✅ Scoring complete.")
