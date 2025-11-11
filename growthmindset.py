@@ -1,4 +1,4 @@
-# advisory.py — Growth Mindset Scoring (auto-run, full source columns, Date→Duration→Care_Staff first, AI last)
+# advisory.py — Growth Mindset Scoring (auto-run, every question scored, Date→Duration→Care_Staff first, AI last)
 
 import streamlit as st
 import gspread
@@ -48,7 +48,7 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# passthrough source columns we keep (front pool; we’ll later filter out an explicit exclude set)
+# passthrough source columns we keep (front pool; we later filter an explicit exclude set)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
@@ -62,7 +62,7 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # ==============================
-# AI DETECTION (aggressive, same style)
+# AI DETECTION (same style)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
@@ -156,7 +156,17 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS (Growth Mindset)
 # ==============================
-QID_PREFIX_TO_SECTION = {"LA":"A1","DS":"A2","IN":"A3","CI":"A4"}
+# IMPORTANT: Dual schema support
+#   LA→A1
+#   DS→B1 (fallback A2)
+#   IN→C1 (fallback A3)
+#   CI→D1 (fallback A4)
+QID_PREFIX_TO_SECTIONS = {
+    "LA": ["A1"],
+    "DS": ["B1","A2"],
+    "IN": ["C1","A3"],
+    "CI": ["D1","A4"],
+}
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
@@ -167,6 +177,16 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
     # keep only desired attrs
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
+
+    # Auto-fix common typo: CI rows accidentally labeled as IN_Q#
+    def fix_qid(row):
+        qid = str(row["question_id"]).strip()
+        attr = str(row["attribute"]).strip()
+        if attr == "Contextual Intelligence" and qid.upper().startswith("IN_Q"):
+            # convert IN_Q# → CI_Q#
+            return "CI_" + qid.split("_",1)[1]
+        return qid
+    m["question_id"] = m.apply(fix_qid, axis=1)
     return m
 
 def read_jsonl_path(path: Path) -> list[dict]:
@@ -178,17 +198,21 @@ def read_jsonl_path(path: Path) -> list[dict]:
             if s: rows.append(json.loads(s))
     return rows
 
-def build_kobo_bases_from_qid(question_id: str) -> list[str]:
-    if not question_id: return []
+def build_bases_from_qid(question_id: str) -> list[str]:
+    """Return all plausible base prefixes (full path) for a given qid across both schemas."""
+    out = []
+    if not question_id: return out
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m: return []
+    if not m: return out
     qn = m.group(1)
     prefix = qid.split("_Q")[0]
-    sect = QID_PREFIX_TO_SECTION.get(prefix)
-    if not sect: return []
-    roots = ["Growthmindset","Growth Mindset"]
-    return [f"{root}/{sect}_Section/{sect}_{qn}" for root in roots]
+    sects = QID_PREFIX_TO_SECTIONS.get(prefix, [])
+    roots = ["Growthmindset","Growth Mindset"]  # seen variants
+    for sect in sects:
+        for root in roots:
+            out.append(f"{root}/{sect}_Section/{sect}_{qn}")
+    return out
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base: return []
@@ -209,16 +233,18 @@ def _score_kobo_header(col: str, token: str) -> int:
     if f"/{t}/" in c: s = max(s,92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
     if t in c: s = max(s,80)
+    # Kobo quirks and short schema boost
+    if "/a" in c or "/b" in c or "/c" in c or "/d" in c: s += 2
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    if "growthmindset/" in c or "growth mindset/" in c or "/a" in c: s += 2
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str, attribute: str) -> str | None:
     cols_original = list(df_cols)
     cols_lower = {c.lower(): c for c in cols_original}
 
-    bases = build_kobo_bases_from_qid(question_id)
+    # 1) Try full-path bases for both schema sections
+    bases = build_bases_from_qid(question_id)
     for base in bases:
         if base.lower() in cols_lower: return cols_lower[base.lower()]
         for v in expand_possible_kobo_columns(base):
@@ -226,22 +252,37 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         for c in cols_original:
             if c.lower().startswith(base.lower()): return c
 
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1); prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect: token = f"{sect}_{qn}"
+    # 2) Token fallback: try all candidate section tokens (A1/B1/C1/D1 …) + legacy A2/A3/A4
+    qid = (question_id or "").strip().upper()
+    m = QNUM_RX.search(qid)
+    tokens = []
+    if m:
+        qn = m.group(1)
+        pref = qid.split("_Q")[0]
+        for sect in QID_PREFIX_TO_SECTIONS.get(pref, []):
+            tokens.append(f"{sect}_{qn}")
+        # attribute-based rescue if prefix was weird
+        attr_to_sects = {
+            "Learning Agility": ["A1"],
+            "Digital Savvy":    ["B1","A2"],
+            "Innovation":       ["C1","A3"],
+            "Contextual Intelligence": ["D1","A4"],
+        }
+        for sect in attr_to_sects.get(attribute, []):
+            tok = f"{sect}_{qn}"
+            if tok not in tokens:
+                tokens.append(tok)
 
-    if token:
-        best, bs = None, 0
+    best, bs = None, 0
+    for token in tokens:
         for c in cols_original:
             sc = _score_kobo_header(c, token)
-            if sc > bs: bs, best = sc, c
-        if best and bs >= 82: return best
+            if sc > bs:
+                bs, best = sc, c
+    if best and bs >= 80:  # generous since short schema gets 82
+        return best
 
+    # 3) Prompt-hint fuzzy rescue
     hint = clean(prompt_hint or "")
     if hint:
         cands = [(c, c.lower()) for c in cols_original]
@@ -337,7 +378,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (per-question + averages; dynamic Qn)
+# SCORING
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -367,25 +408,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # mapping resolution
+    # mapping resolution (now aware of dual schema + attribute rescue + CI fix)
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
-        qid   = r["question_id"]
-        qhint = r.get("prompt_hint","")
-        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
-        if hit: resolved_for_qid[qid] = hit
-
-    # collect all question numbers present per attribute (dynamic)
-    QNUM_RX_LOCAL = re.compile(r"_Q(\d+)$", re.I)
-    attr_to_qnums: dict[str, set[int]] = {a: set() for a in ORDERED_ATTRS}
-    for r in all_mapping:
-        qid = (r.get("question_id") or "").strip()
-        attr = r["attribute"]
-        m = QNUM_RX_LOCAL.search(qid)
-        if m:
-            try: attr_to_qnums[attr].add(int(m.group(1)))
-            except: pass
+        hit = resolve_kobo_column_for_mapping(df_cols, r["question_id"], r.get("prompt_hint",""), r["attribute"])
+        if hit: resolved_for_qid[r["question_id"]] = hit
 
     # batch-embed all distinct answers once
     distinct_answers = set()
@@ -396,14 +424,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 a = clean(row.get(col, ""))
                 if a: distinct_answers.add(a)
     embed_many(list(distinct_answers))
-
-    def _best_sim(vec, cent_dict):
-        best_s, best_v = None, -1e9
-        for s, c in cent_dict.items():
-            if c is None: continue
-            v = float(np.dot(vec, c))
-            if v > best_v: best_v, best_s = v, s
-        return best_s
 
     out_rows = []
     for i, resp in df.iterrows():
@@ -419,11 +439,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         # passthrough original source columns (minus excluded set and our first three)
         for c in passthrough_cols:
             lc = c.strip().lower()
-            if lc in _EXCLUDE_SOURCE_COLS_LOWER: continue
-            if c in ("Date","Duration","Care_Staff"): continue
+            if lc in _EXCLUDE_SOURCE_COLS_LOWER:
+                continue
+            if c in ("Date","Duration","Care_Staff"):
+                continue
             row[c] = resp.get(c, "")
 
-        per_attr = {a: [] for a in ORDERED_ATTRS}
+        per_attr = {}
         any_ai = False
         qtext_cache = {}
 
@@ -434,12 +456,17 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if col and col in df.columns:
                 row_answers[qid] = clean(resp.get(col, ""))
 
+        # score every mapped question Q1..Q4
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
-            if not col: continue
+            if not col: 
+                continue  # nothing to read for this question
             ans = row_answers.get(qid, "")
-            if not ans: continue
+            if not ans:
+                # no text provided; keep fields empty for this Qn
+                continue
+
             vec = emb_of(ans)
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
@@ -449,37 +476,46 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             sc = None
             if vec is not None:
+                def best_sim(cent_dict):
+                    best_s, best_v = None, -1e9
+                    for s, c in cent_dict.items():
+                        if c is None: continue
+                        v = float(np.dot(vec, c))
+                        if v > best_v: best_v, best_s = v, s
+                    return best_s
                 if qkey and qkey in q_centroids:
-                    sc = _best_sim(vec, q_centroids[qkey])
+                    sc = best_sim(q_centroids[qkey])
                 if sc is None and attr in attr_centroids:
-                    sc = _best_sim(vec, attr_centroids[attr])
+                    sc = best_sim(attr_centroids[attr])
                 if sc is None:
-                    sc = _best_sim(vec, global_centroids)
+                    sc = best_sim(global_centroids)
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # AI suspicion
+            # per-answer AI suspicion
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
-            # write per-question score & rubric (for ANY Qn found)
-            m = QNUM_RX_LOCAL.search(qid or "")
-            qn = int(m.group(1)) if m else None
-            if sc is not None and qn is not None:
+            # write per-question score & rubric for Q1..Q4
+            qn = None
+            if "_Q" in (qid or ""):
+                try: qn = int(qid.split("_Q")[-1])
+                except: qn = None
+            if qn in (1,2,3,4) and sc is not None:
                 sk = f"{attr}_Qn{qn}"
                 rk = f"{attr}_Rubric_Qn{qn}"
                 row[sk] = int(sc)
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields to keep stable shape (all qnums from mapping)
+        # fill missing Qn/rubric fields to keep stable shape
         for attr in ORDERED_ATTRS:
-            for qn in sorted(attr_to_qnums[attr]):
+            for qn in (1,2,3,4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # attribute averages + ranks (over all scored items)
+        # attribute averages + ranks
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -499,7 +535,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     res = pd.DataFrame(out_rows)
 
-    # ---- final column order (dynamic) ----
+    # ---- final column order ----
     # 1) Date, Duration, Care_Staff
     ordered = [c for c in ["Date","Duration","Care_Staff"] if c in res.columns]
 
@@ -508,10 +544,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     source_cols = [c for c in source_cols if c not in ("Date","Duration","Care_Staff")]
     ordered += [c for c in source_cols if c in res.columns]
 
-    # 3) Per-question blocks (dynamic qn sets)
+    # 3) Per-question blocks
     mid_q = []
     for attr in ORDERED_ATTRS:
-        for qn in sorted(attr_to_qnums[attr]):
+        for qn in (1,2,3,4):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
     ordered += [c for c in mid_q if c in res.columns]
 
@@ -654,7 +690,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Date → Duration → Care_Staff, then original source columns (minus excluded), dynamic per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
+    st.caption("Date → Duration → Care_Staff, then source columns (excluded set removed), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
