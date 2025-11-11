@@ -1,4 +1,4 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, faster, AI tripwires, auto-push)
+# file: leadership.py — Thought Leadership Scoring (auto-run, full tables, AI tripwires, auto-push)
 
 import streamlit as st
 import gspread
@@ -57,10 +57,9 @@ AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
-# symbol + math/percent tripwires (em/en dashes, comparators, bullets, checkmarks, %, etc.)
-SYMBOL_RX = re.compile(r"[—–\-]{2,}|[≥≤≧≦≈±×÷%]|[→←⇒↔↑↓]|[•●◆▶✓✔✗❌§†‡]", re.U)
-TIMEBOX_RX = re.compile(r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)", re.I)
-AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+SYMBOL_RX          = re.compile(r"[—–\-]{2,}|[≥≤≧≦≈±×÷%]|[→←⇒↔↑↓]|[•●◆▶✓✔✗❌§†‡]", re.U)
+TIMEBOX_RX         = re.compile(r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)", re.I)
+AI_RX              = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
 AI_BUZZWORDS = {
     "minimum viable","feedback loop","trade-off","evidence-based",
     "stakeholder alignment","learners’ agency","norm shifts","quick win",
@@ -91,35 +90,22 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     t = clean(text)
     if not t: return 0.0
     score = 0.0
-
-    # hard tripwires
     if SYMBOL_RX.search(t):   score += 0.35
     if TIMEBOX_RX.search(t):  score += 0.15
-
-    # explicit boilerplate
     if AI_RX.search(t):       score += 0.35
-
-    # rhetorical scaffolds
     if TRANSITION_OPEN_RX.search(t): score += 0.12
     if LIST_CUES_RX.search(t):       score += 0.12
     if BULLET_RX.search(t):          score += 0.08
-
-    # buzzwords
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits: score += min(0.24, 0.08*buzz_hits)
-
-    # sentence length / lexical variety
     asl = _avg_sentence_len(t)
     if   asl >= 26: score += 0.18
     elif asl >= 18: score += 0.10
     ttr = _type_token_ratio(t)
     if ttr <= 0.45 and len(t) >= 180: score += 0.10
-
-    # low Q/A overlap nudges score up
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06: score += 0.10
-
     return max(0.0, min(1.0, score))
 
 # ==============================
@@ -167,7 +153,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     m.columns = [c.lower().strip() for c in m.columns]
     assert {"column","question_id","attribute"}.issubset(m.columns), "mapping needs: column, question_id, attribute"
     if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
-
     norm = lambda s: re.sub(r"\s+"," ", str(s).strip().lower())
     target = {norm(a): a for a in ORDERED_ATTRS}
     def snap_attr(a):
@@ -409,7 +394,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
             qhint_full = qtext_cache.get(qkey, "") if qkey else qhint
 
-            # quick best-of (q / attr / global)
             sc = None
             if vec is not None:
                 def best_sim(cent_dict):
@@ -425,11 +409,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sc = best_sim(attr_centroids[attr])
                 if sc is None:
                     sc = best_sim(global_centroids)
-                # cap generic answers
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # AI detection (tripwires + score)
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
@@ -437,7 +419,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if sc is not None:
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # per-attribute aggregation
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -456,7 +437,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         rows_out.append(out)
 
     slim = pd.DataFrame(rows_out)
-    # ensure AI_Suspected is next after Overall Rank AND last
     cols = ["Date","Staff ID","Duration_min"]
     for a in ORDERED_ATTRS:
         cols += [f"{a}_Avg (0–3)", f"{a}_RANK"]
@@ -476,7 +456,6 @@ def _ensure_ai_last(df: pd.DataFrame,
             out = out.rename(columns={source_name: export_name})
         else:
             out[export_name] = ""
-    # force last
     cols = [c for c in out.columns if c != export_name] + [export_name]
     return out[cols]
 
@@ -548,10 +527,10 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"❌ {type(e).__name__}: {e}"
 
 # ==============================
-# MAIN (auto-run)
+# MAIN (auto-run, full tables)
 # ==============================
 def main():
-    st.title("📊 Thought Leadership Scoring — Auto")
+    st.title("📊 Thought Leadership Scoring — Auto (Full Tables)")
 
     # load mapping + exemplars
     try:
@@ -577,19 +556,34 @@ def main():
         st.warning("No Kobo submissions found.")
         return
 
+    # === SHOW FULL FETCHED DATASET ===
+    st.subheader("Fetched dataset (all rows)")
+    st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
+    st.dataframe(df, use_container_width=True)
+
     with st.spinner("Scoring (+ AI detection)..."):
         scored = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
     st.success("✅ Scoring complete.")
-    # lightweight preview of just top rows (fast)
-    st.dataframe(scored.head(25), use_container_width=True)
 
-    # auto download (always available)
+    # === SHOW FULL SCORED TABLE ===
+    st.subheader("Scored table (all rows)")
+    st.caption(f"Rows: {len(scored):,}  •  Columns: {len(scored.columns):,}  •  `AI_Suspected` follows `Overall Rank` and is last.")
+    st.dataframe(scored, use_container_width=True)
+
+    # downloads
     st.download_button(
         "⬇️ Download Excel",
         data=to_excel_bytes(scored),
         file_name="Leadership_Scoring.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+    st.download_button(
+        "⬇️ Download CSV",
+        data=_ensure_ai_last(scored).to_csv(index=False).encode("utf-8"),
+        file_name="Leadership_Scoring.csv",
+        mime="text/csv",
         use_container_width=True
     )
 
