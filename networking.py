@@ -3,7 +3,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-import json, re, unicodedata
+import json, re, unicodedata, hashlib
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
@@ -26,6 +26,13 @@ AUTO_RUN          = bool(st.secrets.get("AUTO_RUN", True))
 DATASETS_DIR      = Path("DATASETS")
 MAPPING_PATH      = DATASETS_DIR / "mapping3.csv"
 EXEMPLARS_PATH    = DATASETS_DIR / "networking.jsonl"
+
+# exemplar throttling (keeps speed with large JSONL)
+MAX_PER_BUCKET    = int(st.secrets.get("MAX_PER_BUCKET", 40))  # 20–50 is plenty
+Q_CENTROID_LIMIT  = int(st.secrets.get("Q_CENTROID_LIMIT", 2000))  # skip per-Q centroids if too many
+
+# Debug UI toggle
+SHOW_DEBUG        = st.sidebar.checkbox("Show debug tables", value=False)
 
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
@@ -181,9 +188,8 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# MAPPING + EXEMPLARS (dual-schema aware)
+# MAPPING + EXEMPLARS (dual-schema aware + capped + cached)
 # ==============================
-# Allow multiple section variants per prefix to maximize header resolution
 QID_PREFIX_TO_SECTIONS = {
     "SPD": ["A1"],
     "PAS": ["A2","B1"],
@@ -209,15 +215,8 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     return m
 
 
-def read_jsonl_path(path: Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"exemplars file not found: {path}")
-    rows = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                rows.append(json.loads(line))
-    return rows
+def read_jsonl_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def build_kobo_bases_from_qid(question_id: str) -> list[str]:
@@ -279,7 +278,6 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
                 return c
 
     # 2) Token fallback (A#/B#/C#/D#_QN)
-    token = None
     if question_id:
         qid = question_id.strip().upper()
         m = QNUM_RX.search(qid)
@@ -316,6 +314,9 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
 def get_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
+# Pre-warm the model so it doesn't load during first scoring call
+_ = get_embedder()
+
 @st.cache_resource(show_spinner=False)
 def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> dict:
     texts = list(texts_tuple)
@@ -333,6 +334,18 @@ def embed_many(texts: list[str]) -> None:
 def emb_of(text: str):
     t = clean(text)
     return _EMB_CACHE.get(t, None)
+
+
+def _cap(lst, n=MAX_PER_BUCKET):
+    return lst if len(lst) <= n else lst[:n]
+
+
+def _jsonl_to_rows(ex_text: str) -> list[dict]:
+    rows = []
+    for line in ex_text.splitlines():
+        s = line.strip()
+        if s: rows.append(json.loads(s))
+    return rows
 
 
 def build_centroids(exemplars: list[dict]):
@@ -356,7 +369,23 @@ def build_centroids(exemplars: list[dict]):
         by_attr[attr][score].append(text)
         if text: all_texts.append(text)
 
-    embed_many(list(set(all_texts)))
+    # cap heavy buckets before embedding
+    for attr, bucks in by_attr.items():
+        for sc in list(bucks.keys()):
+            by_attr[attr][sc] = _cap(bucks[sc])
+
+    for k, pack in by_qkey.items():
+        texts, scores = pack["texts"], pack["scores"]
+        b = {0:[],1:[],2:[],3:[]}
+        for t, s in zip(texts, scores):
+            if t: b[int(s)].append(t)
+        for sc in b: b[sc] = _cap(b[sc])
+        by_qkey[k]["texts"]  = [t for sc in (0,1,2,3) for t in b[sc]]
+        by_qkey[k]["scores"] = [sc for sc in (0,1,2,3) for _ in b[sc]]
+
+    # only keep a global list of unique texts to embed
+    all_texts = list({t for pack in by_qkey.values() for t in pack["texts"] if t})
+    embed_many(all_texts)
 
     def centroid(texts):
         vecs = [emb_of(t) for t in texts if emb_of(t) is not None]
@@ -371,16 +400,28 @@ def build_centroids(exemplars: list[dict]):
             if t: buckets[int(s)].append(t)
         return {sc: centroid(batch) for sc, batch in buckets.items()}
 
-    q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
+    # allow skipping per-question centroids if there are too many questions
+    use_q = len({k for k in by_qkey.keys()}) <= Q_CENTROID_LIMIT
+
+    q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()} if use_q else {}
     attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
 
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
         sc = int(e.get("score",0)); txt = clean(e.get("text",""))
         if txt: global_buckets[sc].append(txt)
+    # cap globals too
+    for sc in global_buckets:
+        global_buckets[sc] = _cap(global_buckets[sc])
     global_centroids = {sc: centroid(txts) for sc, txts in global_buckets.items()}
 
     return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
+
+
+@st.cache_resource(show_spinner=False)
+def build_centroids_cached(ex_text_hash: str, ex_text: str):
+    exemplars = _jsonl_to_rows(ex_text)
+    return build_centroids(exemplars)
 
 
 def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
@@ -406,9 +447,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    with st.expander("🔎 Debug: `Networking` section columns present", expanded=False):
-        sample_cols = [c for c in df_cols if "/A" in c or "Networking/" in c or c.startswith("A")]
-        st.write(sample_cols[:120])
+    if SHOW_DEBUG:
+        with st.expander("🔎 Debug: `Networking` section columns present", expanded=False):
+            sample_cols = [c for c in df_cols if "/A" in c or "Networking/" in c or c.startswith("A")]
+            st.write(sample_cols[:120])
 
     # passthrough columns (keep original order)
     def want_col(c):
@@ -446,13 +488,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             missing_map_rows.append((qid, qhint, r["attribute"]))
             missing_by_attr[r["attribute"]] = missing_by_attr.get(r["attribute"], 0) + 1
 
-    with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
-        if resolved_for_qid:
-            show = list(resolved_for_qid.items())[:120]
-            st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
-        if missing_map_rows:
-            st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers • Missing per attribute: {missing_by_attr}")
-            st.dataframe(pd.DataFrame(missing_map_rows[:80], columns=["question_id","prompt_hint","attribute"]))
+    if SHOW_DEBUG:
+        with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
+            if resolved_for_qid:
+                show = list(resolved_for_qid.items())[:120]
+                st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
+            if missing_map_rows:
+                st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers • Missing per attribute: {missing_by_attr}")
+                st.dataframe(pd.DataFrame(missing_map_rows[:80], columns=["question_id","prompt_hint","attribute"]))
 
     # pre-embed any distinct answers once
     distinct_answers = set()
@@ -622,12 +665,10 @@ def _ensure_ai_last(df: pd.DataFrame,
                     export_name: str = "AI_Suspected",
                     legacy_bool: str = "AI-Suspected") -> pd.DataFrame:
     out = df.copy()
-    # unify the boolean column name
     if export_name not in out.columns and legacy_bool in out.columns:
         out = out.rename(columns={legacy_bool: export_name})
     if export_name not in out.columns:
         out[export_name] = out.get("AI-Suspected", "")
-    # move export_name to last col
     cols = [c for c in out.columns if c != export_name] + [export_name]
     return out[cols]
 
@@ -735,8 +776,12 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # PAGE ENTRYPOINT
 # ==============================
 
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
 def main():
-    st.title("📊 Net Working & Advocacy — Kobo → Scored Excel / Google Sheets")
+    st.title("📊 Net Working & Advocacy — Kobo → Scored Excel / Google Sheets (fast)")
 
     def run_pipeline():
         # 1) mapping + exemplars
@@ -747,16 +792,16 @@ def main():
             return
 
         try:
-            exemplars = read_jsonl_path(EXEMPLARS_PATH)
-            if not exemplars:
+            ex_text = read_jsonl_text(EXEMPLARS_PATH)
+            if not ex_text.strip():
                 st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
                 return
         except Exception as e:
             st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
             return
 
-        with st.spinner("Building semantic centroids…"):
-            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
+        with st.spinner("Building / loading semantic centroids…"):
+            q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids_cached(_sha256(ex_text), ex_text)
 
         # 2) fetch Kobo
         with st.spinner("Fetching Kobo submissions…"):
@@ -765,8 +810,9 @@ def main():
             st.warning("No Kobo submissions found.")
             return
 
-        st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
+        if SHOW_DEBUG:
+            st.caption("Fetched sample:")
+            st.dataframe(df.head(), use_container_width=True)
 
         # 3) score
         with st.spinner("Scoring responses…"):
