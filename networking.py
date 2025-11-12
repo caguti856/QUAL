@@ -762,8 +762,7 @@ def main():
 
         st.success("✅ Scoring complete.")
         st.dataframe(scored_df.head(50), use_container_width=True)
-        st.session_state["scored_df"] = scored_df
-
+        
         # 4) exports
         st.download_button(
             "⬇️ Download Excel",
