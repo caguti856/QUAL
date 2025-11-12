@@ -723,8 +723,28 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # ==============================
 # PAGE ENTRYPOINT
 # ==============================
+# ==============================
+# PAGE ENTRYPOINT (stable main)
+# ==============================
 def main():
     st.title("📊 Networking & Advocacy — Kobo → Scored Excel / Google Sheets")
+
+    # local, stable DF signature to guard session_state writes
+    def _df_sig_local(df: pd.DataFrame) -> str:
+        import hashlib
+        try:
+            h = pd.util.hash_pandas_object(df, index=True).values
+            return hashlib.sha1(h.tobytes()).hexdigest()
+        except Exception:
+            return hashlib.sha1(df.to_csv(index=True).encode("utf-8")).hexdigest()
+
+    # one-time init of session keys (prevents first-run churn)
+    for k, v in {
+        "scored_df": None,
+        "scored_sig": None,
+        "excel_bytes": b"",
+    }.items():
+        st.session_state.setdefault(k, v)
 
     def run_pipeline():
         # 1) mapping + exemplars
@@ -754,22 +774,30 @@ def main():
             return
 
         st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(df.head(), use_container_width=True, height=360)
 
         # 3) score
         with st.spinner("Scoring responses..."):
             scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
         st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True)
-        
-        # 4) exports
+        st.dataframe(scored_df.head(50), use_container_width=True, height=420)
+
+        # --- only update session state if results actually changed
+        sig = _df_sig_local(scored_df)
+        if st.session_state["scored_sig"] != sig:
+            st.session_state["scored_df"]  = scored_df
+            st.session_state["scored_sig"] = sig
+            st.session_state["excel_bytes"] = to_excel_bytes(scored_df)
+
+        # 4) downloads (use cached bytes so widget stays stable)
         st.download_button(
             "⬇️ Download Excel",
-            data=to_excel_bytes(scored_df),
+            data=st.session_state["excel_bytes"],
             file_name="Networking_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+            use_container_width=True,
+            key="dl_xlsx_networking",
         )
 
         # 5) auto-push if configured
@@ -782,20 +810,20 @@ def main():
     if AUTO_RUN:
         run_pipeline()
     else:
-        if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+        if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True, key="btn_run_networking"):
             run_pipeline()
 
     # Manual push panel (only if we didn't auto-push already)
-    if ("scored_df" in st.session_state and
-        st.session_state["scored_df"] is not None and
-        not AUTO_PUSH):
+    if (st.session_state["scored_df"] is not None) and (not AUTO_PUSH):
         with st.expander("Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
             st.write("Worksheet name:", DEFAULT_WS_NAME)
-            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
+            if st.button("📤 Send scored table to Google Sheets", use_container_width=True, key="btn_push_networking"):
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                if ok: st.success(msg)
-                else:  st.error(msg)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
 if __name__ == "__main__":
     main()
