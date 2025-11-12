@@ -1,4 +1,5 @@
-# advisory.py — Growth Mindset Scoring (auto-run, Date→Duration→Care_Staff first, AI last; Sheets cell-safe)
+ 
+
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -47,23 +48,24 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# passthrough source columns we keep (we later filter out an explicit exclude set)
+# passthrough source columns we keep (front pool; we later filter an explicit exclude set)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
     "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid","care_staff"
 ]
 
-# EXCLUDE these specific raw source cols from the visible table
+# EXCLUDE these specific raw source cols from the visible table (your list)
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
     "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
 }
 
 # ==============================
-# AI DETECTION (lightweight, fast)
+# AI DETECTION (same style)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+
 TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
@@ -154,7 +156,17 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS (Growth Mindset)
 # ==============================
-QID_PREFIX_TO_SECTION = {"LA":"A1","DS":"A2","IN":"A3","CI":"A4"}
+# IMPORTANT: Dual schema support
+#   LA→A1
+#   DS→B1 (fallback A2)
+#   IN→C1 (fallback A3)
+#   CI→D1 (fallback A4)
+QID_PREFIX_TO_SECTIONS = {
+    "LA": ["A1"],
+    "DS": ["B1","A2"],
+    "IN": ["C1","A3"],
+    "CI": ["D1","A4"],
+}
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
@@ -165,6 +177,16 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
     # keep only desired attrs
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
+
+    # Auto-fix common typo: CI rows accidentally labeled as IN_Q#
+    def fix_qid(row):
+        qid = str(row["question_id"]).strip()
+        attr = str(row["attribute"]).strip()
+        if attr == "Contextual Intelligence" and qid.upper().startswith("IN_Q"):
+            # convert IN_Q# → CI_Q#
+            return "CI_" + qid.split("_",1)[1]
+        return qid
+    m["question_id"] = m.apply(fix_qid, axis=1)
     return m
 
 def read_jsonl_path(path: Path) -> list[dict]:
@@ -176,17 +198,21 @@ def read_jsonl_path(path: Path) -> list[dict]:
             if s: rows.append(json.loads(s))
     return rows
 
-def build_kobo_bases_from_qid(question_id: str) -> list[str]:
-    if not question_id: return []
+def build_bases_from_qid(question_id: str) -> list[str]:
+    """Return all plausible base prefixes (full path) for a given qid across both schemas."""
+    out = []
+    if not question_id: return out
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m: return []
+    if not m: return out
     qn = m.group(1)
     prefix = qid.split("_Q")[0]
-    sect = QID_PREFIX_TO_SECTION.get(prefix)
-    if not sect: return []
-    roots = ["Growthmindset","Growth Mindset"]
-    return [f"{root}/{sect}_Section/{sect}_{qn}" for root in roots]
+    sects = QID_PREFIX_TO_SECTIONS.get(prefix, [])
+    roots = ["Growthmindset","Growth Mindset"]  # seen variants
+    for sect in sects:
+        for root in roots:
+            out.append(f"{root}/{sect}_Section/{sect}_{qn}")
+    return out
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base: return []
@@ -207,16 +233,18 @@ def _score_kobo_header(col: str, token: str) -> int:
     if f"/{t}/" in c: s = max(s,92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
     if t in c: s = max(s,80)
+    # Kobo quirks and short schema boost
+    if "/a" in c or "/b" in c or "/c" in c or "/d" in c: s += 2
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    if "growthmindset/" in c or "growth mindset/" in c or "/a" in c: s += 2
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str, attribute: str) -> str | None:
     cols_original = list(df_cols)
     cols_lower = {c.lower(): c for c in cols_original}
 
-    bases = build_kobo_bases_from_qid(question_id)
+    # 1) Try full-path bases for both schema sections
+    bases = build_bases_from_qid(question_id)
     for base in bases:
         if base.lower() in cols_lower: return cols_lower[base.lower()]
         for v in expand_possible_kobo_columns(base):
@@ -224,22 +252,37 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         for c in cols_original:
             if c.lower().startswith(base.lower()): return c
 
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1); prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect: token = f"{sect}_{qn}"
+    # 2) Token fallback: try all candidate section tokens (A1/B1/C1/D1 …) + legacy A2/A3/A4
+    qid = (question_id or "").strip().upper()
+    m = QNUM_RX.search(qid)
+    tokens = []
+    if m:
+        qn = m.group(1)
+        pref = qid.split("_Q")[0]
+        for sect in QID_PREFIX_TO_SECTIONS.get(pref, []):
+            tokens.append(f"{sect}_{qn}")
+        # attribute-based rescue if prefix was weird
+        attr_to_sects = {
+            "Learning Agility": ["A1"],
+            "Digital Savvy":    ["B1","A2"],
+            "Innovation":       ["C1","A3"],
+            "Contextual Intelligence": ["D1","A4"],
+        }
+        for sect in attr_to_sects.get(attribute, []):
+            tok = f"{sect}_{qn}"
+            if tok not in tokens:
+                tokens.append(tok)
 
-    if token:
-        best, bs = None, 0
+    best, bs = None, 0
+    for token in tokens:
         for c in cols_original:
             sc = _score_kobo_header(c, token)
-            if sc > bs: bs, best = sc, c
-        if best and bs >= 82: return best
+            if sc > bs:
+                bs, best = sc, c
+    if best and bs >= 80:  # generous since short schema gets 82
+        return best
 
+    # 3) Prompt-hint fuzzy rescue
     hint = clean(prompt_hint or "")
     if hint:
         cands = [(c, c.lower()) for c in cols_original]
@@ -335,7 +378,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING (per-question + averages; with passthrough)
+# SCORING
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -365,14 +408,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # mapping resolution
+    # mapping resolution (now aware of dual schema + attribute rescue + CI fix)
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
-        qid   = r["question_id"]
-        qhint = r.get("prompt_hint","")
-        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
-        if hit: resolved_for_qid[qid] = hit
+        hit = resolve_kobo_column_for_mapping(df_cols, r["question_id"], r.get("prompt_hint",""), r["attribute"])
+        if hit: resolved_for_qid[r["question_id"]] = hit
 
     # batch-embed all distinct answers once
     distinct_answers = set()
@@ -415,12 +456,17 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if col and col in df.columns:
                 row_answers[qid] = clean(resp.get(col, ""))
 
+        # score every mapped question Q1..Q4
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
-            if not col: continue
+            if not col: 
+                continue  # nothing to read for this question
             ans = row_answers.get(qid, "")
-            if not ans: continue
+            if not ans:
+                # no text provided; keep fields empty for this Qn
+                continue
+
             vec = emb_of(ans)
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
@@ -463,7 +509,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields to keep stable shape (ensures visibility even if no answer)
+        # fill missing Qn/rubric fields to keep stable shape
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
@@ -522,7 +568,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     return res
 
 # ==============================
-# EXPORTS / SHEETS (cell-safe, chunked)
+# EXPORTS / SHEETS
+# ==============================
+# ==============================
+# EXPORTS / SHEETS (cell-safe, chunked, budget-aware)
 # ==============================
 def _ensure_ai_last(df: pd.DataFrame,
                     export_name: str = "AI_Suspected",
@@ -549,6 +598,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME2", "Growthmindset")
+
+MAX_WORKBOOK_CELLS = 10_000_000        # Google Sheets hard limit
+SOFT_TAB_BUDGET    = 800_000           # target cells per tab (headroom < limit)
+MIN_ROWS_PER_TAB   = 1_000             # avoid too many tiny tabs
 
 def _to_a1_col(n: int) -> str:
     s = []
@@ -577,23 +630,52 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
-def _existing_ws_by_title(sh: gspread.Spreadsheet, title: str) -> gspread.Worksheet | None:
+def _estimate_workbook_cells(sh: gspread.Spreadsheet) -> int:
+    total = 0
+    for ws in sh.worksheets():
+        try:
+            total += int(ws.row_count) * int(ws.col_count)
+        except Exception:
+            # Fallback if metadata missing
+            total += 0
+    return total
+
+def _remaining_cell_budget(sh: gspread.Spreadsheet) -> int:
+    return max(0, MAX_WORKBOOK_CELLS - _estimate_workbook_cells(sh))
+
+def _existing_ws_by_title(sh: gspread.Spreadsheet, title: str):
     for ws in sh.worksheets():
         if ws.title == title:
             return ws
     return None
 
-def _create_min_ws(sh: gspread.Spreadsheet, title: str, rows: int, cols: int) -> gspread.Worksheet:
+def _safe_resize(ws: gspread.Worksheet, rows: int, cols: int, remaining_cells: int) -> tuple[bool, int]:
+    """Resize a sheet to rows×cols if cell budget allows. Returns (ok, additional_cells_used)."""
     rows = max(2, int(rows))
     cols = max(1, int(cols))
-    return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
-
-def _clear_and_fit(ws: gspread.Worksheet, rows: int, cols: int) -> None:
+    current = int(ws.row_count) * int(ws.col_count)
+    target  = rows * cols
+    delta   = max(0, target - current)
+    if delta > remaining_cells:
+        return False, 0
     try:
-        ws.resize(rows=max(2, int(rows)), cols=max(1, int(cols)))
+        ws.resize(rows=rows, cols=cols)
     except Exception:
+        # Some accounts disallow resize reductions; still attempt values update later.
         pass
-    ws.clear()
+    return True, delta
+
+def _safe_add_ws(sh: gspread.Spreadsheet, title: str, rows: int, cols: int, remaining_cells: int):
+    rows = max(2, int(rows))
+    cols = max(1, int(cols))
+    need = rows * cols
+    if need > remaining_cells:
+        return None, 0
+    try:
+        ws = sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+        return ws, need
+    except gspread.exceptions.APIError:
+        return None, 0
 
 def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     try: ws.freeze(rows=1)
@@ -606,24 +688,17 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
         })
     except Exception: pass
 
-def _a1_range_for_block(ws_title: str, nrows: int, ncols: int, start_row: int = 1) -> tuple[str, int]:
+def _a1_range(ws_title: str, nrows: int, ncols: int, start_row: int = 1) -> str:
     col_end = _to_a1_col(ncols)
     end_row = start_row + nrows - 1
-    return (f"'{ws_title}'!A{start_row}:{col_end}{end_row}", end_row + 1)
-
-def _write_block(ws: gspread.Worksheet, header: list[str], rows: list[list], start_row: int = 1) -> None:
-    payload = [header] + rows if start_row == 1 else rows
-    rng, _ = _a1_range_for_block(ws.title, len(payload), len(header), start_row)
-    ws.spreadsheet.values_update(
-        rng,
-        params={"valueInputOption":"USER_ENTERED"},
-        body={"values": payload}
-    )
+    return f"'{ws_title}'!A{start_row}:{col_end}{end_row}"
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     """
-    Writes the scored DataFrame to Google Sheets, splitting across multiple tabs
-    if needed to avoid the 10,000,000 cells workbook limit. Tabs: <DEFAULT_WS_NAME>, or _1, _2, …
+    Writes the scored DataFrame to Google Sheets while respecting the 10M cell limit.
+    - Reuses tabs if present (Growthmindset, Growthmindset_2, …)
+    - Splits across tabs if needed
+    - Avoids addSheet/resize if it would exceed the workbook cell budget
     """
     try:
         gc = gs_client()
@@ -632,35 +707,126 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
             return False, "GSHEETS_SPREADSHEET_KEY not set in secrets."
         sh = gc.open_by_key(key)
 
-        # Ensure AI_Suspected is last for export
+        # Prepare data
         df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
         header = df_out.columns.astype(str).tolist()
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
+        cols   = max(1, len(header))
 
-        # Chunk rows to keep each tab comfortably below limits
-        max_cells_per_tab = 800_000
-        cols = max(1, len(header))
-        rows_per_tab = max(1, (max_cells_per_tab // cols) - 1)
+        # Plan chunking by a soft tab budget, but will be tightened by remaining workbook cells.
+        soft_rows_per_tab = max(MIN_ROWS_PER_TAB, (SOFT_TAB_BUDGET // cols) - 1)
 
-        chunks = []
-        for i in range(0, len(values), rows_per_tab):
-            chunks.append(values[i:i+rows_per_tab])
+        row_idx = 0
+        tab_idx = 1
+        made_tabs = 0
+        remaining_cells = _remaining_cell_budget(sh)
 
-        for idx, chunk in enumerate(chunks, start=1):
-            title = f"{DEFAULT_WS_NAME}_{idx}" if len(chunks) > 1 else DEFAULT_WS_NAME
+        # When reusing an existing base tab, include its current cells back into the budget
+        # because we will shrink/clear it before writing.
+        base_ws = _existing_ws_by_title(sh, DEFAULT_WS_NAME)
+        if base_ws:
+            remaining_cells += int(base_ws.row_count) * int(base_ws.col_count)
+
+        while row_idx < len(values):
+            # Decide tab title
+            title = DEFAULT_WS_NAME if tab_idx == 1 else f"{DEFAULT_WS_NAME}_{tab_idx}"
+
+            # Try to reuse existing ws; if not, we may add one (budget permitting)
             ws = _existing_ws_by_title(sh, title)
+            if ws:
+                # Returning its current cells to budget since we'll resize down to exactly what we need
+                remaining_cells += int(ws.row_count) * int(ws.col_count)
+
+            # Max rows this tab can take by remaining cell budget (including header)
+            max_rows_by_budget = max(0, (remaining_cells // cols) - 1)  # minus header
+            if max_rows_by_budget <= 0:
+                # No room left to write even a single row
+                if made_tabs == 0:
+                    return (False,
+                            "Workbook is at/near the 10,000,000-cell limit. "
+                            "Delete old tabs or use a new spreadsheet, then try again.")
+                else:
+                    # We wrote some tabs already; inform about partial write
+                    written = sum(1 for _ in range(made_tabs))
+                    return (True,
+                            f"⚠️ Reached workbook cell limit after writing {made_tabs} tab(s). "
+                            f"Only the first {row_idx} rows were uploaded.")
+
+            rows_for_this_tab = min(soft_rows_per_tab, len(values) - row_idx, max_rows_by_budget)
+            # Ensure at least MIN_ROWS_PER_TAB unless we’re on the final remainder
+            if rows_for_this_tab < MIN_ROWS_PER_TAB and (len(values) - row_idx) > MIN_ROWS_PER_TAB:
+                rows_for_this_tab = MIN_ROWS_PER_TAB
+
+            needed_cells = (rows_for_this_tab + 1) * cols  # +1 for header
+
+            # Create or resize worksheet within budget
             if ws is None:
-                try:
-                    ws = _create_min_ws(sh, title, rows=len(chunk)+1, cols=cols)
-                except gspread.exceptions.APIError as e:
-                    return False, f"Workbook is at the 10,000,000-cell limit. Remove old tabs or use a new spreadsheet. ({e})"
-            _clear_and_fit(ws, rows=len(chunk)+1, cols=cols)
-            _write_block(ws, header, chunk, start_row=1)
+                ws, consumed = _safe_add_ws(sh, title, rows_for_this_tab + 1, cols, remaining_cells)
+                if ws is None:
+                    # Try reducing the chunk size to fit exactly into the budget
+                    tight_rows = max(0, (remaining_cells // cols) - 1)
+                    if tight_rows <= 0:
+                        if made_tabs == 0:
+                            return (False,
+                                    "Workbook cell limit prevents creating a new tab. "
+                                    "Remove old tabs or use a fresh spreadsheet.")
+                        return (True,
+                                f"⚠️ Could not add more tabs due to the 10M-cell limit. "
+                                f"Uploaded {row_idx} rows across {made_tabs} tab(s).")
+                    rows_for_this_tab = tight_rows
+                    needed_cells = (rows_for_this_tab + 1) * cols
+                    ws, consumed = _safe_add_ws(sh, title, rows_for_this_tab + 1, cols, remaining_cells)
+                    if ws is None:
+                        if made_tabs == 0:
+                            return (False,
+                                    "Still over the cell limit after tightening chunk size. "
+                                    "Please delete old tabs or switch to a new spreadsheet.")
+                        return (True,
+                                f"⚠️ Partial upload: {row_idx} rows written. "
+                                f"No remaining cell budget to add more tabs.")
+                remaining_cells -= consumed
+            else:
+                ok, consumed = _safe_resize(ws, rows_for_this_tab + 1, cols, remaining_cells)
+                if not ok:
+                    # Tighten rows to fit budget exactly
+                    tight_rows = max(0, (remaining_cells // cols) - 1)
+                    if tight_rows <= 0:
+                        if made_tabs == 0:
+                            return (False,
+                                    "Cannot resize the existing tab due to the cell limit. "
+                                    "Delete old tabs or use a new spreadsheet.")
+                        return (True,
+                                f"⚠️ Partial upload: {row_idx} rows written across {made_tabs} tab(s).")
+                    rows_for_this_tab = tight_rows
+                    needed_cells = (rows_for_this_tab + 1) * cols
+                    ok, consumed = _safe_resize(ws, rows_for_this_tab + 1, cols, remaining_cells)
+                    if not ok:
+                        if made_tabs == 0:
+                            return (False,
+                                    "Resize still exceeds the cell budget. "
+                                    "Please free space or use a fresh spreadsheet.")
+                        return (True,
+                                f"⚠️ Partial upload: {row_idx} rows written across {made_tabs} tab(s).")
+                remaining_cells -= consumed
+
+            # Write header + chunk
+            chunk = values[row_idx: row_idx + rows_for_this_tab]
+            a1 = _a1_range(ws.title, len(chunk) + 1, cols, start_row=1)
+            ws.spreadsheet.values_update(
+                a1,
+                params={"valueInputOption": "USER_ENTERED"},
+                body={"values": [header] + chunk}
+            )
             _post_write_formatting(ws, cols)
 
-        return True, f"✅ Wrote {len(values)} rows across {len(chunks)} tab(s)."
+            row_idx += rows_for_this_tab
+            tab_idx += 1
+            made_tabs += 1
+
+        return True, f"✅ Wrote {len(values)} rows across {made_tabs} tab(s)."
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
+
 
 # ==============================
 # MAIN (auto-run, full tables)
@@ -703,7 +869,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Date → Duration → Care_Staff, then original source columns (minus your excluded set), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
+    st.caption("Date → Duration → Care_Staff, then source columns (excluded set removed), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
