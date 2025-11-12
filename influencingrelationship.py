@@ -758,7 +758,7 @@ def main():
             return
 
         st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True, height=360)
+        st.dataframe(df, use_container_width=True, height=360)
 
         # 3) score
         with st.spinner("Scoring responses..."):
