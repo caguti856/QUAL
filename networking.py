@@ -1,5 +1,4 @@
-# networking.py — Networking & Advocacy Scoring (auto-run, every question scored,
-# Date→Duration→Care_Staff first, AI last, cell-safe Sheets export)
+# networking.py — Auto scoring (every question scored), AI detection, and safe Google Sheets push
 
 import streamlit as st
 import gspread
@@ -22,7 +21,7 @@ KOBO_BASE       = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID3  = st.secrets.get("KOBO_ASSET_ID3", "")
 KOBO_TOKEN      = st.secrets.get("KOBO_TOKEN", "")
 AUTO_PUSH       = bool(st.secrets.get("AUTO_PUSH", False))
-AUTO_RUN        = True  # auto-run like your Growth Mindset app
+AUTO_RUN        = True  # no buttons
 
 DATASETS_DIR    = Path("DATASETS")
 MAPPING_PATH    = DATASETS_DIR / "mapping3.csv"
@@ -33,10 +32,10 @@ EXEMPLARS_PATH  = DATASETS_DIR / "networking.jsonl"
 # ==============================
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
-    ("Localization Champion",         21, 24),
-    ("Skilled Networked Advocate",    16, 20),
-    ("Developing Influencer",         10, 15),
-    ("Needs Support",                  0,  9),
+    ("Localization Champion",        21, 24),
+    ("Skilled Networked Advocate",   16, 20),
+    ("Developing Influencer",        10, 15),
+    ("Needs Support",                 0,  9),
 ]
 
 ORDERED_ATTRS = [
@@ -53,21 +52,21 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# passthrough source columns (we’ll later filter an explicit exclude set)
+# passthrough source columns we keep (front pool; we later filter an explicit exclude set)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
     "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid","care_staff"
 ]
 
-# EXCLUDE these specific raw source cols from the visible table
+# EXCLUDE these specific raw source cols from the visible table (same as GrowthMindset)
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
     "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
 }
 
 # ==============================
-# AI DETECTION (same style as Growth Mindset)
+# AI DETECTION (same style)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
@@ -161,10 +160,17 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS (Networking)
 # ==============================
-# Networking uses one schema: SPD/PAS/EAL/CGC/CCM/ELL/IWA/RMA → A1..A8
-QID_PREFIX_TO_SECTION = {
-    "SPD":"A1","PAS":"A2","EAL":"A3","CGC":"A4",
-    "CCM":"A5","ELL":"A6","IWA":"A7","RMA":"A8"
+# Networking uses a single-section schema A1..A8 with distinct prefixes
+#   SPD→A1, PAS→A2, EAL→A3, CGC→A4, CCM→A5, ELL→A6, IWA→A7, RMA→A8
+QID_PREFIX_TO_SECTIONS = {
+    "SPD": ["A1"],
+    "PAS": ["A2"],
+    "EAL": ["A3"],
+    "CGC": ["A4"],
+    "CCM": ["A5"],
+    "ELL": ["A6"],
+    "IWA": ["A7"],
+    "RMA": ["A8"],
 }
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
@@ -187,16 +193,19 @@ def read_jsonl_path(path: Path) -> list[dict]:
     return rows
 
 def build_bases_from_qid(question_id: str) -> list[str]:
-    if not question_id: return []
+    out = []
+    if not question_id: return out
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m: return []
+    if not m: return out
     qn = m.group(1)
     prefix = qid.split("_Q")[0]
-    sect = QID_PREFIX_TO_SECTION.get(prefix)
-    if not sect: return []
-    roots = ["Networking","networking"]
-    return [f"{root}/{sect}_Section/{sect}_{qn}" for root in roots]
+    sects = QID_PREFIX_TO_SECTIONS.get(prefix, [])
+    roots = ["Networking","networking"]  # seen variants
+    for sect in sects:
+        for root in roots:
+            out.append(f"{root}/{sect}_Section/{sect}_{qn}")
+    return out
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base: return []
@@ -217,16 +226,17 @@ def _score_kobo_header(col: str, token: str) -> int:
     if f"/{t}/" in c: s = max(s,92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
     if t in c: s = max(s,80)
+    # Kobo quirks
+    if "/a" in c: s += 2
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    if "networking/" in c or "/a" in c: s += 2
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str, attribute: str = "") -> str | None:
     cols_original = list(df_cols)
     cols_lower = {c.lower(): c for c in cols_original}
 
-    # 1) full base variants
+    # 1) Try full-path bases
     bases = build_bases_from_qid(question_id)
     for base in bases:
         if base.lower() in cols_lower: return cols_lower[base.lower()]
@@ -235,23 +245,26 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         for c in cols_original:
             if c.lower().startswith(base.lower()): return c
 
-    # 2) token fallback A#_n
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1); prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect: token = f"{sect}_{qn}"
-    if token:
-        best, bs = None, 0
+    # 2) Token fallback (A#_n)
+    qid = (question_id or "").strip().upper()
+    m = QNUM_RX.search(qid)
+    tokens = []
+    if m:
+        qn = m.group(1)
+        pref = qid.split("_Q")[0]
+        for sect in QID_PREFIX_TO_SECTIONS.get(pref, []):
+            tokens.append(f"{sect}_{qn}")
+
+    best, bs = None, 0
+    for token in tokens:
         for c in cols_original:
             sc = _score_kobo_header(c, token)
-            if sc > bs: bs, best = sc, c
-        if best and bs >= 82: return best
+            if sc > bs:
+                bs, best = sc, c
+    if best and bs >= 80:
+        return best
 
-    # 3) prompt-hint rescue
+    # 3) Prompt-hint fuzzy rescue
     hint = clean(prompt_hint or "")
     if hint:
         cands = [(c, c.lower()) for c in cols_original]
@@ -347,7 +360,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING
+# SCORING (same logic as GrowthMindset you approved)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -355,14 +368,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    # passthrough candidates (keep original order)
+    # identify passthrough columns (keep original order)
     def want_col(c):
         lc = c.strip().lower()
         return any(h in lc for h in PASSTHROUGH_HINTS)
     passthrough_cols = [c for c in df_cols if want_col(c)]
     seen = set(); passthrough_cols = [x for x in passthrough_cols if not (x in seen or seen.add(x))]
 
-    # prefer explicit care_staff, fall back to staff id
+    # prefer explicit care_staff, fall back to staff id for value
     staff_id_col   = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
     care_staff_col = next((c for c in df.columns if c.strip().lower() in ("care_staff","care staff","care-staff")), None)
 
@@ -377,11 +390,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # mapping resolution
+    # mapping resolution (Networking schema)
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
-        hit = resolve_kobo_column_for_mapping(df_cols, r["question_id"], r.get("prompt_hint",""))
+        hit = resolve_kobo_column_for_mapping(df_cols, r["question_id"], r.get("prompt_hint",""), r["attribute"])
         if hit: resolved_for_qid[r["question_id"]] = hit
 
     # batch-embed all distinct answers once
@@ -392,18 +405,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if col and col in df.columns:
                 a = clean(row.get(col, ""))
                 if a: distinct_answers.add(a)
-    if distinct_answers:
-        texts = list(distinct_answers)
-        # encode via cacheable batch
-        @st.cache_resource(show_spinner=False)
-        def _preembed_batch(tt: tuple[str, ...]):
-            embs = get_embedder().encode(list(tt), convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-            return {t:e for t,e in zip(tt, embs)}
-        pack = _preembed_batch(tuple(texts))
-        # seed cache
-        for t, e in pack.items():
-            if t not in _EMB_CACHE:
-                _EMB_CACHE[t] = e
+    embed_many(list(distinct_answers))
 
     out_rows = []
     for i, resp in df.iterrows():
@@ -416,7 +418,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(resp.get(who_col)) if who_col else ""
 
-        # passthrough (minus excluded + our first three)
+        # passthrough original source columns (minus excluded set and our first three)
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
@@ -429,7 +431,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         any_ai = False
         qtext_cache = {}
 
-        # cache answers for row
+        # row answers cache
         row_answers = {}
         for r in all_mapping:
             qid = r["question_id"]; col = resolved_for_qid.get(qid)
@@ -440,10 +442,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
-            if not col:
-                continue
+            if not col: 
+                continue  # nothing to read for this question
             ans = row_answers.get(qid, "")
             if not ans:
+                # no text provided; keep fields empty for this Qn
                 continue
 
             vec = emb_of(ans)
@@ -471,8 +474,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # AI suspicion
-            if ai_signal_score(ans, qhint_full) >= AI_SUSPECT_THRESHOLD:
+            # per-answer AI suspicion
+            ai_score = ai_signal_score(ans, qhint_full)
+            if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
             # write per-question score & rubric for Q1..Q4
@@ -487,7 +491,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields
+        # fill missing Qn/rubric fields to keep stable shape
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
@@ -517,7 +521,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     # 1) Date, Duration, Care_Staff
     ordered = [c for c in ["Date","Duration","Care_Staff"] if c in res.columns]
 
-    # 2) All raw source columns (original order), minus excluded & our first three
+    # 2) All original source columns (original order), minus excluded ones and minus our first three
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
     source_cols = [c for c in source_cols if c not in ("Date","Duration","Care_Staff")]
     ordered += [c for c in source_cols if c in res.columns]
@@ -529,18 +533,20 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
     ordered += [c for c in mid_q if c in res.columns]
 
-    # 4) Attribute averages + ranks
+    # 4) Attribute avgs + ranks
     mid_a = []
     for attr in ORDERED_ATTRS:
         mid_a += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
     ordered += [c for c in mid_a if c in res.columns]
 
-    # 5) Overall, then AI (AI last)
+    # 5) Overall then AI (AI must be right after Overall Rank AND be the last column)
     ordered += [c for c in ["Overall Total (0–24)","Overall Rank"] if c in res.columns]
     if "AI_suspected" in res.columns:
         ordered += ["AI_suspected"]
 
+    # enforce ordering (extras hidden to keep AI last)
     res = res.reindex(columns=ordered)
+
     return res
 
 # ==============================
@@ -572,9 +578,9 @@ SCOPES = [
 ]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME3", "Networking")
 
-MAX_WORKBOOK_CELLS = 10_000_000
-SOFT_TAB_BUDGET    = 800_000
-MIN_ROWS_PER_TAB   = 1_000
+MAX_WORKBOOK_CELLS = 10_000_000        # Google Sheets hard limit
+SOFT_TAB_BUDGET    = 800_000           # target cells per tab (headroom < limit)
+MIN_ROWS_PER_TAB   = 1_000             # avoid too many tiny tabs
 
 def _to_a1_col(n: int) -> str:
     s = []
@@ -666,7 +672,9 @@ def _a1_range(ws_title: str, nrows: int, ncols: int, start_row: int = 1) -> str:
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     """
     Writes the scored DataFrame to Google Sheets while respecting the 10M cell limit.
-    Splits across Networking, Networking_2, ... if needed.
+    - Reuses tabs if present (Networking, Networking_2, …)
+    - Splits across tabs if needed
+    - Avoids addSheet/resize if it would exceed the workbook cell budget
     """
     try:
         gc = gs_client()
@@ -675,11 +683,15 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
             return False, "GSHEETS_SPREADSHEET_KEY not set in secrets."
         sh = gc.open_by_key(key)
 
+        # Prepare data
         df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
         header = df_out.columns.astype(str).tolist()
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
         cols   = max(1, len(header))
 
+        # Plan chunking by soft budget
+        SOFT_TAB_BUDGET = 800_000
+        MIN_ROWS_PER_TAB = 1_000
         soft_rows_per_tab = max(MIN_ROWS_PER_TAB, (SOFT_TAB_BUDGET // cols) - 1)
 
         row_idx = 0
@@ -687,22 +699,24 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         made_tabs = 0
         remaining_cells = _remaining_cell_budget(sh)
 
+        # If base tab exists, return its cells to the budget (we will shrink/clear)
         base_ws = _existing_ws_by_title(sh, DEFAULT_WS_NAME)
         if base_ws:
             remaining_cells += int(base_ws.row_count) * int(base_ws.col_count)
 
         while row_idx < len(values):
             title = DEFAULT_WS_NAME if tab_idx == 1 else f"{DEFAULT_WS_NAME}_{tab_idx}"
+
             ws = _existing_ws_by_title(sh, title)
             if ws:
                 remaining_cells += int(ws.row_count) * int(ws.col_count)
 
-            max_rows_by_budget = max(0, (remaining_cells // cols) - 1)
+            max_rows_by_budget = max(0, (remaining_cells // cols) - 1)  # minus header
             if max_rows_by_budget <= 0:
                 if made_tabs == 0:
                     return (False,
                             "Workbook is at/near the 10,000,000-cell limit. "
-                            "Delete old tabs or use a new spreadsheet.")
+                            "Delete old tabs or use a new spreadsheet, then try again.")
                 else:
                     return (True,
                             f"⚠️ Reached workbook cell limit after writing {made_tabs} tab(s). "
@@ -712,6 +726,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
             if rows_for_this_tab < MIN_ROWS_PER_TAB and (len(values) - row_idx) > MIN_ROWS_PER_TAB:
                 rows_for_this_tab = MIN_ROWS_PER_TAB
 
+            # Create or resize worksheet within budget
             if ws is None:
                 ws, consumed = _safe_add_ws(sh, title, rows_for_this_tab + 1, cols, remaining_cells)
                 if ws is None:
@@ -722,9 +737,19 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
                                     "Workbook cell limit prevents creating a new tab. "
                                     "Remove old tabs or use a fresh spreadsheet.")
                         return (True,
-                                f"⚠️ Partial upload: {row_idx} rows written across {made_tabs} tab(s).")
-                else:
-                    remaining_cells -= consumed
+                                f"⚠️ Could not add more tabs due to the 10M-cell limit. "
+                                f"Uploaded {row_idx} rows across {made_tabs} tab(s).")
+                    rows_for_this_tab = tight_rows
+                    ws, consumed = _safe_add_ws(sh, title, rows_for_this_tab + 1, cols, remaining_cells)
+                    if ws is None:
+                        if made_tabs == 0:
+                            return (False,
+                                    "Still over the cell limit after tightening chunk size. "
+                                    "Please delete old tabs or switch to a new spreadsheet.")
+                        return (True,
+                                f"⚠️ Partial upload: {row_idx} rows written. "
+                                f"No remaining cell budget to add more tabs.")
+                remaining_cells -= consumed
             else:
                 ok, consumed = _safe_resize(ws, rows_for_this_tab + 1, cols, remaining_cells)
                 if not ok:
@@ -747,6 +772,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
                                 f"⚠️ Partial upload: {row_idx} rows written across {made_tabs} tab(s).")
                 remaining_cells -= consumed
 
+            # Write header + chunk
             chunk = values[row_idx: row_idx + rows_for_this_tab]
             a1 = _a1_range(ws.title, len(chunk) + 1, cols, start_row=1)
             ws.spreadsheet.values_update(
@@ -794,7 +820,7 @@ def main():
         st.warning("No Kobo submissions found.")
         return
 
-    # Show full fetched dataset
+    # show full fetched dataset
     st.subheader("Fetched dataset (all rows)")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
     st.dataframe(df, use_container_width=True)
