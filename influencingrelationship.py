@@ -1,115 +1,159 @@
-# advisory.py  ← FIXED to expose main() and not call set_page_config here
-import streamlit as st
-
-import gspread
-from google.oauth2.service_account import Credentials
+# influencingrelationship.py
+# ------------------------------------------------------------
+# Kobo → Scored Excel / Google Sheets (Influencing Relationship)
+# Exact layout preserved. Robust column resolution A1..A8.
+# Batched embeddings + caching. AI-suspect flag at the end.
+# Stable AUTO_RUN/AUTO_PUSH + session-state safe downloads.
+# ------------------------------------------------------------
 
 import json, re, unicodedata
 from pathlib import Path
+from io import BytesIO
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import requests
-from sentence_transformers import SentenceTransformer
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
+from sentence_transformers import SentenceTransformer
 
 # ==============================
 # CONSTANTS / PATHS
 # ==============================
-KOBO_BASE        = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
-KOBO_ASSET_ID4    = st.secrets.get("KOBO_ASSET_ID4", "")
-KOBO_TOKEN       = st.secrets.get("KOBO_TOKEN", "")
+KOBO_BASE       = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
+KOBO_ASSET_ID4  = st.secrets.get("KOBO_ASSET_ID4", "")
+KOBO_TOKEN      = st.secrets.get("KOBO_TOKEN", "")
+AUTO_PUSH       = bool(st.secrets.get("AUTO_PUSH", False))
+AUTO_RUN        = bool(st.secrets.get("AUTO_RUN", True))
 
-DATASETS_DIR     = Path("DATASETS")
-MAPPING_PATH     = DATASETS_DIR / "mapping4.csv"
-EXEMPLARS_PATH   = DATASETS_DIR / "geda_influencing_responses.jsonl"
+DATASETS_DIR    = Path("DATASETS")
+MAPPING_PATH    = DATASETS_DIR / "mapping4.csv"
+EXEMPLARS_PATH  = DATASETS_DIR / "geda_influencing_responses.jsonl"
 
-BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
+BANDS = {0: "Counterproductive", 1: "Compliant", 2: "Strategic", 3: "Transformative"}
 OVERALL_BANDS = [
     ("Exemplary Thought Leader", 21, 24),
-    ("Strategic Advisor",       16, 20),
-    ("Emerging Advisor",        10, 15),
-    ("Needs Capacity Support",   0,  9),
+    ("Strategic Advisor",        16, 20),
+    ("Emerging Advisor",         10, 15),
+    ("Needs Capacity Support",    0,  9),
 ]
 
 ORDERED_ATTRS = [
-    "Strategic Positioning & Political Acumen",
-    "Stakeholder Mapping & Engagement",
-    "Evidence-Informed Advocacy",
-    "Communication, Framing & Messaging",
-    "Risk Awareness & Mitigation",
-    "Coalition Building & Collaborative Action",
-    "Adaptive Tactics & Channel Selection",
-    "Integrity & Values-Based Influencing",
+    "Strategic Positioning & Political Acumen",   # A1
+    "Stakeholder Mapping & Engagement",           # A2
+    "Evidence-Informed Advocacy",                 # A3
+    "Communication, Framing & Messaging",         # A4
+    "Risk Awareness & Mitigation",                # A5
+    "Coalition Building & Collaborative Action",  # A6
+    "Adaptive Tactics & Channel Selection",       # A7
+    "Integrity & Values-Based Influencing",       # A8
 ]
 
+# Attribute → header section code (A1..A8)
+ATTR_TO_HEADER_SECT = {
+    "Strategic Positioning & Political Acumen":   "A1",
+    "Stakeholder Mapping & Engagement":           "A2",
+    "Evidence-Informed Advocacy":                 "A3",
+    "Communication, Framing & Messaging":         "A4",
+    "Risk Awareness & Mitigation":                "A5",
+    "Coalition Building & Collaborative Action":  "A6",
+    "Adaptive Tactics & Channel Selection":       "A7",
+    "Integrity & Values-Based Influencing":       "A8",
+}
+
+# QID prefix → canonical section in Kobo export paths
+# (Adjust/extend prefixes to match your mapping4.csv)
+QID_PREFIX_TO_SECTION = {
+    "SPP": "A1",
+    "SME": "A2",
+    "EIA": "A3",
+    "CFM": "A4",
+    "RAM": "A5",
+    "CBC": "A6",
+    "ATC": "A7",
+    "IVI": "A8",  # include if you have Integrity as a prefixed QID set
+}
 
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
+# passthrough source columns we keep (front pool; later filtered by explicit exclude set)
+PASSTHROUGH_HINTS = [
+    "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
+    "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
+    "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid","care_staff","type_participant"
+]
+# EXCLUDE these specific raw source cols from the visible table
+_EXCLUDE_SOURCE_COLS_LOWER = {
+    "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
+    "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
+}
+
 # ==============================
-# HELPERS
+# AI DETECTION
 # ==============================
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+
+TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
+LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
+SYMBOL_RX          = re.compile(r"[—–\-]{2,}|[≥≤≧≦≈±×÷%]|[→←⇒↔↑↓]|[•●◆▶✓✔✗❌§†‡]", re.U)
+TIMEBOX_RX         = re.compile(r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)", re.I)
+EXPLICIT_AI_RX     = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+
 def clean(s):
     if s is None: return ""
     s = unicodedata.normalize("NFKC", str(s))
     return re.sub(r"\s+"," ", s).strip()
-
-def try_dt(x):
-    if pd.isna(x): return None
-    if isinstance(x, (pd.Timestamp, datetime)): return pd.to_datetime(x)
-    try: return pd.to_datetime(str(x), errors="coerce")
-    except Exception: return None
-
-def cos_sim(a, b):
-    if a is None or b is None: return -1e9
-    return float(np.dot(a, b))
 
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
-def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
+def _avg_sentence_len(text: str) -> float:
+    sents = [s for s in re.split(r"[.!?]+", text or "") if s.strip()]
+    if not sents: return 0.0
+    toks = re.findall(r"\w+", text or "")
+    return len(toks) / max(len(sents), 1)
 
+def _type_token_ratio(text: str) -> float:
+    toks = [t.lower() for t in re.findall(r"[a-z]+", text or "")]
+    return 1.0 if not toks else len(set(toks))/len(toks)
+
+def ai_signal_score(text: str, question_hint: str = "") -> float:
+    t = clean(text)
+    if not t: return 0.0
+    score = 0.0
+    if SYMBOL_RX.search(t):                 score += 0.35
+    if TIMEBOX_RX.search(t):                score += 0.15
+    if EXPLICIT_AI_RX.search(t):            score += 0.35
+    if TRANSITION_OPEN_RX.search(t):        score += 0.12
+    if LIST_CUES_RX.search(t):              score += 0.12
+    if BULLET_RX.search(t):                 score += 0.08
+    buzz_hits = sum(1 for b in {
+        "minimum viable","feedback loop","trade-off","evidence-based","stakeholder alignment",
+        "learners’ agency","norm shifts","quick win","low-lift","scalable","best practice",
+        "pilot theatre","timeboxed"
+    } if b in t.lower())
+    if buzz_hits:                            score += min(0.24, 0.08*buzz_hits)
+    asl = _avg_sentence_len(t)
+    if   asl >= 26:                          score += 0.18
+    elif asl >= 18:                          score += 0.10
+    ttr = _type_token_ratio(t)
+    if ttr <= 0.45 and len(t) >= 180:        score += 0.10
+    if question_hint and qa_overlap(t, question_hint) < 0.06:
+                                             score += 0.10
+    return max(0.0, min(1.0, score))
+
+# ==============================
+# KOBO
+# ==============================
 def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
-
-def normalize_col_name(s: str) -> str:
-    s = s.strip().lower()
-    s = s.replace("’","'").replace("“","\"").replace("”","\"")
-    s = re.sub(r"\s+"," ", s)
-    s = re.sub(r"[^a-z0-9_ ]+", "", s)
-    return s
-
-def show_status(ok: bool, msg: str) -> None:
-    if ok: st.success(msg)
-    else:  st.error(msg)
-
-# ==============================
-# LOADERS
-# ==============================
-def load_mapping_from_path(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"mapping file not found: {path}")
-    m = pd.read_csv(path) if path.suffix.lower()==".csv" else pd.read_excel(path)
-    m.columns = [c.lower().strip() for c in m.columns]
-    assert {"column","question_id","attribute"}.issubset(m.columns), \
-        "mapping must have: column, question_id, attribute"
-    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
-    m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
-    return m
-
-def read_jsonl_path(path: Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"exemplars file not found: {path}")
-    rows = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                rows.append(json.loads(line))
-    return rows
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_kobo_dataframe() -> pd.DataFrame:
@@ -147,36 +191,50 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 # ==============================
-# QUESTION_ID → KOBO COLUMN RESOLVER
+# MAPPING + EXEMPLARS
 # ==============================
-
-QID_PREFIX_TO_SECTION = {"SPP":"A1","SME":"A2","EIA":"A3","CFM":"A4","RAM":"A5","CBC":"A6","ATC":"A7"}
-
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
+def load_mapping_from_path(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"mapping file not found: {path}")
+    m = pd.read_csv(path) if path.suffix.lower()==".csv" else pd.read_excel(path)
+    m.columns = [c.lower().strip() for c in m.columns]
+    assert {"column","question_id","attribute"}.issubset(m.columns), \
+        "mapping must have: column, question_id, attribute"
+    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
+    m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
+    return m
+
+def read_jsonl_path(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"exemplars file not found: {path}")
+    rows = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                rows.append(json.loads(s))
+    return rows
+
 def build_kobo_bases_from_qid(question_id: str) -> list[str]:
-    """Return all plausible base prefixes for a given qid."""
-    if not question_id:
-        return []
+    """Return plausible Kobo base prefixes for a given qid across Influencing schema."""
+    out = []
+    if not question_id: return out
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m:
-        return []
+    if not m: return out
     qn = m.group(1)
-    prefix = qid.split("_Q")[0]
-    if prefix not in QID_PREFIX_TO_SECTION:
-        return []
-    section = QID_PREFIX_TO_SECTION[prefix]
-
-    roots = [
-        "InfluencingRelationship",      # no space
-        "InfluencingRelationship",     # with space
-    ]
-    return [f"{root}/{section}_Section/{section}_{qn}" for root in roots]
+    pref = qid.split("_Q")[0]
+    sect = QID_PREFIX_TO_SECTION.get(pref)
+    if not sect: return out
+    roots = ["InfluencingRelationship", "Influencing Relationship"]
+    for root in roots:
+        out.append(f"{root}/{sect}_Section/{sect}_{qn}")
+    return out
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
-    if not base:
-        return []
+    if not base: return []
     return [
         base,
         f"{base} :: Answer (text)",
@@ -187,76 +245,91 @@ def expand_possible_kobo_columns(base: str) -> list[str]:
     ]
 
 def _score_kobo_header(col: str, token: str) -> int:
-    c = col.lower()
-    t = token.lower()
+    c = col.lower(); t = token.lower()
     if c == t: return 100
-    score = 0
-    if c.endswith("/" + t): score = max(score, 95)
-    if f"/{t}/" in c:       score = max(score, 92)
-    if (f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c): score = max(score, 90)
-    if t in c:              score = max(score, 80)
-    # common Kobo variants
-    if "english" in c or "label" in c or "(en)" in c: score += 5
-    if "answer (text)" in c or "answer_text" in c or "text" in c: score += 5
-    if "influencingrelationship/" in c or "InfluencingRelationship/" in c or "/a" in c: score += 2
-    return score
+    s = 0
+    if c.endswith("/"+t): s = max(s,95)
+    if f"/{t}/" in c: s = max(s,92)
+    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
+    if t in c: s = max(s,80)
+    if "english" in c or "label" in c or "(en)" in c: s += 5
+    if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
+    if "influencingrelationship/" in c or "influencing relationship/" in c or "/a" in c:
+        s += 2
+    return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
-    # Build lookup helpers
+def resolve_kobo_column_for_mapping(
+    df_cols: list[str],
+    question_id: str,
+    prompt_hint: str,
+    attribute: str = ""
+) -> str | None:
+    """
+    Robust mapping: tries canonical path from QID, then A1..A8 token, then fuzzy rescue by prompt_hint.
+    Works with headers like '.../A1_1 :: Answer (text)', etc.
+    """
     cols_original = list(df_cols)
-    cols_lower_map = {c.lower(): c for c in cols_original}
+    cols_lower = {c.lower(): c for c in cols_original}
 
-    # 1) Direct base candidates (case-insensitive)
+    # 1) Canonical path candidates from question_id (InfluencingRelationship/AX_Section/AX_n …)
     bases = build_kobo_bases_from_qid(question_id)
     for base in bases:
-        # exact case-insensitive match
-        if base.lower() in cols_lower_map:
-            return cols_lower_map[base.lower()]
-        # common Kobo suffixes
+        lb = base.lower()
+        if lb in cols_lower:
+            return cols_lower[lb]
         for v in expand_possible_kobo_columns(base):
-            if v.lower() in cols_lower_map:
-                return cols_lower_map[v.lower()]
-        # prefix match
-        for c in cols_original:
-            if c.lower().startswith(base.lower()):
+            lv = v.lower()
+            if lv in cols_lower:
+                return cols_lower[lv]
+        for c in cols_original:  # prefix match
+            if c.lower().startswith(lb):
                 return c
 
-    # 2) Token fallback on A#_n (e.g., A1_3)
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1)
-            prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect:
-                token = f"{sect}_{qn}"
+    # 2) Token candidates derived from QID and from attribute header code (A1..A8)
+    tokens = []
+    qid = (question_id or "").strip().upper()
+    m = QNUM_RX.search(qid)
+    qn = m.group(1) if m else None
+    if qn:
+        pref = qid.split("_Q")[0] if "_Q" in qid else qid
+        sect = QID_PREFIX_TO_SECTION.get(pref)
+        if sect:
+            tokens.append(f"{sect}_{qn}")
+        hdr = ATTR_TO_HEADER_SECT.get(attribute or "", "")
+        if hdr:
+            tokens.append(f"{hdr}_{qn}")
 
-    if token:
-        best_col, best_score = None, 0
-        for col in cols_original:
-            s = _score_kobo_header(col, token)
-            if s > best_score:
-                best_score, best_col = s, col
-        if best_col and best_score >= 82:
-            return best_col
+    # direct containment
+    for tok in tokens:
+        lt = tok.lower()
+        for c in cols_original:
+            if lt in c.lower():
+                return c
 
-    # 3) Prompt-hint fuzzy rescue (case-insensitive)
+    # scored similarity
+    best, bs = None, 0
+    for tok in tokens:
+        for c in cols_original:
+            sc = _score_kobo_header(c, tok)
+            if sc > bs:
+                bs, best = sc, c
+    if best and bs >= 80:
+        return best
+
+    # 3) Fuzzy rescue via prompt hint
     hint = clean(prompt_hint or "")
     if hint:
-        # rapidfuzz on lowercased lists while returning original
-        candidates = [(c, c.lower()) for c in cols_original]
-        hits = process.extract(hint.lower(), [lo for _, lo in candidates],
+        cands = [(c, c.lower()) for c in cols_original]
+        hits = process.extract(hint.lower(), [lo for _, lo in cands],
                                scorer=fuzz.partial_token_set_ratio, limit=5)
         for _, lo, score in hits:
             if score >= 88:
-                # map back to original case
-                for orig, low in candidates:
+                for orig, low in cands:
                     if low == lo:
                         return orig
 
     return None
+
 # ==============================
 # EMBEDDINGS / CENTROIDS
 # ==============================
@@ -264,8 +337,32 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
 def get_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
+@st.cache_resource(show_spinner=False)
+def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> dict:
+    texts = list(texts_tuple)
+    embs = get_embedder().encode(
+        texts,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False
+    )
+    return {t: e for t, e in zip(texts, embs)}
+
+_EMB_CACHE: dict[str, np.ndarray] = {}
+
+def embed_many(texts: list[str]) -> None:
+    missing = [t for t in texts if t and t not in _EMB_CACHE]
+    if not missing: return
+    pack = _embed_texts_cached(tuple(missing))
+    _EMB_CACHE.update(pack)
+
+def emb_of(text: str):
+    t = clean(text)
+    return _EMB_CACHE.get(t, None)
+
 def build_centroids(exemplars: list[dict]):
     by_qkey, by_attr, question_texts = {}, {}, []
+    all_texts = []
     for e in exemplars:
         qid   = clean(e.get("question_id",""))
         qtext = clean(e.get("question_text",""))
@@ -282,22 +379,26 @@ def build_centroids(exemplars: list[dict]):
         by_qkey[key]["texts"].append(text)
         by_attr.setdefault(attr, {0:[],1:[],2:[],3:[]})
         by_attr[attr][score].append(text)
+        if text: all_texts.append(text)
 
-    embedder = get_embedder()
+    # batch embed exemplar texts once
+    embed_many(list(set(all_texts)))
 
     def centroid(texts):
-        if not texts: return None
-        embs = embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-        return embs.mean(axis=0)
+        vecs = [emb_of(t) for t in texts if emb_of(t) is not None]
+        if not vecs: return None
+        c = np.stack(vecs, axis=0).mean(axis=0)
+        n = np.linalg.norm(c) or 1.0
+        return c / n
 
-    def build_centroids_for_q(texts, scores):
+    def centroids_for_q(texts, scores):
         buckets = {0:[],1:[],2:[],3:[]}
         for t,s in zip(texts, scores):
             if t: buckets[int(s)].append(t)
         return {sc: centroid(batch) for sc, batch in buckets.items()}
 
-    q_centroids = {k: build_centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
-    attr_centroids = {attr: {sc: centroid(txts) for sc, txts in bucks.items()} for attr, bucks in by_attr.items()}
+    q_centroids    = {k: centroids_for_q(v["texts"], v["scores"]) for k, v in by_qkey.items()}
+    attr_centroids = {a: {sc: centroid(txts) for sc, txts in bucks.items()} for a, bucks in by_attr.items()}
 
     global_buckets = {0:[],1:[],2:[],3:[]}
     for e in exemplars:
@@ -320,15 +421,6 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
                 return k
     return None
 
-_embed_cache: dict[str, np.ndarray] = {}
-def embed_cached(text: str):
-    t = clean(text)
-    if not t: return None
-    if t in _embed_cache: return _embed_cache[t]
-    vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-    _embed_cache[t] = vec
-    return vec
-
 # ==============================
 # SCORING
 # ==============================
@@ -338,11 +430,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    with st.expander("🔎 Debug: InfluencingRelationship section columns present", expanded=False):
-        sample_cols = [c for c in df_cols if "/A" in c or "InfluencingRelationship/" in c or c.startswith("A")]
-        st.write(sample_cols[:80])
+    # quick visibility
+    with st.expander("🔎 InfluencingRelationship-like columns found", expanded=False):
+        sample_cols = [c for c in df_cols if "/A" in c or "InfluencingRelationship/" in c or "Influencing Relationship/" in c or c.startswith("A")]
+        st.write(sample_cols[:120])
 
-    staff_id_col = next((c for c in df.columns if c.strip().lower() == "staff id" or c.strip().lower()=="staff_id"), None)
+    # id/date columns
+    staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
@@ -354,48 +448,63 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    rows_out = []
+    # mapping rows we actually use
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
+    # resolve Kobo headers for each mapping row (attribute-aware A1..A8)
     resolved_for_qid = {}
     missing_map_rows = []
     for r in all_mapping:
         qid   = r["question_id"]
         qhint = r.get("prompt_hint","")
-        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+        attr  = r.get("attribute","")
+        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint, attr)
         if hit:
             resolved_for_qid[qid] = hit
         else:
-            missing_map_rows.append((qid, qhint))
+            missing_map_rows.append((qid, attr, qhint))
 
     with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
         if resolved_for_qid:
-            show = list(resolved_for_qid.items())[:60]
+            show = [(k, v) for k, v in list(resolved_for_qid.items())[:100]]
             st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
         if missing_map_rows:
-            st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers (showing up to 30).")
-            st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
+            st.warning(f"{len(missing_map_rows)} mapping rows not found in headers (showing up to 40).")
+            st.dataframe(pd.DataFrame(missing_map_rows[:40], columns=["question_id","attribute","prompt_hint"]))
 
+    # batch-embed all distinct free-text answers once (big speed gain)
+    distinct_answers = set()
+    for _, row in df.iterrows():
+        for r in all_mapping:
+            col = resolved_for_qid.get(r["question_id"])
+            if col and col in df.columns:
+                a = clean(row.get(col, ""))
+                if a: distinct_answers.add(a)
+    embed_many(list(distinct_answers))
+
+    rows_out = []
     for i, resp in df.iterrows():
         out = {}
-        if pd.notna(dt_series.iloc[i]):
-            out["ID"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            out["ID"] = str(i)
+        out["Date"] = (
+            pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
+            if pd.notna(dt_series.iloc[i]) else str(i)
+        )
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
         out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
 
         per_attr = {}
-        ai_flags = []
+        ai_scores = []
 
-        tmp_answers = {}
+        # cache row answers to avoid re-cleaning
+        row_answers = {}
         for r in all_mapping:
             qid = r["question_id"]
             dfcol = resolved_for_qid.get(qid)
             if dfcol and dfcol in df.columns:
-                tmp_answers[qid] = clean(resp.get(dfcol, ""))
-        for t in set(tmp_answers.values()):
-            if t: _ = embed_cached(t)
+                row_answers[qid] = clean(resp.get(dfcol, ""))
+
+        # prefetch qtexts for hints (only when needed)
+        qtext_cache = {}
 
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
@@ -403,40 +512,49 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if not dfcol or dfcol not in df.columns:
                 continue
 
-            ans = clean(resp.get(dfcol, ""))
+            ans = row_answers.get(qid, "")
             if not ans:
                 continue
-            ai_flags.append(looks_ai_like(ans))
-            vec = embed_cached(ans)
+
+            vec = emb_of(ans)
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
+            if qkey and qkey not in qtext_cache:
+                qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
+            qtext_full = qtext_cache.get(qkey, "") if qkey else qhint
 
             sc = None
             if vec is not None:
-                if qkey and qkey in q_centroids:
-                    sims = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        qtext = by_qkey[qkey]["question_text"]
-                        if qa_overlap(ans, qtext or qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
-                if sc is None and attr in attr_centroids:
-                    sims = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
-                if sc is None:
-                    sims = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
-                    if sims:
-                        sc = max(sims, key=sims.get)
-                        if qa_overlap(ans, qhint) < MIN_QA_OVERLAP:
-                            sc = min(sc, 1)
+                def best_sim(cent_dict):
+                    best_s, best_v = None, -1e9
+                    for s, v in (cent_dict or {}).items():
+                        if v is None: continue
+                        sim = float(np.dot(vec, v))
+                        if sim > best_v:
+                            best_v, best_s = sim, s
+                    return best_s
 
+                if qkey and qkey in q_centroids:
+                    sc = best_sim(q_centroids[qkey])
+                if sc is None and attr in attr_centroids:
+                    sc = best_sim(attr_centroids[attr])
+                if sc is None:
+                    sc = best_sim(global_centroids)
+
+                # Penalize off-topic vs question/hint
+                if sc is not None and qa_overlap(ans, qtext_full or qhint) < MIN_QA_OVERLAP:
+                    sc = min(sc, 1)
+
+            # AI suspicion for this answer
+            ai_scores.append(ai_signal_score(ans, qtext_full))
+
+            # write per-question score & rubric Q1..Q4
             qn = None
             if "_Q" in (qid or ""):
-                try: qn = int(qid.split("_Q")[-1])
-                except: qn = None
+                try:
+                    qn = int(qid.split("_Q")[-1])
+                except Exception:
+                    qn = None
             if qn not in (1,2,3,4):
                 continue
 
@@ -446,15 +564,18 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out.setdefault(score_key, "")
                 out.setdefault(rubric_key, "")
             else:
-                out[score_key]  = int(sc)
-                out[rubric_key] = BANDS[int(sc)]
-                per_attr.setdefault(attr, []).append(int(sc))
+                sc_int = int(sc)
+                out[score_key]  = sc_int
+                out[rubric_key] = BANDS[sc_int]
+                per_attr.setdefault(attr, []).append(sc_int)
 
+        # ensure fixed shape for per-question blocks
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
+        # attribute averages + ranks
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -462,47 +583,59 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[f"{attr}_Avg (0–3)"] = ""
                 out[f"{attr}_RANK"]      = ""
             else:
-                avg = float(np.mean(scores)); band = int(round(avg))
+                avg = float(np.mean(scores))
+                band = int(round(avg))
                 overall_total += band
                 out[f"{attr}_Avg (0–3)"] = round(avg, 2)
                 out[f"{attr}_RANK"]      = BANDS[band]
 
         out["Overall Total (0–24)"] = overall_total
         out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        out["AI_suspected"] = bool(any(ai_flags))
+        out["AI-Suspected"] = bool(any(s >= AI_SUSPECT_THRESHOLD for s in ai_scores))
+
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
+
+    # Final column order: Date, Staff ID, Duration_min → per-question → per-attr → Overall → AI (last)
     def order_cols(cols):
-        ordered = ["ID","Staff ID","Duration_min"]
+        ordered = ["Date","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
-        ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
+        ordered += ["Overall Total (0–24)", "Overall Rank", "AI-Suspected"]
         extras = [c for c in cols if c not in ordered]
         return [c for c in ordered if c in cols] + extras
+
     return res_df.reindex(columns=order_cols(list(res_df.columns)))
 
 # ==============================
-# EXPORTS
+# EXPORTS / SHEETS
 # ==============================
+def _ensure_ai_last(df: pd.DataFrame,
+                    export_name: str = "AI-Suspected",
+                    legacy_name: str = "AI_suspected") -> pd.DataFrame:
+    out = df.copy()
+    if export_name not in out.columns and legacy_name in out.columns:
+        out = out.rename(columns={legacy_name: export_name})
+    if export_name not in out.columns:
+        out[export_name] = ""
+    cols = [c for c in out.columns if c != export_name] + [export_name]
+    return out[cols]
+
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    from io import BytesIO
+    df_out = _ensure_ai_last(df)
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        df_out.to_excel(writer, index=False)
     return bio.getvalue()
 
-# ==============================
-# Google Sheets (clean)
-# ==============================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME4", "InfluencingRelationship")
 
 def _normalize_sa_dict(raw: dict) -> dict:
@@ -559,11 +692,10 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     try: ws.freeze(rows=1)
     except Exception: pass
     try:
-        col_end = _to_a1_col(cols)
         ws.spreadsheet.batch_update({
             "requests": [{
                 "autoResizeDimensions": {
-                    "dimensions": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": cols}
+                    "dimensions": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": int(cols)}
                 }
             }]
         })
@@ -572,6 +704,7 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     try:
         ws = _open_ws_by_key()
+        df = _ensure_ai_last(df)  # ensure AI-Suspected is last
         header = df.columns.astype(str).tolist()
         values = df.astype(object).where(pd.notna(df), "").values.tolist()
         all_rows = [header] + values
@@ -590,58 +723,105 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"❌ {type(e).__name__}: {e}"
 
 # ==============================
-# PAGE ENTRYPOINT
+# PAGE ENTRYPOINT (stable main)
 # ==============================
 def main():
-    st.title("📊 Influencing Relationship: Kobo → Scored Excel / Google Sheets")
+    st.title("📊 Influencing Relationship — Kobo → Scored Excel / Google Sheets")
 
-    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
+    # local, stable DF signature to guard session_state writes
+    def _df_sig_local(df: pd.DataFrame) -> str:
+        import hashlib
+        try:
+            h = pd.util.hash_pandas_object(df, index=True).values
+            return hashlib.sha1(h.tobytes()).hexdigest()
+        except Exception:
+            return hashlib.sha1(df.to_csv(index=True).encode("utf-8")).hexdigest()
+
+    # one-time init of session keys (prevents first-run churn)
+    for k, v in {
+        "scored_df": None,
+        "scored_sig": None,
+        "excel_bytes": b"",
+    }.items():
+        st.session_state.setdefault(k, v)
+
+    def run_pipeline():
+        # 1) mapping + exemplars
         try:
             mapping = load_mapping_from_path(MAPPING_PATH)
         except Exception as e:
             st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
-            st.stop()
+            return
 
         try:
             exemplars = read_jsonl_path(EXEMPLARS_PATH)
             if not exemplars:
                 st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-                st.stop()
+                return
         except Exception as e:
             st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
-            st.stop()
+            return
 
         with st.spinner("Building semantic centroids..."):
             q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids(exemplars)
 
+        # 2) fetch Kobo
         with st.spinner("Fetching Kobo submissions..."):
             df = fetch_kobo_dataframe()
-
         if df.empty:
             st.warning("No Kobo submissions found.")
-            st.stop()
+            return
 
         st.caption("Fetched sample:")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(df.head(), use_container_width=True, height=360)
 
+        # 3) score
         with st.spinner("Scoring responses..."):
             scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
         st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True)
-        st.session_state["scored_df"] = scored_df
+
+        # --- only update session state if results actually changed
+        sig = _df_sig_local(scored_df)
+        if st.session_state["scored_sig"] != sig:
+            st.session_state["scored_df"]  = scored_df
+            st.session_state["scored_sig"] = sig
+            st.session_state["excel_bytes"] = to_excel_bytes(scored_df)
+
+        # 4) downloads (use cached bytes so widget stays stable)
         st.download_button(
             "⬇️ Download Excel",
-            data=to_excel_bytes(scored_df),
+            data=st.session_state["excel_bytes"],
             file_name="InfluencingRelationship_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+            use_container_width=True,
+            key="dl_xlsx_influencing",
         )
 
-    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
+        # 5) auto-push if configured
+        if AUTO_PUSH:
+            with st.spinner("📤 Sending to Google Sheets..."):
+                ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
+            (st.success if ok else st.error)(msg)
+
+    # Auto-run or manual button
+    if AUTO_RUN:
+        run_pipeline()
+    else:
+        if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True, key="btn_run_influencing"):
+            run_pipeline()
+
+    # Manual push panel (only if we didn't auto-push already)
+    if (st.session_state["scored_df"] is not None) and (not AUTO_PUSH):
         with st.expander("Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
             st.write("Worksheet name:", DEFAULT_WS_NAME)
-            if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
+            if st.button("📤 Send scored table to Google Sheets", use_container_width=True, key="btn_push_influencing"):
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                show_status(ok, msg)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+if __name__ == "__main__":
+    main()
