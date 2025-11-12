@@ -317,27 +317,8 @@ def build_centroids_cached(exemplars_tuple: tuple) -> tuple:
     global_centroids = {sc: centroid(txts) for sc, txts in global_buckets.items()}
     return q_centroids, attr_centroids, global_centroids, by_qkey, question_texts
 
-def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: str):
-    qid = (qid or "").strip()
-    if qid and qid in q_centroids:
-        return qid
-    hint = clean(prompt_hint or "")
-    match = process.extractOne(hint, question_texts, scorer=fuzz.token_set_ratio) if (hint and question_texts) else None
-    if match and match[1] >= FUZZY_THRESHOLD:
-        wanted = match[0]
-        for k, pack in by_qkey.items():
-            if clean(pack["question_text"]) == wanted:
-                return k
-    return None
-
-_embed_cache: dict[str, np.ndarray] = {}
-def embed_cached(text: str):
-    t = clean(text)
-    if not t: return None
-    if t in _embed_cache: return _embed_cache[t]
-    vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-    _embed_cache[t] = vec
-    return vec
+# Fast embedding store
+_EMB_STORE: dict[str, np.ndarray] = {}
 
 @st.cache_resource(show_spinner=False)
 def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> dict[str, np.ndarray]:
@@ -349,37 +330,25 @@ def _embed_texts_cached(texts_tuple: tuple[str, ...]) -> dict[str, np.ndarray]:
     )
     return {t: e for t, e in zip(texts, embs)}
 
-_EMB_BIG_CACHE: dict[str, np.ndarray] = {}
-
 def embed_many(texts: list[str]) -> None:
-    for k, v in _embed_cache.items():
-        if k not in _EMB_BIG_CACHE:
-            _EMB_BIG_CACHE[k] = v
-    clean_texts = [clean(t) for t in texts if t]
-    missing = [t for t in clean_texts if t not in _EMB_BIG_CACHE]
+    missing = [t for t in texts if t and t not in _EMB_STORE]
     if not missing:
         return
-    pack = _embed_texts_cached(tuple(missing))
-    _EMB_BIG_CACHE.update(pack)
+    _EMB_STORE.update(_embed_texts_cached(tuple(missing)))
 
 def emb_of(text: str):
     t = clean(text)
     if not t:
         return None
-    v = _EMB_BIG_CACHE.get(t)
+    v = _EMB_STORE.get(t)
     if v is not None:
         return v
-    v2 = _embed_cache.get(t)
-    if v2 is not None:
-        _EMB_BIG_CACHE[t] = v2
-        return v2
-    vec = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
-    _embed_cache[t] = vec
-    _EMB_BIG_CACHE[t] = vec
-    return vec
+    pack = _embed_texts_cached((t,))
+    _EMB_STORE.update(pack)
+    return _EMB_STORE.get(t)
 
 # ==============================
-# SCORING (fast path)
+# SCORING (optimized)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -392,28 +361,38 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         st.write(sample_cols[:80])
 
     staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id")), None)
+    staff_id_idx = (df.columns.get_loc(staff_id_col) if staff_id_col in df.columns else None)
+
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
+    # Precompute times once
+    dt_series = pd.to_datetime(df[date_col], errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*len(df))
 
     start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
     end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
-
-    dt_series = pd.to_datetime(df[date_col], errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*len(df))
     start_dt  = pd.to_datetime(df[start_col], errors="coerce") if start_col else pd.Series([pd.NaT]*len(df))
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # mapping rows we will use
+    # Prepare mapping rows
     mapping_rows = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # resolve kobo column once per mapping row
-    resolved_for_qid = {}
+    # Resolve Kobo column once per qid and store direct column index for fast row access
+    resolved_for_qid: dict[str, str] = {}
+    col_index_for_qid: dict[str, int] = {}
     missing_map_rows = []
     for r in mapping_rows:
-        qid   = r["question_id"]; qhint = r.get("prompt_hint","")
+        qid   = r["question_id"]
+        qhint = r.get("prompt_hint","")
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
-        if hit: resolved_for_qid[qid] = hit
-        else:   missing_map_rows.append((qid, qhint))
+        if hit:
+            resolved_for_qid[qid] = hit
+            try:
+                col_index_for_qid[qid] = df.columns.get_loc(hit)
+            except KeyError:
+                pass
+        else:
+            missing_map_rows.append((qid, qhint))
 
     with st.expander("🧭 Mapping → Kobo column resolution (by question_id)", expanded=False):
         if resolved_for_qid:
@@ -423,24 +402,27 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             st.warning(f"{len(missing_map_rows)} question_ids not found in Kobo headers (showing up to 30).")
             st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
 
-    # ---- SPEED: Pre-compute qkey per mapping row ONCE (no per-cell fuzzy) ----
+    # Resolve qkey ONCE per question
     qkey_for_qid = {}
     qtext_for_qkey = {k: v.get("question_text","") for k, v in by_qkey.items()}
     for r in mapping_rows:
         qid, qhint = r["question_id"], r.get("prompt_hint","")
         qkey_for_qid[qid] = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
 
-    # ---- SPEED: Gather all distinct answers column-wise (no per-row dict churn) ----
+    # Collect ALL distinct answers once (with length cap for speed)
+    LIMIT_EMB_CHARS = 1000  # safe cap; models truncate long tails anyway
     distinct_answers = set()
     for r in mapping_rows:
-        col = resolved_for_qid.get(r["question_id"])
-        if col and col in df.columns:
-            series = df[col].astype(str).map(clean)
-            distinct_answers.update([t for t in series.tolist() if t])
+        qid = r["question_id"]
+        if qid not in col_index_for_qid:
+            continue
+        cidx = col_index_for_qid[qid]
+        col_vals = (df.iloc[:, cidx].astype(str).str.slice(0, LIMIT_EMB_CHARS).map(clean)).tolist()
+        distinct_answers.update([t for t in col_vals if t])
 
+    # Batch embed once
     embed_many(list(distinct_answers))
 
-    # Prepare quick helpers
     def best_sim(vec, cent_dict):
         if not cent_dict or vec is None:
             return None
@@ -453,37 +435,29 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         return best_s
 
     rows_out = []
-    # Use itertuples for faster row traversal
-    for idx, row in enumerate(df.itertuples(index=False, name=None)):
-        # Map back to column index for fast access
-        row_dict = None  # only create if we actually need it
+    # Fast row traversal: itertuples(name=None) yields a tuple in column order
+    for i, row_t in enumerate(df.itertuples(index=False, name=None)):
         out = {}
-        # Date, Staff, Duration
-        dt_val = dt_series.iloc[idx]
-        out["Date"] = (pd.to_datetime(dt_val).strftime("%Y-%m-%d %H:%M:%S")
-                       if pd.notna(dt_val) else str(idx))
-        out["Staff ID"] = str(getattr(df.iloc[idx], staff_id_col)) if staff_id_col else ""
-        dur = duration_min.iloc[idx]
+        # fast pulls
+        dt_val = dt_series.iat[i] if len(dt_series) else pd.NaT
+        out["Date"] = (pd.to_datetime(dt_val).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(dt_val) else str(i))
+        out["Staff ID"] = (str(row_t[staff_id_idx]) if staff_id_idx is not None else "")
+        dur = duration_min.iat[i] if len(duration_min) else np.nan
         out["Duration_min"] = float(dur) if not pd.isna(dur) else ""
 
         per_attr = {}
         ai_scores = []
 
-        # process each mapped question
         for r in mapping_rows:
             qid, attr = r["question_id"], r["attribute"]
             qhint     = r.get("prompt_hint","")
-            dfcol     = resolved_for_qid.get(qid)
-            if not dfcol or dfcol not in df.columns:
+            cidx      = col_index_for_qid.get(qid, None)
+            if cidx is None:
                 continue
 
-            # lazy build row_dict only once if needed
-            if row_dict is None:
-                row_dict = df.iloc[idx].to_dict()
+            ans = clean(str(row_t[cidx]))[:LIMIT_EMB_CHARS]
 
-            ans = clean(row_dict.get(dfcol, ""))
-
-            # compute qn early
+            # figure out qn
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
@@ -495,7 +469,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             rubric_key = f"{attr}_Rubric_Qn{qn}"
 
             if not ans:
-                # force 0 for empty answer (guarantees no blanks)
+                # guarantee filled cell
                 out[score_key]  = 0
                 out[rubric_key] = BANDS[0]
                 per_attr.setdefault(attr, []).append(0)
@@ -504,7 +478,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             vec  = emb_of(ans)
             qkey = qkey_for_qid.get(qid)
 
-            # try q, then attr, then global
             sc = None
             if qkey and qkey in q_centroids:
                 sc = best_sim(vec, q_centroids[qkey])
@@ -513,7 +486,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if sc is None:
                 sc = best_sim(vec, global_centroids)
 
-            # Penalize mismatch by overlap
+            # mismatch penalty by overlap
             qtext = qtext_for_qkey.get(qkey, "") if qkey else qhint
             if sc is not None and qa_overlap(ans, qtext or qhint) < MIN_QA_OVERLAP:
                 sc = min(sc, 1)
@@ -525,7 +498,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             out[rubric_key] = BANDS[int(sc)]
             per_attr.setdefault(attr, []).append(int(sc))
 
-            # AI suspicion
+            # AI suspicion for this answer
             ai_scores.append(ai_signal_score(ans, qtext))
 
         # ensure fixed shape for per-question blocks
@@ -550,7 +523,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         out["Overall Total (0–24)"] = overall_total
         out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
         out["AI-Suspected"] = bool(any(s >= AI_SUSPECT_THRESHOLD for s in ai_scores))
-
         rows_out.append(out)
 
     res_df = pd.DataFrame(rows_out)
@@ -703,7 +675,6 @@ def main():
             return
 
         with st.spinner("Building semantic centroids..."):
-            # cached now
             q_centroids, attr_centroids, global_centroids, by_qkey, question_texts = build_centroids_cached(tuple(exemplars))
 
         with st.spinner("Fetching Kobo submissions..."):
