@@ -1,5 +1,4 @@
-# advisory.py — Growth Mindset Scoring (auto-run, every question scored, Date→Duration→Care_Staff first, AI last)
-
+# advisory.py — Growth Mindset Scoring (auto-run, Date→Duration→Care_Staff first, AI last; Sheets cell-safe)
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -48,24 +47,23 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# passthrough source columns we keep (front pool; we later filter an explicit exclude set)
+# passthrough source columns we keep (we later filter out an explicit exclude set)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
     "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid","care_staff"
 ]
 
-# EXCLUDE these specific raw source cols from the visible table (your list)
+# EXCLUDE these specific raw source cols from the visible table
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
     "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
 }
 
 # ==============================
-# AI DETECTION (same style)
+# AI DETECTION (lightweight, fast)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
-
 TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
@@ -156,17 +154,7 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS (Growth Mindset)
 # ==============================
-# IMPORTANT: Dual schema support
-#   LA→A1
-#   DS→B1 (fallback A2)
-#   IN→C1 (fallback A3)
-#   CI→D1 (fallback A4)
-QID_PREFIX_TO_SECTIONS = {
-    "LA": ["A1"],
-    "DS": ["B1","A2"],
-    "IN": ["C1","A3"],
-    "CI": ["D1","A4"],
-}
+QID_PREFIX_TO_SECTION = {"LA":"A1","DS":"A2","IN":"A3","CI":"A4"}
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
@@ -177,16 +165,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
     # keep only desired attrs
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
-
-    # Auto-fix common typo: CI rows accidentally labeled as IN_Q#
-    def fix_qid(row):
-        qid = str(row["question_id"]).strip()
-        attr = str(row["attribute"]).strip()
-        if attr == "Contextual Intelligence" and qid.upper().startswith("IN_Q"):
-            # convert IN_Q# → CI_Q#
-            return "CI_" + qid.split("_",1)[1]
-        return qid
-    m["question_id"] = m.apply(fix_qid, axis=1)
     return m
 
 def read_jsonl_path(path: Path) -> list[dict]:
@@ -198,21 +176,17 @@ def read_jsonl_path(path: Path) -> list[dict]:
             if s: rows.append(json.loads(s))
     return rows
 
-def build_bases_from_qid(question_id: str) -> list[str]:
-    """Return all plausible base prefixes (full path) for a given qid across both schemas."""
-    out = []
-    if not question_id: return out
+def build_kobo_bases_from_qid(question_id: str) -> list[str]:
+    if not question_id: return []
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m: return out
+    if not m: return []
     qn = m.group(1)
     prefix = qid.split("_Q")[0]
-    sects = QID_PREFIX_TO_SECTIONS.get(prefix, [])
-    roots = ["Growthmindset","Growth Mindset"]  # seen variants
-    for sect in sects:
-        for root in roots:
-            out.append(f"{root}/{sect}_Section/{sect}_{qn}")
-    return out
+    sect = QID_PREFIX_TO_SECTION.get(prefix)
+    if not sect: return []
+    roots = ["Growthmindset","Growth Mindset"]
+    return [f"{root}/{sect}_Section/{sect}_{qn}" for root in roots]
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base: return []
@@ -233,18 +207,16 @@ def _score_kobo_header(col: str, token: str) -> int:
     if f"/{t}/" in c: s = max(s,92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
     if t in c: s = max(s,80)
-    # Kobo quirks and short schema boost
-    if "/a" in c or "/b" in c or "/c" in c or "/d" in c: s += 2
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
+    if "growthmindset/" in c or "growth mindset/" in c or "/a" in c: s += 2
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str, attribute: str) -> str | None:
+def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
     cols_original = list(df_cols)
     cols_lower = {c.lower(): c for c in cols_original}
 
-    # 1) Try full-path bases for both schema sections
-    bases = build_bases_from_qid(question_id)
+    bases = build_kobo_bases_from_qid(question_id)
     for base in bases:
         if base.lower() in cols_lower: return cols_lower[base.lower()]
         for v in expand_possible_kobo_columns(base):
@@ -252,37 +224,22 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         for c in cols_original:
             if c.lower().startswith(base.lower()): return c
 
-    # 2) Token fallback: try all candidate section tokens (A1/B1/C1/D1 …) + legacy A2/A3/A4
-    qid = (question_id or "").strip().upper()
-    m = QNUM_RX.search(qid)
-    tokens = []
-    if m:
-        qn = m.group(1)
-        pref = qid.split("_Q")[0]
-        for sect in QID_PREFIX_TO_SECTIONS.get(pref, []):
-            tokens.append(f"{sect}_{qn}")
-        # attribute-based rescue if prefix was weird
-        attr_to_sects = {
-            "Learning Agility": ["A1"],
-            "Digital Savvy":    ["B1","A2"],
-            "Innovation":       ["C1","A3"],
-            "Contextual Intelligence": ["D1","A4"],
-        }
-        for sect in attr_to_sects.get(attribute, []):
-            tok = f"{sect}_{qn}"
-            if tok not in tokens:
-                tokens.append(tok)
+    token = None
+    if question_id:
+        qid = question_id.strip().upper()
+        m = QNUM_RX.search(qid)
+        if m:
+            qn = m.group(1); prefix = qid.split("_Q")[0]
+            sect = QID_PREFIX_TO_SECTION.get(prefix)
+            if sect: token = f"{sect}_{qn}"
 
-    best, bs = None, 0
-    for token in tokens:
+    if token:
+        best, bs = None, 0
         for c in cols_original:
             sc = _score_kobo_header(c, token)
-            if sc > bs:
-                bs, best = sc, c
-    if best and bs >= 80:  # generous since short schema gets 82
-        return best
+            if sc > bs: bs, best = sc, c
+        if best and bs >= 82: return best
 
-    # 3) Prompt-hint fuzzy rescue
     hint = clean(prompt_hint or "")
     if hint:
         cands = [(c, c.lower()) for c in cols_original]
@@ -378,7 +335,7 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
-# SCORING
+# SCORING (per-question + averages; with passthrough)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
@@ -408,12 +365,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
     duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
 
-    # mapping resolution (now aware of dual schema + attribute rescue + CI fix)
+    # mapping resolution
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
     resolved_for_qid = {}
     for r in all_mapping:
-        hit = resolve_kobo_column_for_mapping(df_cols, r["question_id"], r.get("prompt_hint",""), r["attribute"])
-        if hit: resolved_for_qid[r["question_id"]] = hit
+        qid   = r["question_id"]
+        qhint = r.get("prompt_hint","")
+        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+        if hit: resolved_for_qid[qid] = hit
 
     # batch-embed all distinct answers once
     distinct_answers = set()
@@ -456,17 +415,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if col and col in df.columns:
                 row_answers[qid] = clean(resp.get(col, ""))
 
-        # score every mapped question Q1..Q4
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
-            if not col: 
-                continue  # nothing to read for this question
+            if not col: continue
             ans = row_answers.get(qid, "")
-            if not ans:
-                # no text provided; keep fields empty for this Qn
-                continue
-
+            if not ans: continue
             vec = emb_of(ans)
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
@@ -509,7 +463,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill missing Qn/rubric fields to keep stable shape
+        # fill missing Qn/rubric fields to keep stable shape (ensures visibility even if no answer)
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
@@ -568,7 +522,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     return res
 
 # ==============================
-# EXPORTS / SHEETS
+# EXPORTS / SHEETS (cell-safe, chunked)
 # ==============================
 def _ensure_ai_last(df: pd.DataFrame,
                     export_name: str = "AI_Suspected",
@@ -589,8 +543,19 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df_out.to_excel(w, index=False)
     return bio.getvalue()
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+# ---- Google Sheets client & helpers ----
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME2", "Growthmindset")
+
+def _to_a1_col(n: int) -> str:
+    s = []
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s.append(chr(65 + r))
+    return ''.join(reversed(s))
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw: raise ValueError("gcp_service_account missing in secrets.")
@@ -612,16 +577,23 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
-def _open_ws_by_key() -> gspread.Worksheet:
-    key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
-    ws_name = DEFAULT_WS_NAME
-    if not key: raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
-    gc = gs_client()
-    sh = gc.open_by_key(key)
+def _existing_ws_by_title(sh: gspread.Spreadsheet, title: str) -> gspread.Worksheet | None:
+    for ws in sh.worksheets():
+        if ws.title == title:
+            return ws
+    return None
+
+def _create_min_ws(sh: gspread.Spreadsheet, title: str, rows: int, cols: int) -> gspread.Worksheet:
+    rows = max(2, int(rows))
+    cols = max(1, int(cols))
+    return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+
+def _clear_and_fit(ws: gspread.Worksheet, rows: int, cols: int) -> None:
     try:
-        return sh.worksheet(ws_name)
-    except gspread.WorksheetNotFound:
-        return sh.add_worksheet(title=ws_name, rows="20000", cols="150")
+        ws.resize(rows=max(2, int(rows)), cols=max(1, int(cols)))
+    except Exception:
+        pass
+    ws.clear()
 
 def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     try: ws.freeze(rows=1)
@@ -629,23 +601,64 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     try:
         ws.spreadsheet.batch_update({
             "requests":[{"autoResizeDimensions":{
-                "dimensions":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":cols}
+                "dimensions":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":int(cols)}
             }}]
         })
     except Exception: pass
 
+def _a1_range_for_block(ws_title: str, nrows: int, ncols: int, start_row: int = 1) -> tuple[str, int]:
+    col_end = _to_a1_col(ncols)
+    end_row = start_row + nrows - 1
+    return (f"'{ws_title}'!A{start_row}:{col_end}{end_row}", end_row + 1)
+
+def _write_block(ws: gspread.Worksheet, header: list[str], rows: list[list], start_row: int = 1) -> None:
+    payload = [header] + rows if start_row == 1 else rows
+    rng, _ = _a1_range_for_block(ws.title, len(payload), len(header), start_row)
+    ws.spreadsheet.values_update(
+        rng,
+        params={"valueInputOption":"USER_ENTERED"},
+        body={"values": payload}
+    )
+
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Writes the scored DataFrame to Google Sheets, splitting across multiple tabs
+    if needed to avoid the 10,000,000 cells workbook limit. Tabs: <DEFAULT_WS_NAME>, or _1, _2, …
+    """
     try:
-        ws = _open_ws_by_key()
+        gc = gs_client()
+        key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
+        if not key:
+            return False, "GSHEETS_SPREADSHEET_KEY not set in secrets."
+        sh = gc.open_by_key(key)
+
+        # Ensure AI_Suspected is last for export
         df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
         header = df_out.columns.astype(str).tolist()
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
-        ws.clear()
-        ws.spreadsheet.values_batch_update(
-            body={"valueInputOption":"USER_ENTERED","data":[{"range": f"'{ws.title}'!A1","values":[header]+values}]}
-        )
-        _post_write_formatting(ws, len(header))
-        return True, f"✅ Wrote {len(values)} rows × {len(header)} cols to '{ws.title}' (last='AI_Suspected')."
+
+        # Chunk rows to keep each tab comfortably below limits
+        max_cells_per_tab = 800_000
+        cols = max(1, len(header))
+        rows_per_tab = max(1, (max_cells_per_tab // cols) - 1)
+
+        chunks = []
+        for i in range(0, len(values), rows_per_tab):
+            chunks.append(values[i:i+rows_per_tab])
+
+        for idx, chunk in enumerate(chunks, start=1):
+            title = f"{DEFAULT_WS_NAME}_{idx}" if len(chunks) > 1 else DEFAULT_WS_NAME
+            ws = _existing_ws_by_title(sh, title)
+            if ws is None:
+                try:
+                    ws = _create_min_ws(sh, title, rows=len(chunk)+1, cols=cols)
+                except gspread.exceptions.APIError as e:
+                    return False, f"Workbook is at the 10,000,000-cell limit. Remove old tabs or use a new spreadsheet. ({e})"
+            _clear_and_fit(ws, rows=len(chunk)+1, cols=cols)
+            _write_block(ws, header, chunk, start_row=1)
+            _post_write_formatting(ws, cols)
+
+        return True, f"✅ Wrote {len(values)} rows across {len(chunks)} tab(s)."
     except Exception as e:
         return False, f"❌ {type(e).__name__}: {e}"
 
@@ -690,7 +703,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.subheader("Scored table (all rows)")
-    st.caption("Date → Duration → Care_Staff, then source columns (excluded set removed), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
+    st.caption("Date → Duration → Care_Staff, then original source columns (minus your excluded set), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
     st.dataframe(scored, use_container_width=True)
 
     st.download_button(
