@@ -4,13 +4,12 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-import json, re, unicodedata, time
+import json, re, unicodedata
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
-from dataclasses import dataclass
 
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
@@ -49,19 +48,17 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# AI detection
+# AI detection — strict, threshold-driven
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
-TRANSITION_OPEN_RX = re.compile(
-    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
-    re.I
-)
-LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
-BULLET_RX = re.compile(r"^[-*•]\s", re.M)
+TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
+LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
     "stakeholder alignment", "learners’ agency", "norm shifts",
     "quick win", "low-lift", "scalable", "best practice"
 }
+AI_HARD_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
 
 # Google Sheets
 SCOPES = [
@@ -93,9 +90,6 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-AI_RX = re.compile(r"(?:-{3,}|—{2,}|_{2,}|\.{4,}|as an ai\b|i am an ai\b)", re.I)
-def looks_ai_like(t): return bool(AI_RX.search(clean(t)))
-
 def _avg_sentence_len(text: str) -> float:
     s = re.split(r"[.!?]+", text)
     s = [w for w in s if w.strip()]
@@ -109,7 +103,10 @@ def _type_token_ratio(text: str) -> float:
     return len(set(toks)) / len(toks)
 
 def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
-    """Return (score in 0..1, flags[]) — higher means more AI-ish."""
+    """
+    Return (score in 0..1, flags[]) — strict but fair.
+    We keep it threshold-only (no extra “two-cue” rule).
+    """
     t = clean(text)
     flags = []
     if not t:
@@ -117,12 +114,12 @@ def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str
 
     score = 0.0
 
-    # 1) Classic patterns
-    if looks_ai_like(t):
-        score += 0.35
-        flags.append("pattern:ai-boilerplate")
+    # 0) Hard cues (make it easier to flag truly AI answers)
+    if AI_HARD_RX.search(t):
+        score += 0.40
+        flags.append("hard:ai-self-declare")
 
-    # 2) Transition/list scaffolding
+    # 1) Transition/list scaffolding
     if TRANSITION_OPEN_RX.search(t):
         score += 0.15
         flags.append("style:transition-opening")
@@ -130,33 +127,33 @@ def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str
         score += 0.15
         flags.append("style:list-cues")
 
-    # 3) Buzzword density
+    # 2) Buzzword density
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits >= 1:
         score += min(0.25, 0.08 * buzz_hits)
         flags.append(f"lex:buzzwords({buzz_hits})")
 
-    # 4) Bulleted formatting
+    # 3) Bulleted formatting
     if BULLET_RX.search(t):
         score += 0.08
         flags.append("format:bullets")
 
-    # 5) Long, polished sentences
-    asl = _avg_sentence_len(t)  # tokens per sentence
+    # 4) Long, polished sentences
+    asl = _avg_sentence_len(t)
     if asl >= 26:
         score += 0.18
-        flags.append(f"syntax:long-sentences(~{int(asl)})")
+        flags.append(f"syntax:long(~{int(asl)})")
     elif asl >= 18:
         score += 0.10
-        flags.append(f"syntax:moderate-long(~{int(asl)})")
+        flags.append(f"syntax:moderate(~{int(asl)})")
 
-    # 6) Low lexical variety in longer text
+    # 5) Low lexical variety in longer text
     ttr = _type_token_ratio(t)
     if ttr <= 0.45 and len(t) >= 180:
         score += 0.10
-        flags.append(f"lex:low-variety(ttr={ttr:.2f})")
+        flags.append(f"lex:low-variety({ttr:.2f})")
 
-    # 7) Low Q/A overlap (generic answer)
+    # 6) Low Q/A overlap (generic answer)
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06:
@@ -176,8 +173,10 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not path.exists(): raise FileNotFoundError(f"mapping file not found: {path}")
     m = pd.read_csv(path) if path.suffix.lower()==".csv" else pd.read_excel(path)
     m.columns = [c.lower().strip() for c in m.columns]
+    # expected: column, question_id, attribute, prompt_hint (prompt_hint optional)
     assert {"column","question_id","attribute"}.issubset(m.columns), "mapping must have: column, question_id, attribute"
     if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
+    # only attributes we score
     m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
     return m
 
@@ -259,7 +258,19 @@ def _score_kobo_header(col: str, token: str) -> int:
     if "advisory/" in c or "/a" in c: s += 1
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+def resolve_kobo_column_for_mapping(
+    df_cols: list[str],
+    question_id: str,
+    prompt_hint: str,
+    mapping_column_text: str = ""
+) -> str | None:
+    """
+    Robust resolver order:
+      1) Canonical base from QID (and its common variants)
+      2) Token match (A1_#, A2_#...) via scored similarity
+      3) Fuzzy prompt_hint rescue
+      4) Fuzzy mapping['column'] header rescue  <-- new, very important
+    """
     base = build_kobo_base_from_qid(question_id)
     token = None
     if question_id:
@@ -268,23 +279,37 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
         if m:
             qn = m.group(1); prefix = qid.split("_Q")[0]; sect = QID_PREFIX_TO_SECTION.get(prefix)
             if sect: token = f"{sect}_{qn}"
+
+    # 1) canonical base + variants
     if base and base in df_cols: return base
     if base:
         for v in expand_possible_kobo_columns(base):
             if v in df_cols: return v
         for c in df_cols:
             if c.startswith(base): return c
+
+    # 2) token scored similarity
     if token:
         best, bs = None, 0
         for col in df_cols:
             sc = _score_kobo_header(col, token)
             if sc > bs: bs, best = sc, col
         if best and bs >= 82: return best
+
+    # 3) fuzzy prompt hint
     hint = clean(prompt_hint or "")
     if hint:
-        hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
+        hits = process.extract(hint.lower(), df_cols, scorer=fuzz.partial_token_set_ratio, limit=6)
         for col, score, _ in hits:
             if score >= 88: return col
+
+    # 4) fuzzy mapping['column'] text (often exact Kobo label)
+    mct = clean(mapping_column_text or "")
+    if mct:
+        hits = process.extract(mct.lower(), df_cols, scorer=fuzz.partial_token_set_ratio, limit=6)
+        for col, score, _ in hits:
+            if score >= 88: return col
+
     return None
 
 # ==============================
@@ -292,7 +317,7 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
 # ==============================
 @st.cache_resource(show_spinner=False)
 def get_embedder():
-    # Keep tiny, fast model (≈ 80ms per 20 texts locally). Caches in memory via Streamlit.
+    # fast, memory-cached
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 def build_centroids(exemplars: list[dict]):
@@ -317,7 +342,7 @@ def build_centroids(exemplars: list[dict]):
 
     def centroid(texts):
         if not texts: return None
-        embs = embedder.encode(texts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        embs = embedder.encode(texts, batch_size=128, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
         return embs.mean(axis=0)
 
     def build_centroids_for_q(texts, scores):
@@ -385,22 +410,22 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # resolve Kobo columns
+    # resolve Kobo columns — NOW uses mapping["column"] too
     resolved_for_qid, missing_map_rows = {}, []
     for r in all_mapping:
         qid   = r["question_id"]
         qhint = r.get("prompt_hint","")
-        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+        hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint, r.get("column",""))
         if hit: resolved_for_qid[qid] = hit
-        else:   missing_map_rows.append((qid, qhint))
+        else:   missing_map_rows.append((qid, qhint, r.get("column","")))
 
     with st.expander("🧭 Mapping → Kobo column resolution", expanded=False):
         if resolved_for_qid:
-            show = list(resolved_for_qid.items())[:60]
+            show = list(resolved_for_qid.items())[:80]
             st.dataframe(pd.DataFrame(show, columns=["question_id","kobo_column"]))
         if missing_map_rows:
-            st.warning(f"{len(missing_map_rows)} question_ids not found (showing up to 30).")
-            st.dataframe(pd.DataFrame(missing_map_rows[:30], columns=["question_id","prompt_hint"]))
+            st.warning(f"{len(missing_map_rows)} question_ids not found (showing up to 40).")
+            st.dataframe(pd.DataFrame(missing_map_rows[:40], columns=["question_id","prompt_hint","mapping.column"]))
 
     # Pre-embed distinct answers (speed)
     distinct_answers = set()
@@ -410,7 +435,12 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if col and col in df.columns:
                 a = clean(resp.get(col, "")); 
                 if a: distinct_answers.add(a)
-    for t in distinct_answers: _ = embed_cached(t)
+    if distinct_answers:
+        _ = get_embedder().encode(list(distinct_answers), batch_size=128, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        # store in cache
+        for t in distinct_answers:
+            if t not in _embed_cache:
+                _embed_cache[t] = get_embedder().encode(t, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
 
     for i, resp in df.iterrows():
         out = {}
@@ -434,7 +464,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if not ans: continue
             vec = embed_cached(ans)
 
-            # only Q1..Q4
+            # only Q1..Q4 (ok if some attrs only have Q1..Q3 — blanks will remain)
             qn = None
             if "_Q" in (qid or ""):
                 try: qn = int(qid.split("_Q")[-1])
@@ -442,7 +472,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if qn not in (1,2,3,4): continue
 
             # ----- centroid scoring -----
-            sims_q = sims_a = sims_g = {}
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
             if qkey and qkey not in qtext_cache:
                 qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
@@ -450,11 +479,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             sc = None
             if vec is not None:
-                if qkey and qkey in q_centroids:
-                    sims_q = {s: cos_sim(vec, v) for s, v in q_centroids[qkey].items() if v is not None}
-                if attr in attr_centroids:
-                    sims_a = {s: cos_sim(vec, v) for s, v in attr_centroids[attr].items() if v is not None}
-                sims_g = {s: cos_sim(vec, v) for s, v in global_centroids.items() if v is not None}
+                sims_q = {s: cos_sim(vec, v) for s, v in (q_centroids.get(qkey, {}) or {}).items() if v is not None} if qkey in q_centroids else {}
+                sims_a = {s: cos_sim(vec, v) for s, v in (attr_centroids.get(attr, {}) or {}).items() if v is not None}
+                sims_g = {s: cos_sim(vec, v) for s, v in (global_centroids or {}).items() if v is not None}
 
                 def _pick_best(d: dict[int,float]): 
                     return max(d, key=d.get) if d else None
@@ -463,18 +490,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is None: sc = _pick_best(sims_a)
                 if sc is None: sc = _pick_best(sims_g)
 
-                # guard for generic / off-question responses
+                # guard: off-topic answers should not score high
                 if sc is not None:
-                    base_qtext = qtext_cache.get(qkey, "")
-                    if qa_overlap(ans, base_qtext or qhint) < MIN_QA_OVERLAP:
+                    if qa_overlap(ans, qtext_for_ai or qhint) < MIN_QA_OVERLAP:
                         sc = min(sc, 1)
 
-            # ----- AI detection (per answer) -----
-            # ----- AI detection (row-level only; no per-question cols) -----
-            ai_score, _ = ai_signal_score(ans, qtext_for_ai)
+            # ----- AI detection (per answer → roll up row-level) -----
+            ai_score, _flags = ai_signal_score(ans, qtext_for_ai)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai_suspected = True
-
 
             # ----- write score -----
             sk = f"{attr}_Qn{qn}"
@@ -485,8 +509,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[sk] = int(sc)
                 out[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
-
-       
 
         # attribute avgs + overall
         overall_total = 0
@@ -512,11 +534,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         ordered = ["Date","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
-                ordered += [
-                    f"{attr}_Qn{qn}",
-                    f"{attr}_Rubric_Qn{qn}",
-                    
-                ]
+                ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
         ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
@@ -557,9 +575,7 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
-# --- REPLACE your existing _to_a1_col with this bug-fixed version ---
 def _to_a1_col(n: int) -> str:
-    """1-based column index -> A1 letters (A, B, ..., Z, AA, AB, ...)."""
     if n <= 0:
         raise ValueError("Column index must be positive (1-based).")
     s = []
@@ -567,16 +583,10 @@ def _to_a1_col(n: int) -> str:
         n, r = divmod(n - 1, 26)
         s.append(chr(65 + r))
     return ''.join(reversed(s))
-# --- ADD this helper (place it near your other Sheets helpers) ---
+
 def _ensure_ai_last(df: pd.DataFrame,
                     export_name: str = "AI_Suspected",
                     source_name: str = "AI_suspected") -> pd.DataFrame:
-    """
-    Ensure a column named `export_name` exists and is LAST.
-    - Renames `source_name` -> `export_name` if present.
-    - Creates empty `export_name` if missing.
-    Why: consumer expects `AI_Suspected` (casing), and it must be the last column.
-    """
     out = df.copy()
     if export_name not in out.columns:
         if source_name in out.columns:
@@ -594,7 +604,6 @@ def _post_write_formatting(ws: gspread.Worksheet, cols: int) -> None:
     try: ws.freeze(rows=1)
     except Exception: pass
     try:
-        col_end = _to_a1_col(cols)
         ws.spreadsheet.batch_update({
             "requests": [{
                 "autoResizeDimensions": {
@@ -619,22 +628,11 @@ def _open_ws_by_key() -> gspread.Worksheet:
         st.warning(f"Worksheet '{ws_name}' not found. Creating it…")
         return sh.add_worksheet(title=ws_name, rows="20000", cols="200")
 
-# --- REPLACE your upload_df_to_gsheets with this dynamic-width version ---
 def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Dynamic-width writer:
-      - Keeps ALL columns from `df`.
-      - Forces last column to be `AI_Suspected` (export casing).
-      - Uses start-only A1 ranges (e.g., 'Sheet'!A{row}) so Sheets auto-expands
-        to the row width — no 'tried writing to column [G]' errors.
-    """
     try:
         ws = _open_ws_by_key()
-
-        # Shape columns: AI_Suspected last
         df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
 
-        # Prepare payload
         header = df_out.columns.astype(str).tolist()
         n_cols = len(header)
         if n_cols == 0:
@@ -642,7 +640,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
 
-        # Normalize width to header length (safety)
+        # normalize row width
         def _norm(row):
             r = list(row)
             if len(r) < n_cols: return r + [""] * (n_cols - len(r))
@@ -650,7 +648,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
             return r
         values = [_norm(r) for r in values]
 
-        # Clear then batch write with start-only ranges
+        # clear + start-only ranges (Sheets auto-expands)
         ws.clear()
         all_rows = [header] + values
 
@@ -658,14 +656,13 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         start_row = 1
         for i in range(0, len(all_rows), 10_000):
             chunk = all_rows[i:i+10_000]
-            a1_start = f"'{ws.title}'!A{start_row}"  # no end column on purpose
+            a1_start = f"'{ws.title}'!A{start_row}"
             data_payload.append({"range": a1_start, "values": chunk})
             start_row += len(chunk)
 
         ws.spreadsheet.values_batch_update(
             body={"valueInputOption": "USER_ENTERED", "data": data_payload}
         )
-
         _post_write_formatting(ws, n_cols)
         return True, f"✅ Wrote {len(values)} rows × {n_cols} cols to '{ws.title}' (last='AI_Suspected')."
 
@@ -677,7 +674,6 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # ==============================
 def main():
     st.title("📊 Advisory Scoring")
-    
 
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
     AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
@@ -698,14 +694,14 @@ def main():
             st.warning("No Kobo submissions found.")
             st.stop()
 
-        st.caption("Fetched sample:"); st.dataframe(df.head(), use_container_width=True)
+        st.caption("Fetched sample:")
+        st.dataframe(df.head(10), use_container_width=True, height=320)
 
         with st.spinner("Scoring (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
-        
 
         st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True)
+        st.dataframe(scored_df.head(10), use_container_width=True, height=360)
 
         st.download_button(
             "⬇️ Download Excel",
