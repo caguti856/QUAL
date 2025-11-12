@@ -781,7 +781,7 @@ def main():
             scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
         st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(50), use_container_width=True, height=420)
+       
 
         # --- only update session state if results actually changed
         sig = _df_sig_local(scored_df)
