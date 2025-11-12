@@ -1,9 +1,9 @@
 # influencingrelationship.py
 # ------------------------------------------------------------
 # Kobo → Scored Excel / Google Sheets (Influencing Relationship)
-# Exact layout preserved. Robust column resolution A1..A8.
+# Exact layout preserved. Robust column resolution A1..H1.
 # Batched embeddings + caching. AI-suspect flag at the end.
-# AUTO_RUN / AUTO_PUSH + stable session/downloads like Networking.
+# Auto-run + auto-push options, stable widgets.
 # ------------------------------------------------------------
 
 import json, re, unicodedata
@@ -36,63 +36,64 @@ EXEMPLARS_PATH   = DATASETS_DIR / "geda_influencing_responses.jsonl"
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
     ("Exemplary Thought Leader", 21, 24),
-    ("Strategic Advisor",        16, 20),
-    ("Emerging Advisor",         10, 15),
-    ("Needs Capacity Support",    0,  9),
+    ("Strategic Advisor",       16, 20),
+    ("Emerging Advisor",        10, 15),
+    ("Needs Capacity Support",   0,  9),
 ]
 
-# ORDERED ATTRS (A1..A8)
 ORDERED_ATTRS = [
-    "Strategic Positioning & Political Acumen",    # A1 (SPP)
-    "Stakeholder Mapping & Engagement",            # A2 (SME)
-    "Evidence-Informed Advocacy",                  # A3 (EIA)
-    "Communication, Framing & Messaging",          # A4 (CFM)
-    "Risk Awareness & Mitigation",                 # A5 (RAM)
-    "Coalition Building & Collaborative Action",   # A6 (CBC)
-    "Adaptive Tactics & Channel Selection",        # A7 (ATC)
-    "Integrity & Values-Based Influencing",        # A8 (EEL)
+    "Strategic Positioning & Political Acumen",     # A1
+    "Stakeholder Mapping & Engagement",             # B1
+    "Evidence-Informed Advocacy",                   # C1
+    "Communication, Framing & Messaging",           # D1
+    "Risk Awareness & Mitigation",                  # E1
+    "Coalition Building & Collaborative Action",    # F1
+    "Adaptive Tactics & Channel Selection",         # G1
+    "Integrity & Values-Based Influencing",         # H1
 ]
 
-# Attribute → A# section token
+# Attribute → header section code (A1..H1) for resolver fallback
 ATTR_TO_HEADER_SECT = {
-    "Strategic Positioning & Political Acumen":      "A1",
-    "Stakeholder Mapping & Engagement":              "A2",
-    "Evidence-Informed Advocacy":                    "A3",
-    "Communication, Framing & Messaging":            "A4",
-    "Risk Awareness & Mitigation":                   "A5",
-    "Coalition Building & Collaborative Action":     "A6",
-    "Adaptive Tactics & Channel Selection":          "A7",
-    "Integrity & Values-Based Influencing":          "A8",
+    "Strategic Positioning & Political Acumen":     "A1",
+    "Stakeholder Mapping & Engagement":             "B1",
+    "Evidence-Informed Advocacy":                   "C1",
+    "Communication, Framing & Messaging":           "D1",
+    "Risk Awareness & Mitigation":                  "E1",
+    "Coalition Building & Collaborative Action":    "F1",
+    "Adaptive Tactics & Channel Selection":         "G1",
+    "Integrity & Values-Based Influencing":         "H1",
 }
 
-# QID prefix → canonical A# section
+# QID prefix → canonical section code used in Kobo export paths
+# (mapping4.csv uses prefixes like SPP_Q#, SME_Q#, etc.)
 QID_PREFIX_TO_SECTION = {
     "SPP": "A1",
-    "SME": "A2",
-    "EIA": "A3",
-    "CFM": "A4",
-    "RAM": "A5",
-    "CBC": "A6",
-    "ATC": "A7",
-    "EEL": "A8",  # <— missing before; REQUIRED for your mapping4.csv
+    "SME": "B1",
+    "EIA": "C1",
+    "CFM": "D1",
+    "RAM": "E1",
+    "CBC": "F1",
+    "ATC": "G1",
+    "EEL": "H1",
 }
 
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# passthrough source columns (not all are output; kept to resolve IDs/dates)
+# passthrough source columns we keep (front pool; later filtered by explicit exclude set)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
     "submissiondate","submission_date","start","_start","end","_end","today","date","deviceid",
     "username","enumerator","submitted_via_web","_xform_id_string","formid","assetid","care_staff","type_participant"
 ]
+# EXCLUDE these specific raw source cols from the visible table
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id","formhub/uuid","start","end","today","staff_id","meta/instanceid",
     "_xform_id_string","_uuid","meta/rootuuid","_submission_time","_validation_status"
 }
 
 # ==============================
-# AI DETECTION (scored, thresholded)
+# AI DETECTION (same logic as networking.py)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
@@ -216,24 +217,6 @@ def read_jsonl_path(path: Path) -> list[dict]:
                 rows.append(json.loads(s))
     return rows
 
-def build_bases_from_qid(question_id: str) -> list[str]:
-    """Return plausible Kobo base prefixes for a given qid across Influencing schema."""
-    out = []
-    if not question_id: return out
-    qid = question_id.strip().upper()
-    m = QNUM_RX.search(qid)
-    if not m: return out
-    qn = m.group(1)
-    pref = qid.split("_Q")[0]
-    sect = QID_PREFIX_TO_SECTION.get(pref)
-    if not sect: return out
-    # Include common path-name variants
-    roots = ["InfluencingRelationship", "influencingrelationship",
-             "Influencing Relationship", "influencing relationship"]
-    for root in roots:
-        out.append(f"{root}/{sect}_Section/{sect}_{qn}")
-    return out
-
 def expand_possible_kobo_columns(base: str) -> list[str]:
     if not base: return []
     return [
@@ -253,10 +236,12 @@ def _score_kobo_header(col: str, token: str) -> int:
     if f"/{t}/" in c: s = max(s,92)
     if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
     if t in c: s = max(s,80)
-    # Kobo variants
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    if "influencingrelationship/" in c or "influencing relationship/" in c: s += 2
+    # light boosts for common namespace phrases
+    for ns in ("strategic_positioning","stakeholder_mapping","evidence_informed_advocacy",
+               "communication","risk_awareness","coalition_building","adaptive_tactics","integrity_values"):
+        if ns in c: s += 2
     return s
 
 def resolve_kobo_column_for_mapping(
@@ -266,47 +251,33 @@ def resolve_kobo_column_for_mapping(
     attribute: str = ""
 ) -> str | None:
     """
-    Robust mapping: tries canonical path from QID, then A1..A8 token (from QID + attribute),
-    then fuzzy rescue by prompt_hint.
+    Robust mapping: derive token A1..H1 from question_id AND from attribute;
+    try direct containment, then scored similarity, then fuzzy prompt-hint rescue.
     """
     cols_original = list(df_cols)
-    cols_lower = {c.lower(): c for c in cols_original}
 
-    # 1) Canonical path candidates from question_id
-    bases = build_bases_from_qid(question_id)
-    for base in bases:
-        lb = base.lower()
-        if lb in cols_lower:
-            return cols_lower[lb]
-        for v in expand_possible_kobo_columns(base):
-            lv = v.lower()
-            if lv in cols_lower:
-                return cols_lower[lv]
-        for c in cols_original:  # prefix match
-            if c.lower().startswith(lb):
-                return c
-
-    # 2) Tokens from QID (A#_n) and from attribute header code (A#)
+    # token candidates (from qid & attribute)
     tokens = []
     qid = (question_id or "").strip().upper()
     m = QNUM_RX.search(qid)
     qn = m.group(1) if m else None
     if qn:
         pref = qid.split("_Q")[0] if "_Q" in qid else qid
-        sect_from_qid = QID_PREFIX_TO_SECTION.get(pref)
-        if sect_from_qid:
-            tokens.append(f"{sect_from_qid}_{qn}")
-        hdr = ATTR_TO_HEADER_SECT.get(attribute or "", "")
-        if hdr:
-            tokens.append(f"{hdr}_{qn}")
+        sect = QID_PREFIX_TO_SECTION.get(pref, "")
+        if sect:
+            tokens.append(f"{sect}_{qn}")
+    hdr = ATTR_TO_HEADER_SECT.get(attribute or "", "")
+    if hdr and qn:
+        tokens.append(f"{hdr}_{qn}")
 
+    # 1) direct containment (fast path)
     for tok in tokens:
         lt = tok.lower()
         for c in cols_original:
             if lt in c.lower():
                 return c
 
-    # scored similarity
+    # 2) scored similarity
     best, bs = None, 0
     for tok in tokens:
         for c in cols_original:
@@ -316,7 +287,7 @@ def resolve_kobo_column_for_mapping(
     if best and bs >= 80:
         return best
 
-    # 3) Fuzzy rescue via prompt hint
+    # 3) fuzzy prompt-hint rescue
     hint = clean(prompt_hint or "")
     if hint:
         cands = [(c, c.lower()) for c in cols_original]
@@ -327,10 +298,11 @@ def resolve_kobo_column_for_mapping(
                 for orig, low in cands:
                     if low == lo:
                         return orig
+
     return None
 
 # ==============================
-# EMBEDDINGS / CENTROIDS (batched like Networking)
+# EMBEDDINGS / CENTROIDS (batched + cached like networking.py)
 # ==============================
 @st.cache_resource(show_spinner=False)
 def get_embedder():
@@ -429,10 +401,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     df_cols = list(df.columns)
 
-    # quick visibility, tailored to this form
+    # quick visibility
     with st.expander("🔎 InfluencingRelationship-like columns found", expanded=False):
-        sample_cols = [c for c in df_cols
-                       if "/A" in c or "InfluencingRelationship" in c or "influencing relationship" in c.lower()]
+        sample_cols = [c for c in df_cols if "/A" in c or "/B" in c or "/C" in c or "/D" in c or "/E" in c or "/F" in c or "/G" in c or "/H" in c]
         st.write(sample_cols[:120])
 
     # id/date columns
@@ -451,7 +422,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     # mapping rows we actually use
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # resolve Kobo headers for each mapping row (attribute-aware A1..A8 tokens too)
+    # resolve Kobo headers for each mapping row (attribute-aware, A1..H1)
     resolved_for_qid = {}
     missing_map_rows = []
     for r in all_mapping:
@@ -472,7 +443,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             st.warning(f"{len(missing_map_rows)} mapping rows not found in headers (showing up to 40).")
             st.dataframe(pd.DataFrame(missing_map_rows[:40], columns=["question_id","attribute","prompt_hint"]))
 
-    # batch-embed all distinct free-text answers once
+    # batch-embed all distinct free-text answers once (big speed gain)
     distinct_answers = set()
     for _, row in df.iterrows():
         for r in all_mapping:
@@ -495,7 +466,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         per_attr = {}
         ai_scores = []
 
-        # cache row answers
+        # cache row answers to avoid re-cleaning
         row_answers = {}
         for r in all_mapping:
             qid = r["question_id"]
@@ -503,6 +474,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if dfcol and dfcol in df.columns:
                 row_answers[qid] = clean(resp.get(dfcol, ""))
 
+        # prefetch question texts (only when needed)
         qtext_cache = {}
 
         for r in all_mapping:
@@ -540,21 +512,21 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is None:
                     sc = best_sim(global_centroids)
 
-                # off-topic penalty
+                # Penalize off-topic vs question/hint
                 if sc is not None and qa_overlap(ans, qtext_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # AI suspicion for this answer
+            # AI suspicion for this answer (richer detector)
             ai_scores.append(ai_signal_score(ans, qtext_full))
 
-            # write per-question Q1..Q4
+            # write per-question score & rubric Q1..Q3
             qn = None
             if "_Q" in (qid or ""):
                 try:
                     qn = int(qid.split("_Q")[-1])
                 except Exception:
                     qn = None
-            if qn not in (1,2,3,4):
+            if qn not in (1,2,3):
                 continue
 
             score_key  = f"{attr}_Qn{qn}"
@@ -570,7 +542,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         # ensure fixed shape for per-question blocks
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            for qn in (1,2,3):
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
@@ -582,7 +554,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 out[f"{attr}_Avg (0–3)"] = ""
                 out[f"{attr}_RANK"]      = ""
             else:
-                avg = float(np.mean(scores))
+                avg  = float(np.mean(scores))
                 band = int(round(avg))
                 overall_total += band
                 out[f"{attr}_Avg (0–3)"] = round(avg, 2)
@@ -600,7 +572,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     def order_cols(cols):
         ordered = ["Date","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            for qn in (1,2,3):
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
@@ -727,7 +699,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 def main():
     st.title("📊 Influencing Relationship — Kobo → Scored Excel / Google Sheets")
 
-    # stable DF signature to guard session_state writes
+    # local, stable DF signature to guard session_state writes
     def _df_sig_local(df: pd.DataFrame) -> str:
         import hashlib
         try:
@@ -736,7 +708,7 @@ def main():
         except Exception:
             return hashlib.sha1(df.to_csv(index=True).encode("utf-8")).hexdigest()
 
-    # one-time init of session keys
+    # one-time init of session keys (prevents first-run churn)
     for k, v in {
         "scored_df": None,
         "scored_sig": None,
@@ -780,14 +752,14 @@ def main():
 
         st.success("✅ Scoring complete.")
 
-        # only update session state if results actually changed
+        # --- only update session state if results actually changed
         sig = _df_sig_local(scored_df)
         if st.session_state["scored_sig"] != sig:
             st.session_state["scored_df"]  = scored_df
             st.session_state["scored_sig"] = sig
             st.session_state["excel_bytes"] = to_excel_bytes(scored_df)
 
-        # 4) downloads (stable widget)
+        # 4) downloads (use cached bytes so widget stays stable)
         st.download_button(
             "⬇️ Download Excel",
             data=st.session_state["excel_bytes"],
@@ -817,8 +789,10 @@ def main():
             st.write("Worksheet name:", DEFAULT_WS_NAME)
             if st.button("📤 Send scored table to Google Sheets", use_container_width=True, key="btn_push_influencing"):
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                if ok: st.success(msg)
-                else:  st.error(msg)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
 if __name__ == "__main__":
     main()
