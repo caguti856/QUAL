@@ -162,18 +162,31 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS
 # ==============================
-QID_PREFIX_TO_SECTION = {"SPD":"A1","PAS":"A2","EAL":"A3","CGC":"A4","CCM":"A5","ELL":"A6","IWA":"A7","RMA":"A8"}
+# Each prefix corresponds to one or more section codes (some schemas reused sections)
+QID_PREFIX_TO_SECTIONS = {
+    "SPD": ["A1"],
+    "PAS": ["A2"],
+    "EAL": ["A3"],
+    "CGC": ["A4"],
+    "CCM": ["A5"],
+    "ELL": ["A6"],
+    "IWA": ["A7"],
+    "RMA": ["A8"],
+}
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"mapping file not found: {path}")
-    m = pd.read_csv(path) if path.suffix.lower()==".csv" else pd.read_excel(path)
+    m = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     m.columns = [c.lower().strip() for c in m.columns]
-    assert {"column","question_id","attribute"}.issubset(m.columns), \
+    assert {"column", "question_id", "attribute"}.issubset(m.columns), \
         "mapping must have: column, question_id, attribute"
-    if "prompt_hint" not in m.columns: m["prompt_hint"] = ""
-    m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
+    if "prompt_hint" not in m.columns:
+        m["prompt_hint"] = ""
+    # If ORDERED_ATTRS exists in your project, keep this; otherwise remove the filter
+    if "ORDERED_ATTRS" in globals():
+        m = m[m["attribute"].isin(ORDERED_ATTRS)].copy()
     return m
 
 def read_jsonl_path(path: Path) -> list[dict]:
@@ -186,20 +199,32 @@ def read_jsonl_path(path: Path) -> list[dict]:
                 rows.append(json.loads(line))
     return rows
 
-def build_kobo_bases_from_qid(question_id: str) -> list[str]:
-    if not question_id: return []
+
+def build_bases_from_qid(question_id: str) -> list[str]:
+    """Build possible Kobo base paths from question ID (like SPD_Q3 → A1_Section/A1_3)"""
+    if not question_id:
+        return []
     qid = question_id.strip().upper()
     m = QNUM_RX.search(qid)
-    if not m: return []
+    if not m:
+        return []
     qn = m.group(1)
     prefix = qid.split("_Q")[0]
-    if prefix not in QID_PREFIX_TO_SECTION: return []
-    section = QID_PREFIX_TO_SECTION[prefix]
+    if prefix not in QID_PREFIX_TO_SECTIONS:
+        return []
+    sections = QID_PREFIX_TO_SECTIONS[prefix]
     roots = ["networking", "Networking"]
-    return [f"{root}/{section}_Section/{section}_{qn}" for root in roots]
+    bases = []
+    for sect in sections:
+        for root in roots:
+            bases.append(f"{root}/{sect}_Section/{sect}_{qn}")
+    return bases
+
 
 def expand_possible_kobo_columns(base: str) -> list[str]:
-    if not base: return []
+    """Add variants that Kobo tends to generate (labels, text, English etc.)"""
+    if not base:
+        return []
     return [
         base,
         f"{base} :: Answer (text)",
@@ -219,55 +244,83 @@ def _score_kobo_header(col: str, token: str) -> int:
     if t in c: s = max(s, 80)
     if "english" in c or "label" in c or "(en)" in c: s += 5
     if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    if "growthmindset/" in c or "networking/" in c or "/a" in c: s += 2
+    if "networking/" in c or "/a" in c: s += 2
     return s
 
-def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt_hint: str) -> str | None:
+def resolve_kobo_column_for_mapping(
+    df_cols: list[str],
+    question_id: str,
+    prompt_hint: str,
+    attribute: str
+) -> str | None:
+    """
+    Find the most likely Kobo column corresponding to a mapping row (NETWORKING schema).
+    Tries base paths, token similarity, and fuzzy prompt-hint rescue.
+    """
     cols_original = list(df_cols)
-    cols_lower_map = {c.lower(): c for c in cols_original}
+    cols_lower = {c.lower(): c for c in cols_original}
 
-    bases = build_kobo_bases_from_qid(question_id)
+    # 1️⃣ Full path matching
+    bases = build_bases_from_qid(question_id)
     for base in bases:
-        if base.lower() in cols_lower_map:
-            return cols_lower_map[base.lower()]
+        if base.lower() in cols_lower:
+            return cols_lower[base.lower()]
         for v in expand_possible_kobo_columns(base):
-            if v.lower() in cols_lower_map:
-                return cols_lower_map[v.lower()]
+            if v.lower() in cols_lower:
+                return cols_lower[v.lower()]
         for c in cols_original:
             if c.lower().startswith(base.lower()):
                 return c
 
-    token = None
-    if question_id:
-        qid = question_id.strip().upper()
-        m = QNUM_RX.search(qid)
-        if m:
-            qn = m.group(1)
-            prefix = qid.split("_Q")[0]
-            sect = QID_PREFIX_TO_SECTION.get(prefix)
-            if sect:
-                token = f"{sect}_{qn}"
+    # 2️⃣ Token fallback — try all possible tokens for this QID and attribute
+    qid = (question_id or "").strip().upper()
+    m = QNUM_RX.search(qid)
+    tokens = []
+    if m:
+        qn = m.group(1)
+        pref = qid.split("_Q")[0]
+        for sect in QID_PREFIX_TO_SECTIONS.get(pref, []):
+            tokens.append(f"{sect}_{qn}")
+        # attribute-based rescue (NETWORKING-specific)
+        attr_to_sects = {
+            "Self-Development": ["A1"],
+            "Professional Growth": ["A2"],
+            "Collaboration": ["A3"],
+            "Relationship Building": ["A4"],
+            "Mentorship": ["A5"],
+            "Knowledge Sharing": ["A6"],
+            "Stakeholder Engagement": ["A7"],
+            "Community Participation": ["A8"],
+        }
+        for sect in attr_to_sects.get(attribute, []):
+            tok = f"{sect}_{qn}"
+            if tok not in tokens:
+                tokens.append(tok)
 
-    if token:
-        best_col, best_score = None, 0
-        for col in cols_original:
-            s = _score_kobo_header(col, token)
-            if s > best_score:
-                best_score, best_col = s, col
-        if best_col and best_score >= 82:
-            return best_col
+    best, bs = None, 0
+    for token in tokens:
+        for c in cols_original:
+            sc = _score_kobo_header(c, token)
+            if sc > bs:
+                bs, best = sc, c
+    if best and bs >= 80:
+        return best
 
-    hint = clean(prompt_hint or "")
+    # 3️⃣ Prompt-hint fuzzy rescue
+    hint = (prompt_hint or "").strip().lower()
     if hint:
-        candidates = [(c, c.lower()) for c in cols_original]
-        hits = process.extract(hint.lower(), [lo for _, lo in candidates],
+        cands = [(c, c.lower()) for c in cols_original]
+        hits = process.extract(hint, [lo for _, lo in cands],
                                scorer=fuzz.partial_token_set_ratio, limit=5)
         for _, lo, score in hits:
             if score >= 88:
-                for orig, low in candidates:
+                for orig, low in cands:
                     if low == lo:
                         return orig
+
+    # 4️⃣ If all else fails
     return None
+
 
 # ==============================
 # EMBEDDINGS / CENTROIDS
