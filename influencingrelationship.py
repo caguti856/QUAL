@@ -93,9 +93,9 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # ==============================
-# AI DETECTION (same logic as networking.py)
+# AI DETECTION (tuned)
 # ==============================
-AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.35))
 
 TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
@@ -217,31 +217,9 @@ def read_jsonl_path(path: Path) -> list[dict]:
                 rows.append(json.loads(s))
     return rows
 
-def expand_possible_kobo_columns(base: str) -> list[str]:
-    if not base: return []
-    return [
-        base,
-        f"{base} :: Answer (text)",
-        f"{base} :: English (en)",
-        f"{base} - English (en)",
-        f"{base}_labels",
-        f"{base}_label",
-    ]
-
-def _score_kobo_header(col: str, token: str) -> int:
-    c = col.lower(); t = token.lower()
-    if c == t: return 100
-    s = 0
-    if c.endswith("/"+t): s = max(s,95)
-    if f"/{t}/" in c: s = max(s,92)
-    if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
-    if t in c: s = max(s,80)
-    if "english" in c or "label" in c or "(en)" in c: s += 5
-    if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
-    # light boosts for common namespace phrases
-    for ns in ("strategic_positioning","stakeholder_mapping","evidence_informed_advocacy",
-               "communication","risk_awareness","coalition_building","adaptive_tactics","integrity_values"):
-        if ns in c: s += 2
+def _slug_attr(attr: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "_", (attr or "").strip())
+    s = re.sub(r"_+", "_", s).strip("_")
     return s
 
 def resolve_kobo_column_for_mapping(
@@ -251,35 +229,56 @@ def resolve_kobo_column_for_mapping(
     attribute: str = ""
 ) -> str | None:
     """
-    Robust mapping: derive token A1..H1 from question_id AND from attribute;
-    try direct containment, then scored similarity, then fuzzy prompt-hint rescue.
+    Robust mapping for A1..H1 and attribute slugs like Strategic_Positioning/A1_2
+    Tries direct containment, scored similarity, then fuzzy hint rescue.
     """
     cols_original = list(df_cols)
 
-    # token candidates (from qid & attribute)
+    # tokens from QID and attribute section code (A1..H1)
     tokens = []
     qid = (question_id or "").strip().upper()
     m = QNUM_RX.search(qid)
     qn = m.group(1) if m else None
+
+    sect = None
     if qn:
         pref = qid.split("_Q")[0] if "_Q" in qid else qid
         sect = QID_PREFIX_TO_SECTION.get(pref, "")
         if sect:
             tokens.append(f"{sect}_{qn}")
+
     hdr = ATTR_TO_HEADER_SECT.get(attribute or "", "")
     if hdr and qn:
         tokens.append(f"{hdr}_{qn}")
 
-    # 1) direct containment (fast path)
-    for tok in tokens:
-        lt = tok.lower()
+    # also try attribute slug base like Strategic_Positioning/A1_2
+    attr_slug = _slug_attr(attribute)
+    extra_bases = []
+    if attr_slug and (sect or hdr) and qn:
+        extra_bases.append(f"{attr_slug}/{sect or hdr}_{qn}")
+
+    # 1) direct containment
+    for probe in list(tokens) + extra_bases:
+        lp = probe.lower()
         for c in cols_original:
-            if lt in c.lower():
+            if lp in c.lower():
                 return c
 
-    # 2) scored similarity
+    # 2) scored similarity (accepts “ :: English (en)” etc.)
+    def _score_kobo_header(col: str, token: str) -> int:
+        c = col.lower(); t = token.lower()
+        if c == t: return 100
+        s = 0
+        if c.endswith("/"+t): s = max(s,95)
+        if f"/{t}/" in c: s = max(s,92)
+        if f"/{t} " in c or f"{t} :: " in c or f"{t} - " in c or f"{t}_" in c: s = max(s,90)
+        if t in c: s = max(s,80)
+        if "english" in c or "label" in c or "(en)" in c: s += 5
+        if "answer (text)" in c or "answer_text" in c or "text" in c: s += 5
+        return s
+
     best, bs = None, 0
-    for tok in tokens:
+    for tok in list(tokens) + extra_bases:
         for c in cols_original:
             sc = _score_kobo_header(c, tok)
             if sc > bs:
@@ -302,7 +301,7 @@ def resolve_kobo_column_for_mapping(
     return None
 
 # ==============================
-# EMBEDDINGS / CENTROIDS (batched + cached like networking.py)
+# EMBEDDINGS / CENTROIDS (batched + cached)
 # ==============================
 @st.cache_resource(show_spinner=False)
 def get_embedder():
@@ -422,7 +421,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     # mapping rows we actually use
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
-    # resolve Kobo headers for each mapping row (attribute-aware, A1..H1)
+    # resolve Kobo headers for each mapping row (attribute-aware, A1..H1 + attribute slug)
     resolved_for_qid = {}
     missing_map_rows = []
     for r in all_mapping:
@@ -442,6 +441,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         if missing_map_rows:
             st.warning(f"{len(missing_map_rows)} mapping rows not found in headers (showing up to 40).")
             st.dataframe(pd.DataFrame(missing_map_rows[:40], columns=["question_id","attribute","prompt_hint"]))
+
+    # diagnostics: per-attribute coverage
+    with st.expander("📌 Scoring diagnostics", expanded=False):
+        coverage = []
+        for attr in ORDERED_ATTRS:
+            want = [r for r in all_mapping if r["attribute"] == attr]
+            got  = sum(1 for r in want if r["question_id"] in resolved_for_qid)
+            coverage.append({"attribute": attr, "mapped": got, "expected": len(want)})
+        st.dataframe(pd.DataFrame(coverage))
 
     # batch-embed all distinct free-text answers once (big speed gain)
     distinct_answers = set()
@@ -516,7 +524,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 if sc is not None and qa_overlap(ans, qtext_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
 
-            # AI suspicion for this answer (richer detector)
+            # FAIL-SOFT: if we have content but still no score, default to 1 (Compliant)
+            if sc is None and ans and ans.strip():
+                sc = 1
+
+            # AI suspicion for this answer
             ai_scores.append(ai_signal_score(ans, qtext_full))
 
             # write per-question score & rubric Q1..Q3
@@ -562,6 +574,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         out["Overall Total (0–24)"] = overall_total
         out["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        out["AI_MaxScore"]  = round(max(ai_scores) if ai_scores else 0.0, 2)
         out["AI-Suspected"] = bool(any(s >= AI_SUSPECT_THRESHOLD for s in ai_scores))
 
         rows_out.append(out)
@@ -576,7 +589,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
-        ordered += ["Overall Total (0–24)", "Overall Rank", "AI-Suspected"]
+        ordered += ["Overall Total (0–24)", "Overall Rank", "AI_MaxScore", "AI-Suspected"]
         extras = [c for c in cols if c not in ordered]
         return [c for c in ordered if c in cols] + extras
 
@@ -593,7 +606,8 @@ def _ensure_ai_last(df: pd.DataFrame,
         out = out.rename(columns={legacy_name: export_name})
     if export_name not in out.columns:
         out[export_name] = ""
-    cols = [c for c in out.columns if c != export_name] + [export_name]
+    # also try to keep AI_MaxScore near the end
+    cols = [c for c in out.columns if c not in (export_name, "AI_MaxScore")] + ["AI_MaxScore", export_name]
     return out[cols]
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -751,6 +765,8 @@ def main():
             scored_df = score_dataframe(df, mapping, q_centroids, attr_centroids, global_centroids, by_qkey, question_texts)
 
         st.success("✅ Scoring complete.")
+        # show scored data visibly so we can verify columns are filled
+        st.dataframe(scored_df, use_container_width=True, height=420)
 
         # --- only update session state if results actually changed
         sig = _df_sig_local(scored_df)
