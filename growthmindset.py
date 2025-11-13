@@ -18,8 +18,8 @@ def inject_css():
         <style>
         :root {
             /* 🔶 PRIMARY BRAND COLOUR
-               Replace #EB7100 with the exact orange you use in your HTML if different */
-            --primary: #EB7100;
+               Replace #F26A21 with the exact orange you use in your HTML if different */
+            --primary: #F26A21;
             --primary-soft: #FDE7D6;
             --primary-soft-stronger: #FBD0AD;
 
@@ -1013,8 +1013,11 @@ def main():
     # --- Header card ---
     st.markdown("""
         <div class="app-header-card">
-            
+            <div class="pill">Growth Mindset • Auto Scoring</div>
             <h1>Growth Mindset</h1>
+            <p class="app-header-subtitle">
+                Importing Kobo submissions, Scoring and exporting results to google sheets.
+            </p>
         </div>
     """, unsafe_allow_html=True)
 
