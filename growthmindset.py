@@ -581,7 +581,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         end_dt = pd.Series([pd.NaT] * n_rows)
 
     # Exact duration in minutes (including seconds)
-    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0)
+    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60).round().astype(int)
 
 
     # mapping resolution (now aware of dual schema + attribute rescue + CI fix)
