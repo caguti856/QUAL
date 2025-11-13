@@ -126,16 +126,34 @@ if "auth_mode" not in st.session_state:
 
 
 def show_cover_page():
-    qp = st.query_params
-    if qp.get("start") == "1":
+    # Support both new st.query_params and older experimental_get_query_params
+    try:
+        qp = st.query_params          # Streamlit >= 1.32
+    except AttributeError:
+        qp = st.experimental_get_query_params()   # older versions
+
+    # qp can be a dict of lists or a dict-like object
+    start_val = qp.get("start")
+
+    is_start = False
+    if isinstance(start_val, list):
+        is_start = "1" in start_val
+    elif isinstance(start_val, str):
+        is_start = (start_val == "1")
+
+    if is_start:
         st.session_state.show_cover = False
         st.session_state.auth_mode = "login"
+        # Clear the query params safely
         try:
             st.query_params.clear()
         except Exception:
             st.experimental_set_query_params()
         st.rerun()
+
+    # Render the fixed, full-screen cover
     components.html(COVER_HTML, height=700, scrolling=False)
+
 
 @st.cache_resource(show_spinner=False)
 def _lazy_import(module_name: str):
@@ -163,12 +181,16 @@ def _render_tab(module_name: str, nice_name: str):
 # Main router
 # -----------------------
 def main():
-    # 1) Cover page first
+    # If user already logged in somehow, don’t show the cover again
+    if st.session_state.user_email and st.session_state.show_cover:
+        st.session_state.show_cover = False
+
+    # 1) COVER
     if st.session_state.show_cover:
         show_cover_page()
         return
 
-    # 2) If not logged in, show login page
+    # 2) LOGIN (only when no user_email)
     if not st.session_state.user_email:
         try:
             login_mod = _lazy_import("login")
@@ -177,7 +199,7 @@ def main():
             st.error(f"Login page error: {e}")
         return
 
-    # 3) Sidebar: only Logout
+    # 3) Sidebar: Logout only
     with st.sidebar:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.user_email = None
@@ -210,7 +232,6 @@ def main():
         _render_tab("networking", "Networking")
     elif section == "Influencing Relationship":
         _render_tab("influencingrelationship", "Influencing Relationship")
-
 
 if __name__ == "__main__":
     main()
