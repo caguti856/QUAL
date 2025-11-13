@@ -17,24 +17,33 @@ def inject_css():
     st.markdown("""
         <style>
         :root {
-            --primary: #0f766e;
-            --primary-soft: #ccfbf1;
-            --bg-dark: #020617;
-            --card-bg: #0b1120;
-            --text-main: #e5e7eb;
-            --text-muted: #9ca3af;
+            /* 🔶 PRIMARY BRAND COLOUR
+               Replace #F26A21 with the exact orange you use in your HTML if different */
+            --primary: #F26A21;
+            --primary-soft: #FDE7D6;
+            --primary-soft-stronger: #FBD0AD;
+
+            --bg-main: #f5f5f5;
+            --card-bg: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border-subtle: #e5e7eb;
         }
 
         /* Full app background */
         [data-testid="stAppViewContainer"] {
-            background: radial-gradient(circle at top left, #022c22 0, #020617 45%, #020617 100%);
+            background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
             color: var(--text-main);
         }
 
-        /* Side bar */
+        /* Sidebar */
         [data-testid="stSidebar"] {
-            background: #020617;
+            background: #111827;
             border-right: 1px solid #1f2937;
+            color: #e5e7eb;
+        }
+        [data-testid="stSidebar"] * {
+            color: #e5e7eb !important;
         }
 
         /* Main container width + spacing */
@@ -61,13 +70,13 @@ def inject_css():
             color: var(--text-muted);
         }
 
-        /* App header card */
+        /* App header card with CARE orange accent */
         .app-header-card {
-            background: linear-gradient(135deg, rgba(15,118,110,0.25), rgba(8,47,73,0.85));
+            background: linear-gradient(135deg, rgba(242,106,33,0.12), rgba(255,255,255,0.9));
             border-radius: 1.25rem;
             padding: 1.4rem 1.6rem;
-            border: 1px solid rgba(148,163,184,0.35);
-            box-shadow: 0 18px 40px rgba(15,23,42,0.65);
+            border: 1px solid rgba(248,113,22,0.25);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.08);
             margin-bottom: 1.4rem;
         }
         .app-header-card h1 {
@@ -82,9 +91,9 @@ def inject_css():
             font-size: 0.75rem;
             padding: 0.15rem 0.7rem;
             border-radius: 999px;
-            background: rgba(15,118,110,0.15);
-            border: 1px solid rgba(45,212,191,0.45);
-            color: #a5f3fc;
+            background: rgba(242,106,33,0.08);
+            border: 1px solid rgba(242,106,33,0.6);
+            color: #9A3412;
             margin-bottom: 0.4rem;
         }
 
@@ -92,10 +101,10 @@ def inject_css():
         .section-card {
             background: var(--card-bg);
             border-radius: 1rem;
-            border: 1px solid #1f2937;
+            border: 1px solid var(--border-subtle);
             padding: 1rem 1.1rem;
             margin-bottom: 1rem;
-            box-shadow: 0 18px 40px rgba(15,23,42,0.55);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.04);
         }
 
         /* Dataframe tables */
@@ -103,26 +112,27 @@ def inject_css():
             font-size: 13px;
             border-radius: 0.75rem;
             overflow: hidden;
+            border: 1px solid var(--border-subtle);
         }
         .stDataFrame table thead tr th {
-            background-color: rgba(15,118,110,0.16);
+            background-color: var(--primary-soft);
             font-weight: 600;
-            color: #e5e7eb;
+            color: #7c2d12;
         }
 
-        /* Buttons & download buttons */
+        /* Buttons & download buttons (CARE orange) */
         .stDownloadButton button, .stButton button {
             border-radius: 999px !important;
             padding: 0.35rem 1.2rem !important;
             font-weight: 600 !important;
-            border: 1px solid rgba(45,212,191,0.5) !important;
-            background: radial-gradient(circle at top left, rgba(45,212,191,0.2), rgba(15,23,42,0.95)) !important;
-            color: #ecfeff !important;
+            border: 1px solid rgba(242,106,33,0.85) !important;
+            background: linear-gradient(135deg, var(--primary) 0%, #FB923C 100%) !important;
+            color: #FFFBEB !important;
         }
         .stDownloadButton button:hover, .stButton button:hover {
-            border-color: rgba(45,212,191,0.9) !important;
+            filter: brightness(1.03);
             transform: translateY(-1px);
-            box-shadow: 0 12px 25px rgba(15,118,110,0.45);
+            box-shadow: 0 12px 25px rgba(248,113,22,0.45);
         }
 
         /* Success / warning / error blocks */
@@ -130,12 +140,13 @@ def inject_css():
             border-radius: 0.8rem;
         }
 
-        /* Hide default Streamlit menu + footer if you want it cleaner */
+        /* Hide default Streamlit menu + footer for cleaner look (optional) */
         #MainMenu { visibility: hidden; }
         footer { visibility: hidden; }
         header { visibility: hidden; }
         </style>
     """, unsafe_allow_html=True)
+
 
 # ==============================
 # SECRETS / PATHS
