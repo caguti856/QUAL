@@ -13,7 +13,178 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
+def inject_css():
+    st.markdown("""
+        <style>
+        :root {
+            /* Brand colours */
+            --primary: #F26A21;            /* CARE orange */
+            --primary-soft: #FDE7D6;
+            --primary-soft-stronger: #FBD0AD;
 
+            --gold: #FACC15;
+            --gold-soft: #FEF9C3;
+            --silver: #E5E7EB;
+
+            --bg-main: #f5f5f5;
+            --card-bg: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border-subtle: #e5e7eb;
+        }
+
+        /* Full app background */
+        [data-testid="stAppViewContainer"] {
+            background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
+            color: var(--text-main);
+        }
+
+        /* Sidebar */
+        [data-testid="stSidebar"] {
+            background: #111827;
+            border-right: 1px solid #1f2937;
+            color: #e5e7eb;
+        }
+        [data-testid="stSidebar"] * {
+            color: #e5e7eb !important;
+        }
+
+        /* Main container width + spacing */
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+
+        /* Global text + headings */
+        h1, h2, h3 {
+            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text-main);
+        }
+        h1 {
+            font-size: 2.1rem;
+            font-weight: 700;
+        }
+        h2 {
+            margin-top: 1.5rem;
+            font-size: 1.3rem;
+        }
+        p, span, label {
+            color: var(--text-muted);
+        }
+
+        /* App header card with orange + gold + silver accent */
+        .app-header-card {
+            position: relative;
+            background:
+                radial-gradient(circle at top left,
+                    rgba(242,106,33,0.15),
+                    rgba(250,204,21,0.06),
+                    #ffffff);
+            border-radius: 1.25rem;
+            padding: 1.4rem 1.6rem;
+            border: 1px solid rgba(148,163,184,0.6);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.12);
+            margin-bottom: 1.4rem;
+            overflow: hidden;
+        }
+
+        /* thin gold/silver strip at the top */
+        .app-header-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            height: 3px;
+            background: linear-gradient(90deg,
+                var(--gold-soft),
+                var(--primary),
+                var(--silver),
+                var(--gold));
+            opacity: 0.95;
+        }
+
+        /* soft glow in the corner */
+        .app-header-card::after {
+            content: "";
+            position: absolute;
+            bottom: -40px;
+            right: -40px;
+            width: 140px;
+            height: 140px;
+            background: radial-gradient(circle,
+                rgba(250,204,21,0.35),
+                transparent 60%);
+            opacity: 0.7;
+        }
+
+        .app-header-card h1 {
+            margin-bottom: 0.2rem;
+        }
+        .app-header-subtitle {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        .pill {
+            display: inline-block;
+            font-size: 0.75rem;
+            padding: 0.15rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(242,106,33,0.08);
+            border: 1px solid rgba(242,106,33,0.6);
+            color: #9A3412;
+            margin-bottom: 0.4rem;
+        }
+
+        /* Section “cards” */
+        .section-card {
+            background: var(--card-bg);
+            border-radius: 1rem;
+            border: 1px solid var(--border-subtle);
+            padding: 1rem 1.1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 18px 40px rgba(15,23,42,0.04);
+        }
+
+        /* Dataframe tables */
+        .stDataFrame table {
+            font-size: 13px;
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-subtle);
+        }
+        .stDataFrame table thead tr th {
+            background-color: var(--primary-soft);
+            font-weight: 600;
+            color: #7c2d12;
+        }
+
+        /* Buttons & download buttons (CARE orange) */
+        .stDownloadButton button, .stButton button {
+            border-radius: 999px !important;
+            padding: 0.35rem 1.2rem !important;
+            font-weight: 600 !important;
+            border: 1px solid rgba(242,106,33,0.85) !important;
+            background: linear-gradient(135deg, var(--primary) 0%, #FB923C 100%) !important;
+            color: #FFFBEB !important;
+        }
+        .stDownloadButton button:hover, .stButton button:hover {
+            filter: brightness(1.03);
+            transform: translateY(-1px);
+            box-shadow: 0 12px 25px rgba(248,113,22,0.45);
+        }
+
+        /* Success / warning / error blocks */
+        .stAlert {
+            border-radius: 0.8rem;
+        }
+
+        /* Hide default Streamlit menu + footer for cleaner look (optional) */
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header { visibility: hidden; }
+        </style>
+    """, unsafe_allow_html=True)
 # ==============================
 # SECRETS / PATHS
 # ==============================
@@ -359,13 +530,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
-    start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
-    end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
+    start_col = next((c for c in ["start"] if c in df.columns), None)
+    end_col   = next((c for c in ["end"] if c in df.columns), None)
 
     dt_series = pd.to_datetime(df[date_col], errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*len(df))
     start_dt  = pd.to_datetime(df[start_col], errors="coerce") if start_col else pd.Series([pd.NaT]*len(df))
     end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
-    duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
+    duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round()
 
     # mapping resolution
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
@@ -609,7 +780,19 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # MAIN (auto-run, full tables)
 # ==============================
 def main():
-    st.title("📊 Thought Leadership Scoring — Auto (Full Source + Per-Question)")
+    inject_css()
+
+    # --- Header card ---
+    st.markdown("""
+        <div class="app-header-card">
+            <div class="pill">Thought Leadership • Auto Scoring</div>
+            <h1>Thought Leadership</h1>
+            <p class="app-header-subtitle">
+                Importing Kobo submissions, scoring CARE thought leadership attributes, flagging AI-like responses,
+                and exporting results to Google Sheets.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
 
     # mapping + exemplars
     try:
@@ -635,35 +818,62 @@ def main():
         st.warning("No Kobo submissions found.")
         return
 
-    # show full fetched dataset
-    st.subheader("Fetched dataset (all rows)")
+    # --- Section: Raw fetched dataset ---
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("📥 Fetched dataset")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
     st.dataframe(df, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
+    # --- Section: Scored table ---
     with st.spinner("Scoring (+ AI detection)..."):
         scored = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
     st.success("✅ Scoring complete.")
 
-    st.subheader("Scored table (all rows)")
-    st.caption("Date → Duration → Care_Staff, then original source columns (minus your excluded set), per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last.")
-    st.dataframe(scored, use_container_width=True)
-
-    st.download_button(
-        "⬇️ Download Excel",
-        data=to_excel_bytes(scored),
-        file_name="Leadership_Scoring.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-    st.download_button(
-        "⬇️ Download CSV",
-        data=_ensure_ai_last(scored).to_csv(index=False).encode("utf-8"),
-        file_name="Leadership_Scoring.csv",
-        mime="text/csv",
-        use_container_width=True
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Scored table")
+    st.caption(
+        "Date → Duration → Care_Staff, then source columns (excluded set removed), "
+        "per-question scores & rubrics, attribute averages, Overall score, Overall Rank, "
+        "and AI_suspected as the final column."
     )
 
+    # highlight AI-suspected rows in soft gold
+    def _highlight_ai(row):
+        if "AI_suspected" in row and row["AI_suspected"]:
+            return ["background-color: #FEF9C3"] * len(row)
+        return [""] * len(row)
+
+    styled = scored.style.apply(_highlight_ai, axis=1)
+    st.dataframe(styled, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- Section: Downloads ---
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("⬇️ Export")
+    st.caption("Download the scored results for further analysis or sharing.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download Excel",
+            data=to_excel_bytes(scored),
+            file_name="Leadership_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    with col2:
+        st.download_button(
+            "Download CSV",
+            data=_ensure_ai_last(scored).to_csv(index=False).encode("utf-8"),
+            file_name="Leadership_Scoring.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Optional: auto push to Google Sheets
     if AUTO_PUSH:
         with st.spinner("📤 Sending to Google Sheets..."):
             ok, msg = upload_df_to_gsheets(scored)
