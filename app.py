@@ -1,31 +1,24 @@
- 
 import streamlit as st
 import streamlit.components.v1 as components
 import importlib
-st.set_page_config(page_title="Thematic Analytics",  layout="wide")
 
+st.set_page_config(page_title="Thematic Analytics", layout="wide")
 
-
-
-# --- No-scroll COVER (white/grey background, CARE orange accents) ---
+# ---------------- COVER HTML ----------------
 COVER_HTML = """
 <div style="
   --care-orange:#EB7100;
-  --bg:#F7F7F9;     /* light page */
-  --panel:#FFFFFF;  /* header/footer panels */
+  --bg:#F7F7F9;
+  --panel:#FFFFFF;
   --text:#0F1222;
   --muted:#667085;
   --ring:rgba(235,113,0,.45);
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-
-  /* full viewport, absolutely no scroll */
   height:100vh; width:100vw; overflow:hidden;
   display:grid; grid-template-rows: auto 1fr auto;
   background:var(--bg);
   color:var(--text);
 ">
-
-  <!-- Header (sticky look but we don't scroll anyway) -->
   <header style="
     display:flex; align-items:center; justify-content:space-between;
     padding: 14px clamp(16px,4vw,40px);
@@ -34,12 +27,10 @@ COVER_HTML = """
     <div style="display:flex; align-items:center; gap:.75rem;">
       <img src="https://brand.care.org/wp-content/uploads/2017/08/Orange-Horizontal-300x97.png"
            alt="CARE" style="height:28px; display:block"/>
-     
     </div>
     <div style="opacity:.85; font-size:.95rem; color:#6B7280;">Thematic Analytics</div>
   </header>
 
-  <!-- Hero (centered; uses clamp to ALWAYS fit) -->
   <main style="display:grid; place-items:center; padding: clamp(8px, 2vw, 24px);">
     <section style="text-align:center; max-width:1050px; width:100%;">
       <h1 style="
@@ -56,7 +47,6 @@ COVER_HTML = """
         Turn qualitative feedback into defensible, program-ready evidence.
       </p>
 
-      <!-- CTA -->
       <div style="display:flex; justify-content:center; gap:12px; flex-wrap:wrap; margin-top:10px;">
         <a role="button" href="?start=1" style="
           display:inline-flex; align-items:center; gap:.55rem;
@@ -68,27 +58,18 @@ COVER_HTML = """
     </section>
   </main>
 
-  <!-- Footer (thin, within viewport) -->
   <footer style="
     padding: 12px clamp(16px,4vw,40px); text-align:center;
     background:var(--panel); border-top:1px solid #E6E7EB; color:#5B616E; font-size:12px;
   ">
     © 2025 CARE Thematic Analytics
   </footer>
-
-  <style>
-    a:focus-visible{ outline:3px solid var(--ring); outline-offset:3px; border-radius:999px; }
-    @media (max-width:900px){
-      /* one column tiles on small screens, still fits */
-      main section div[style*='grid-template-columns:repeat(3']{ grid-template-columns:1fr !important; }
-    }
-  </style>
 </div>
 """
 
+# ---------------- APP SHELL CSS ----------------
 APP_SHELL_CSS = """
 <style>
-/* Center content, give breathing room, but let it stretch full height */
 .block-container {
     padding-top: 1.5rem !important;
     padding-bottom: 2rem !important;
@@ -98,21 +79,38 @@ APP_SHELL_CSS = """
     margin: 0 auto;
 }
 
-/* Make tabs look a bit more professional */
-[data-testid="stTabs"] > div[role="tablist"] {
-    justify-content: flex-start;
-    gap: 2.5rem;
-    border-bottom: 1px solid #27272f;
-    padding-bottom: 0.4rem;
-    margin-bottom: 0.3rem;
+/* Horizontal radio nav styled like tabs */
+.nav-label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9CA3AF;
+    margin-bottom: 0.25rem;
 }
 
-[data-testid="stTabs"] button[role="tab"] {
-    font-weight: 600;
-    font-size: 0.98rem;
+div[data-baseweb="radio"] > div {
+    display: flex;
+    gap: 1.8rem;
 }
 
-/* App title styling inside each tab */
+div[data-baseweb="radio"] label {
+    background: transparent;
+    padding: 0.35rem 0.1rem;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    cursor: pointer;
+    opacity: 0.75;
+    font-weight: 500;
+    font-size: 0.96rem;
+}
+
+div[data-baseweb="radio"] input:checked + div {
+    font-weight: 700;
+    opacity: 1;
+    border-bottom-color: #f97316; /* CARE orange-ish */
+}
+
+/* Title inside each section */
 .app-title h1 {
     font-size: 2.2rem;
     font-weight: 800;
@@ -125,22 +123,19 @@ APP_SHELL_CSS = """
 </style>
 """
 
-
-
-# --- GLOBAL SESSION SETUP ---
-# ✅ Only defined ONCE, here in main.py
+# ---------------- SESSION STATE ----------------
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 if "show_cover" not in st.session_state:
     st.session_state["show_cover"] = True
 if "auth_mode" not in st.session_state:
     st.session_state["auth_mode"] = "login"
-# --- Cover page content (HTML + CSS) ---
 
-
+# ---------------- HELPERS ----------------
 def show_cover_page():
     qp = st.query_params
     if qp.get("start") == "1":
+        # User clicked "Get Started" -> go to login
         st.session_state.show_cover = False
         st.session_state.auth_mode = "login"
         try:
@@ -148,38 +143,44 @@ def show_cover_page():
         except Exception:
             st.experimental_set_query_params()
         st.rerun()
-    components.html(COVER_HTML, height=700, scrolling=False)
+
+    # Only render cover (no other content on this run)
+    components.html(COVER_HTML, height=720, scrolling=False)
 
 @st.cache_resource(show_spinner=False)
 def _lazy_import(module_name: str):
     return importlib.import_module(module_name)
 
 def _render_tab(module_name: str, nice_name: str):
-    # a little header space inside each tab
-    st.markdown(f"""
-    <div class="app-title">
-      <h1>{nice_name}</h1>
-      <span class="app-sub">Tap run inside the page when you’re ready.</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="app-title">
+          <h1>{nice_name}</h1>
+          <span class="app-sub">Tap run inside the page when you’re ready.</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     try:
         mod = _lazy_import(module_name)
-        mod.main()  # the module decides when to fetch/score/push
+        mod.main()
     except ModuleNotFoundError:
         st.error(f"Module `{module_name}.py` not found next to main.py.")
     except Exception as e:
         st.error(f"Failed to render **{nice_name}**: {type(e).__name__}: {e}")
 
-# -----------------------
-# Main router
-# -----------------------
+# ---------------- MAIN ROUTER ----------------
 def main():
-    # 1) Cover first
-    if st.session_state.show_cover:
+    # If user is already logged in, NEVER show cover again
+    if st.session_state.user_email:
+        st.session_state.show_cover = False
+
+    # 1) Show cover only when not logged in AND show_cover is True
+    if st.session_state.show_cover and not st.session_state.user_email:
         show_cover_page()
         return
 
-    # 2) Must be logged in
+    # 2) If not logged in yet -> show login page
     if not st.session_state.user_email:
         try:
             login = _lazy_import("login")
@@ -188,17 +189,17 @@ def main():
             st.error(f"Login page error: {e}")
         return
 
-    # 3) Apply app-wide styling
+    # 3) Logged in view: apply shell styling
     st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
 
-    # 4) Sidebar: only Logout
+    # Sidebar: only Logout
     with st.sidebar:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.user_email = None
-            st.session_state.show_cover = True
+            st.session_state.show_cover = True  # show cover next time
             st.rerun()
 
-    # 5) Top “tabs” implemented as a horizontal radio
+    # Top nav (radio that behaves like tabs)
     st.markdown('<div class="nav-label">SECTIONS</div>', unsafe_allow_html=True)
     section = st.radio(
         "",
@@ -213,7 +214,7 @@ def main():
         key="top_nav",
     )
 
-    # 6) Only run the selected page
+    # Only run the selected module
     if section == "Advisory":
         _render_tab("advisory", "Advisory")
     elif section == "Thought Leadership":
