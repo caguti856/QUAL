@@ -1,10 +1,89 @@
 import streamlit as st
 import streamlit.components.v1 as components
-st.set_page_config(page_title="Thematic Analytics", layout="wide")
 import importlib
 
+st.set_page_config(page_title="Thematic Analytics", layout="wide")
 
-# ---------------- COVER HTML ----------------
+# ---------- FULL-SCREEN / NO-SCROLL CSS (used only when we want it) ----------
+FIXED_VIEWPORT_CSS = """
+<style>
+html, body, [data-testid="stAppViewContainer"]{
+  height:100vh !important;
+  width:100vw !important;
+  margin:0 !important;
+  padding:0 !important;
+  overflow:hidden !important;
+}
+.block-container, section.main{
+  padding:0 !important;
+  margin:0 !important;
+}
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{
+  display:none !important;
+}
+</style>
+"""
+
+# ---------- APP SHELL STYLING (inside logged-in app) ----------
+APP_SHELL_CSS = """
+<style>
+/* Main content container */
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 2rem !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    max-width: 1300px;
+    margin: 0 auto;
+}
+
+/* Small label above the radio nav */
+.nav-label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9CA3AF;
+    margin-bottom: 0.25rem;
+}
+
+/* Style ONLY the top navigation radio (horizontal) */
+[data-testid="stRadio"] > div {
+    display: flex;
+    gap: 1.8rem;
+}
+
+[data-testid="stRadio"] label {
+    background: transparent;
+    padding: 0.35rem 0.1rem;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    cursor: pointer;
+    opacity: 0.75;
+    font-weight: 500;
+    font-size: 0.96rem;
+}
+
+/* Selected nav item looks “active” */
+[data-testid="stRadio"] input:checked + div {
+    font-weight: 700;
+    opacity: 1;
+    border-bottom-color: #f97316;
+}
+
+/* Title inside each section */
+.app-title h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    margin-bottom: 0.1rem;
+}
+.app-sub {
+    font-size: 0.95rem;
+    color: #9CA3AF;
+}
+</style>
+"""
+
+# ---------- COVER HTML (same as you had) ----------
 COVER_HTML = """
 <div style="
   --care-orange:#EB7100;
@@ -67,34 +146,33 @@ COVER_HTML = """
 </div>
 """
 
-
-# ---------------- SESSION STATE ----------------
+# ---------- SESSION SETUP ----------
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
-if "show_cover" not in st.session_state:
-    st.session_state["show_cover"] = True
-if "auth_mode" not in st.session_state:
-    st.session_state["auth_mode"] = "login"
+if "app_stage" not in st.session_state:
+    st.session_state["app_stage"] = "cover"   # cover → login → app
 
-# ---------------- HELPERS ----------------
+
 def show_cover_page():
+    # Apply full-screen, no-scroll CSS
+    st.markdown(FIXED_VIEWPORT_CSS, unsafe_allow_html=True)
+
     qp = st.query_params
     if qp.get("start") == "1":
-        # User clicked "Get Started" -> go to login
-        st.session_state.show_cover = False
-        st.session_state.auth_mode = "login"
+        st.session_state.app_stage = "login"
         try:
             st.query_params.clear()
         except Exception:
             st.experimental_set_query_params()
         st.rerun()
 
-    # Only render cover (no other content on this run)
-    components.html(COVER_HTML, height=720, scrolling=False)
+    components.html(COVER_HTML, height=700, scrolling=False)
+
 
 @st.cache_resource(show_spinner=False)
 def _lazy_import(module_name: str):
     return importlib.import_module(module_name)
+
 
 def _render_tab(module_name: str, nice_name: str):
     st.markdown(
@@ -114,37 +192,41 @@ def _render_tab(module_name: str, nice_name: str):
     except Exception as e:
         st.error(f"Failed to render **{nice_name}**: {type(e).__name__}: {e}")
 
-# ---------------- MAIN ROUTER ----------------
-def main():
-    # If user is already logged in, NEVER show cover again
-    if st.session_state.user_email:
-        st.session_state.show_cover = False
 
-    # 1) Show cover only when not logged in AND show_cover is True
-    if st.session_state.show_cover and not st.session_state.user_email:
+# ---------- MAIN ROUTER ----------
+def main():
+    # If already logged in, jump to app
+    if st.session_state.user_email and st.session_state.app_stage != "app":
+        st.session_state.app_stage = "app"
+
+    stage = st.session_state.app_stage
+
+    # 1) COVER
+    if stage == "cover":
         show_cover_page()
         return
 
-    # 2) If not logged in yet -> show login page
-    if not st.session_state.user_email:
+    # 2) LOGIN
+    if stage == "login" and not st.session_state.user_email:
         try:
-            login = _lazy_import("login")
-            login.show_auth_page()
+            login_mod = _lazy_import("login")
+            login_mod.show_auth_page()
         except Exception as e:
             st.error(f"Login page error: {e}")
         return
 
-    # 3) Logged in view: apply shell styling
-    
+    # 3) APP (logged in) – fixed viewport + shell CSS
+    st.markdown(FIXED_VIEWPORT_CSS, unsafe_allow_html=True)
+    st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
 
     # Sidebar: only Logout
     with st.sidebar:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.user_email = None
-            st.session_state.show_cover = True  # show cover next time
+            st.session_state.app_stage = "cover"
             st.rerun()
 
-    # Top nav (radio that behaves like tabs)
+    # Top nav
     st.markdown('<div class="nav-label">SECTIONS</div>', unsafe_allow_html=True)
     section = st.radio(
         "",
@@ -159,7 +241,6 @@ def main():
         key="top_nav",
     )
 
-    # Only run the selected module
     if section == "Advisory":
         _render_tab("advisory", "Advisory")
     elif section == "Thought Leadership":
@@ -174,4 +255,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
