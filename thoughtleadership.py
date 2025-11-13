@@ -576,7 +576,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         end_dt = pd.Series([pd.NaT] * n_rows)
 
     # Exact duration in minutes (including seconds)
-    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).round(2)
+    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0)
 
 
     # mapping resolution
