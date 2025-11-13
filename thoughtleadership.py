@@ -832,7 +832,7 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Scored table")
+    st.subheader("📊 Scored table")
     st.caption(
         "Date → Duration → Care_Staff, then source columns (excluded set removed), "
         "per-question scores & rubrics, attribute averages, Overall score, Overall Rank, "
@@ -842,7 +842,7 @@ def main():
     # highlight AI-suspected rows in soft gold
     def _highlight_ai(row):
         if "AI_suspected" in row and row["AI_suspected"]:
-            return ["background-color: #FEF9C3"] * len(row)
+            return ["background-color: #241E4E"] * len(row)
         return [""] * len(row)
 
     styled = scored.style.apply(_highlight_ai, axis=1)
