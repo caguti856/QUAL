@@ -13,6 +13,42 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
+def inject_css():
+    st.markdown("""
+        <style>
+        /* Make the main content a bit cleaner */
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+
+        /* Title + headers */
+        h1, h2, h3 {
+            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        /* Dataframe tables */
+        .stDataFrame table {
+            font-size: 13px;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .stDataFrame table thead tr th {
+            background-color: #0f766e11;   /* subtle teal tint */
+            font-weight: 600;
+        }
+
+        /* Buttons & download buttons */
+        .stDownloadButton button, .stButton button {
+            border-radius: 999px;
+            padding: 0.35rem 1.2rem;
+            font-weight: 600;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
 
 # ==============================
 # SECRETS / PATHS
@@ -874,6 +910,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # MAIN (auto-run, full tables)
 # ==============================
 def main():
+    inject_css() 
     st.title("Growth Mindset")
 
     # mapping + exemplars
