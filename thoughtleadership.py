@@ -576,7 +576,11 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         end_dt = pd.Series([pd.NaT] * n_rows)
 
     # Exact duration in minutes (including seconds)
-    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).astype(int)
+        # Duration in minutes (float), then clipped and rounded later per-row
+    duration_min = (end_dt - start_dt).dt.total_seconds() / 60.0
+    # Avoid negative values if timestamps are odd
+    duration_min = duration_min.clip(lower=0)
+
 
 
     # mapping resolution
@@ -605,7 +609,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         # Date, Duration, Care_Staff
         row["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                        if pd.notna(dt_series.iloc[i]) else str(i))
-        row["Duration"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
+        val = duration_min.iloc[i]
+        row["Duration"] = int(round(val)) if not pd.isna(val) else ""
+
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(resp.get(who_col)) if who_col else ""
 
