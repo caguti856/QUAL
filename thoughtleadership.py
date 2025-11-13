@@ -737,7 +737,7 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # MAIN (auto-run, full tables)
 # ==============================
 def main():
-    st.title("📊 Growth Mindset Scoring — Auto (Full Source + Per-Question)")
+    st.title("Thought Leadership")
 
     # mapping + exemplars
     try:
@@ -799,3 +799,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
