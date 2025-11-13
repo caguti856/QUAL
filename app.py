@@ -1,16 +1,11 @@
  
 import streamlit as st
 import streamlit.components.v1 as components
-
+import importlib
 st.set_page_config(page_title="Thematic Analytics",  layout="wide")
 
 # === PAGES (make sure advisory.py exists in the same folder or is importable)
-import advisory  # must define advisory.main()
-import thoughtleadership
-import growthmindset
-import networking
-import influencingrelationship
-import login
+
 # ----- optional cover -----
 # Full-bleed, true viewport cover (no scroll, no padding)
 st.markdown("""
@@ -140,51 +135,74 @@ def show_cover_page():
         except Exception:
             st.experimental_set_query_params()
         st.rerun()
-
-    # exactly one viewport tall, no internal scroll
     components.html(COVER_HTML, height=700, scrolling=False)
 
+@st.cache_resource(show_spinner=False)
+def _lazy_import(module_name: str):
+    return importlib.import_module(module_name)
 
+def _render_tab(module_name: str, nice_name: str):
+    # a little header space inside each tab
+    st.markdown(f"""
+    <div class="app-title">
+      <h1>{nice_name}</h1>
+      <span class="app-sub">Tap run inside the page when you’re ready.</span>
+    </div>
+    """, unsafe_allow_html=True)
+    try:
+        mod = _lazy_import(module_name)
+        mod.main()  # the module decides when to fetch/score/push
+    except ModuleNotFoundError:
+        st.error(f"Module `{module_name}.py` not found next to main.py.")
+    except Exception as e:
+        st.error(f"Failed to render **{nice_name}**: {type(e).__name__}: {e}")
+
+# -----------------------
+# Main router
+# -----------------------
 def main():
-    if 'show_cover' not in st.session_state:
-        st.session_state['show_cover'] = True
-    if 'user_email' not in st.session_state:
-        st.session_state['user_email'] = None
-    if 'auth_mode' not in st.session_state:
-        st.session_state['auth_mode'] = "login"
-
-    # Routing logic
-    if st.session_state['show_cover']:
+    if st.session_state.show_cover:
         show_cover_page()
-    else:
-        if not st.session_state['user_email']:
-            login.show_auth_page()
-        else:
-            # Your sidebar navigation as before
-          with st.sidebar:
-                selected = st.selectbox(
-                "Navigation",
-                ["Advisory", "Thought Leadership","Growth Mindset","Networking","Influencing Relationship","Logout"]
-            )
-          if selected == "Advisory":
-              advisory.main()
-          elif selected == "Thought Leadership":
-              thoughtleadership.main()
-          elif selected == "Growth Mindset":
-              growthmindset.main() 
-          elif selected == "Networking":
-              networking.main() 
-          elif selected == "Influencing Relationship":
-             influencingrelationship.main()  
-          elif selected == "Logout":
-             st.session_state.user_email = None
-             st.session_state['show_cover'] = True
+        return
 
+    if not st.session_state.user_email:
+        try:
+            login = _lazy_import("login")
+            login.show_auth_page()
+        except Exception as e:
+            st.error(f"Login page error: {e}")
+        return
+
+    # Sidebar: only Logout
+    with st.sidebar:
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.user_email = None
+            st.session_state.show_cover = True
+            st.rerun()
+
+    # Top tabs (full-width, stretch evenly)
+    tabs = st.tabs([
+        "Advisory",
+        "Thought Leadership",
+        "Growth Mindset",
+        "Networking",
+        "Influencing Relationship",
+    ])
+
+    with tabs[0]:
+        _render_tab("advisory", "Advisory")
+
+    with tabs[1]:
+        _render_tab("thoughtleadership", "Thought Leadership")
+
+    with tabs[2]:
+        _render_tab("growthmindset", "Growth Mindset")
+
+    with tabs[3]:
+        _render_tab("networking", "Networking")
+
+    with tabs[4]:
+        _render_tab("influencingrelationship", "Influencing Relationship")
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
