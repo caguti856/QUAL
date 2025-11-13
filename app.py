@@ -4,30 +4,6 @@ st.set_page_config(page_title="Thematic Analytics", layout="wide")
 import importlib
 
 
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important;
-  padding:0 !important; margin:0 !important; overflow:hidden !important;
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
-  overflow:hidden !important;
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ---------------- COVER HTML ----------------
 COVER_HTML = """
 <div style="
@@ -198,3 +174,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
