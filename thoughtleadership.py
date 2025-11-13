@@ -527,16 +527,57 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     staff_id_col   = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
     care_staff_col = next((c for c in df.columns if c.strip().lower() in ("care_staff","care staff","care-staff")), None)
 
-    date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
+    date_cols_pref = [
+        "_submission_time","SubmissionDate","submissiondate",
+        "end","End","start","Start","today","date","Date"
+    ]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
-    start_col = next((c for c in ["start"] if c in df.columns), None)
-    end_col   = next((c for c in ["end"] if c in df.columns), None)
+    # Prefer Kobo start/end fields; keep your old fallbacks
+    start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
+    end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
 
-    dt_series = pd.to_datetime(df[date_col], errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*len(df))
-    start_dt  = pd.to_datetime(df[start_col], errors="coerce") if start_col else pd.Series([pd.NaT]*len(df))
-    end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
-    duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round()
+    n_rows = len(df)
+
+    # Clean Date column (in case it also has leading commas)
+    if date_col in df.columns:
+        date_clean = (
+            df[date_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")     # handle values like ",2025-11-06T08:00:58.431+03:00"
+        )
+        dt_series = pd.to_datetime(date_clean, errors="coerce")
+    else:
+        dt_series = pd.Series([pd.NaT] * n_rows)
+
+    # Clean and parse start time
+    if start_col:
+        start_clean = (
+            df[start_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")     # remove leading comma if present
+        )
+        start_dt = pd.to_datetime(start_clean, utc=True, errors="coerce")
+    else:
+        start_dt = pd.Series([pd.NaT] * n_rows)
+
+    # Clean and parse end time
+    if end_col:
+        end_clean = (
+            df[end_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")
+        )
+        end_dt = pd.to_datetime(end_clean, utc=True, errors="coerce")
+    else:
+        end_dt = pd.Series([pd.NaT] * n_rows)
+
+    # Exact duration in minutes (including seconds)
+    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).round(2)
+
 
     # mapping resolution
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
