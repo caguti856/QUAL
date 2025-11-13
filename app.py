@@ -159,7 +159,7 @@ def main():
         return
 
     # 3) Logged in view: apply shell styling
-    st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
+    
 
     # Sidebar: only Logout
     with st.sidebar:
@@ -198,4 +198,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
