@@ -13,6 +13,181 @@ import requests
 
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
+# ==============================
+# CSS (same style as Leadership)
+# ==============================
+def inject_css():
+    st.markdown("""
+        <style>
+        :root {
+            /* Brand colours */
+            --primary: #F26A21;            /* CARE orange */
+            --primary-soft: #FDE7D6;
+            --primary-soft-stronger: #FBD0AD;
+
+            --gold: #FACC15;
+            --gold-soft: #FEF9C3;
+            --silver: #E5E7EB;
+
+            --bg-main: #f5f5f5;
+            --card-bg: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border-subtle: #e5e7eb;
+        }
+
+        /* Full app background */
+        [data-testid="stAppViewContainer"] {
+            background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
+            color: var(--text-main);
+        }
+
+        /* Sidebar */
+        [data-testid="stSidebar"] {
+            background: #111827;
+            border-right: 1px solid #1f2937;
+            color: #e5e7eb;
+        }
+        [data-testid="stSidebar"] * {
+            color: #e5e7eb !important;
+        }
+
+        /* Main container width + spacing */
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+
+        /* Global text + headings */
+        h1, h2, h3 {
+            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text-main);
+        }
+        h1 {
+            font-size: 2.1rem;
+            font-weight: 700;
+        }
+        h2 {
+            margin-top: 1.5rem;
+            font-size: 1.3rem;
+        }
+        p, span, label {
+            color: var(--text-muted);
+        }
+
+        /* App header card with orange + gold + silver accent */
+        .app-header-card {
+            position: relative;
+            background:
+                radial-gradient(circle at top left,
+                    rgba(242,106,33,0.15),
+                    rgba(250,204,21,0.06),
+                    #ffffff);
+            border-radius: 1.25rem;
+            padding: 1.4rem 1.6rem;
+            border: 1px solid rgba(148,163,184,0.6);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.12);
+            margin-bottom: 1.4rem;
+            overflow: hidden;
+        }
+
+        /* thin gold/silver strip at the top */
+        .app-header-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            height: 3px;
+            background: linear-gradient(90deg,
+                var(--gold-soft),
+                var(--primary),
+                var(--silver),
+                var(--gold));
+            opacity: 0.95;
+        }
+
+        /* soft glow in the corner */
+        .app-header-card::after {
+            content: "";
+            position: absolute;
+            bottom: -40px;
+            right: -40px;
+            width: 140px;
+            height: 140px;
+            background: radial-gradient(circle,
+                rgba(250,204,21,0.35),
+                transparent 60%);
+            opacity: 0.7;
+        }
+
+        .app-header-card h1 {
+            margin-bottom: 0.2rem;
+        }
+        .app-header-subtitle {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        .pill {
+            display: inline-block;
+            font-size: 0.75rem;
+            padding: 0.15rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(242,106,33,0.08);
+            border: 1px solid rgba(242,106,33,0.6);
+            color: #9A3412;
+            margin-bottom: 0.4rem;
+        }
+
+        /* Section “cards” */
+        .section-card {
+            background: var(--card-bg);
+            border-radius: 1rem;
+            border: 1px solid var(--border-subtle);
+            padding: 1rem 1.1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 18px 40px rgba(15,23,42,0.04);
+        }
+
+        /* Dataframe tables */
+        .stDataFrame table {
+            font-size: 13px;
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-subtle);
+        }
+        .stDataFrame table thead tr th {
+            background-color: var(--primary-soft);
+            font-weight: 600;
+            color: #7c2d12;
+        }
+
+        /* Buttons & download buttons (CARE orange) */
+        .stDownloadButton button, .stButton button {
+            border-radius: 999px !important;
+            padding: 0.35rem 1.2rem !important;
+            font-weight: 600 !important;
+            border: 1px solid rgba(242,106,33,0.85) !important;
+            background: linear-gradient(135deg, var(--primary) 0%, #FB923C 100%) !important;
+            color: #FFFBEB !important;
+        }
+        .stDownloadButton button:hover, .stButton button:hover {
+            filter: brightness(1.03);
+            transform: translateY(-1px);
+            box-shadow: 0 12px 25px rgba(248,113,22,0.45);
+        }
+
+        /* Success / warning / error blocks */
+        .stAlert {
+            border-radius: 0.8rem;
+        }
+
+        /* Hide default Streamlit menu + footer for cleaner look (optional) */
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header { visibility: hidden; }
+        </style>
+    """, unsafe_allow_html=True)
 
 # ==============================
 # CONSTANTS / PATHS / SECRETS
@@ -399,13 +574,48 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
-    start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
-    end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
+    start_col = next((c for c in ["start"] if c in df.columns), None)
+    end_col   = next((c for c in ["end"] if c in df.columns), None)
 
-    dt_series = pd.to_datetime(df[date_col], errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*len(df))
-    start_dt  = pd.to_datetime(df[start_col], errors="coerce") if start_col else pd.Series([pd.NaT]*len(df))
-    end_dt    = pd.to_datetime(df[end_col], errors="coerce")   if end_col   else pd.Series([pd.NaT]*len(df))
-    duration_min = ((end_dt - start_dt).dt.total_seconds()/60.0).round(2)
+    n_rows = len(df)
+
+    # --- Clean and parse Date / Start / End (like Leadership fix) ---
+    if date_col in df.columns:
+        date_clean = (
+            df[date_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")
+        )
+        dt_series = pd.to_datetime(date_clean, errors="coerce")
+    else:
+        dt_series = pd.Series([pd.NaT] * n_rows)
+
+    if start_col:
+        start_clean = (
+            df[start_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")
+        )
+        start_dt = pd.to_datetime(start_clean, utc=True, errors="coerce")
+    else:
+        start_dt = pd.Series([pd.NaT] * n_rows)
+
+    if end_col:
+        end_clean = (
+            df[end_col]
+            .astype(str)
+            .str.strip()
+            .str.lstrip(",")
+        )
+        end_dt = pd.to_datetime(end_clean, utc=True, errors="coerce")
+    else:
+        end_dt = pd.Series([pd.NaT] * n_rows)
+
+    # --- Duration in minutes (float), clipped; will round to whole number per-row ---
+    duration_min = (end_dt - start_dt).dt.total_seconds() / 60.0
+    duration_min = duration_min.clip(lower=0)
 
     rows_out = []
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
@@ -447,7 +657,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         out["Date"] = (pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S")
                      if pd.notna(dt_series.iloc[i]) else str(i))
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
-        out["Duration_min"] = float(duration_min.iloc[i]) if not pd.isna(duration_min.iloc[i]) else ""
+        d_val = duration_min.iloc[i]
+        out["Duration_min"] = int(round(d_val)) if not pd.isna(d_val) else ""
 
         per_attr = {}
         any_ai_suspected = False  # row-level
@@ -673,59 +884,115 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # UI / MAIN
 # ==============================
 def main():
-    st.title("📊 Advisory Scoring")
+    inject_css()
+
+    # --- Header card ---
+    st.markdown("""
+        <div class="app-header-card">
+            <div class="pill">Advisory • Auto Scoring</div>
+            <h1>Advisory Scoring</h1>
+            <p class="app-header-subtitle">
+                Importing Kobo submissions, scoring advisory attributes against exemplar responses,
+                flagging AI-like answers, and exporting the results to Excel or Google Sheets.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
 
     AUTO_RUN  = bool(st.secrets.get("AUTO_RUN", False))
     AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
 
     def run():
-        mapping = load_mapping_from_path(MAPPING_PATH)
-        exemplars = read_jsonl_path(EXEMPLARS_PATH)
-        if not exemplars:
-            st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
-            st.stop()
+        # 1) mapping + exemplars
+        try:
+            mapping = load_mapping_from_path(MAPPING_PATH)
+        except Exception as e:
+            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
+            return
+
+        try:
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+                return
+        except Exception as e:
+            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
+            return
 
         with st.spinner("Building semantic centroids..."):
             q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
+        # 2) fetch Kobo
         with st.spinner("Fetching Kobo submissions..."):
             df = fetch_kobo_dataframe()
         if df.empty:
             st.warning("No Kobo submissions found.")
-            st.stop()
+            return
 
-        st.caption("Fetched sample:")
-        st.dataframe(df.head(10), use_container_width=True, height=320)
+        # --- Section: raw dataset ---
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("📥 Fetched dataset")
+        st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
+        st.dataframe(df, use_container_width=True, height=360)
+        st.markdown('</div>', unsafe_allow_html=True)
 
+        # 3) score
         with st.spinner("Scoring (+ AI detection)..."):
             scored_df = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
 
         st.success("✅ Scoring complete.")
-        st.dataframe(scored_df.head(10), use_container_width=True, height=360)
+
+        # --- highlight AI-suspected rows ---
+        def _highlight_ai(row):
+            if "AI_suspected" in row and row["AI_suspected"]:
+                return ["background-color: #241E4E"] * len(row)
+            return [""] * len(row)
+
+        styled = scored_df.style.apply(_highlight_ai, axis=1)
+
+        # --- Section: scored table ---
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("📊 Scored table")
+        st.caption(
+            "Date → Duration_min → Staff ID, then per-question scores & rubrics, "
+            "attribute averages, Overall score, Overall Rank, and AI_suspected last."
+        )
+        st.dataframe(styled, use_container_width=True, height=420)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # --- Section: downloads ---
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("⬇️ Export")
+        st.caption("Download the full scored dataset for further analysis or sharing.")
 
         st.download_button(
-            "⬇️ Download Excel",
+            "Download Excel",
             data=to_excel_bytes(scored_df),
             file_name="Advisory_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+        st.markdown('</div>', unsafe_allow_html=True)
 
         st.session_state["scored_df"] = scored_df
 
+        # 4) auto-push if configured
         if AUTO_PUSH:
             with st.spinner("📤 Sending scored table to Google Sheets..."):
                 ok, msg = upload_df_to_gsheets(scored_df)
             show_status(ok, msg)
 
-    if AUTO_RUN and not st.session_state.get("auto_ran_once"):
-        st.session_state["auto_ran_once"] = True
+    # Auto-run or manual button
+    if AUTO_RUN and not st.session_state.get("advisory_auto_ran_once"):
+        st.session_state["advisory_auto_ran_once"] = True
         run()
 
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True):
         run()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    if "scored_df" in st.session_state and st.session_state["scored_df"] is not None:
+    # Manual push panel (if not AUTO_PUSH)
+    if ("scored_df" in st.session_state) and (st.session_state["scored_df"] is not None) and (not AUTO_PUSH):
         with st.expander("Google Sheets export", expanded=True):
             st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
             st.write("Worksheet name:", DEFAULT_WS_NAME)
