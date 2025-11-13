@@ -1,8 +1,32 @@
 import streamlit as st
 import streamlit.components.v1 as components
+st.set_page_config(page_title="Thematic Analytics", layout="wide")
 import importlib
 
-st.set_page_config(page_title="Thematic Analytics", layout="wide")
+
+st.markdown("""
+<style>
+html, body, [data-testid="stAppViewContainer"]{
+  height:100vh !important; width:100vw !important;
+  padding:0 !important; margin:0 !important; overflow:hidden !important;
+}
+.block-container, section.main{ padding:0 !important; margin:0 !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
+st.markdown("""
+<style>
+html, body, [data-testid="stAppViewContainer"]{
+  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
+  overflow:hidden !important;
+}
+.block-container, section.main{ padding:0 !important; margin:0 !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------- COVER HTML ----------------
 COVER_HTML = """
@@ -67,61 +91,6 @@ COVER_HTML = """
 </div>
 """
 
-# ---------------- APP SHELL CSS ----------------
-APP_SHELL_CSS = """
-<style>
-.block-container {
-    padding-top: 1.5rem !important;
-    padding-bottom: 2rem !important;
-    padding-left: 2.5rem !important;
-    padding-right: 2.5rem !important;
-    max-width: 1300px;
-    margin: 0 auto;
-}
-
-/* Horizontal radio nav styled like tabs */
-.nav-label {
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: #9CA3AF;
-    margin-bottom: 0.25rem;
-}
-
-div[data-baseweb="radio"] > div {
-    display: flex;
-    gap: 1.8rem;
-}
-
-div[data-baseweb="radio"] label {
-    background: transparent;
-    padding: 0.35rem 0.1rem;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    cursor: pointer;
-    opacity: 0.75;
-    font-weight: 500;
-    font-size: 0.96rem;
-}
-
-div[data-baseweb="radio"] input:checked + div {
-    font-weight: 700;
-    opacity: 1;
-    border-bottom-color: #f97316; /* CARE orange-ish */
-}
-
-/* Title inside each section */
-.app-title h1 {
-    font-size: 2.2rem;
-    font-weight: 800;
-    margin-bottom: 0.1rem;
-}
-.app-sub {
-    font-size: 0.95rem;
-    color: #9CA3AF;
-}
-</style>
-"""
 
 # ---------------- SESSION STATE ----------------
 if "user_email" not in st.session_state:
@@ -229,3 +198,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
