@@ -534,8 +534,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
     # Prefer Kobo start/end fields; keep your old fallbacks
-    start_col = next((c for c in ["start","Start","_start"] if c in df.columns), None)
-    end_col   = next((c for c in ["end","End","_end","_submission_time","SubmissionDate","submissiondate"] if c in df.columns), None)
+    start_col = next((c for c in ["start"] if c in df.columns), None)
+    end_col   = next((c for c in ["end"] if c in df.columns), None)
 
     n_rows = len(df)
 
