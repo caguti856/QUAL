@@ -111,6 +111,44 @@ COVER_HTML = """
 </div>
 """
 
+APP_SHELL_CSS = """
+<style>
+/* Center content, give breathing room, but let it stretch full height */
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 2rem !important;
+    padding-left: 2.5rem !important;
+    padding-right: 2.5rem !important;
+    max-width: 1300px;
+    margin: 0 auto;
+}
+
+/* Make tabs look a bit more professional */
+[data-testid="stTabs"] > div[role="tablist"] {
+    justify-content: flex-start;
+    gap: 2.5rem;
+    border-bottom: 1px solid #27272f;
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.3rem;
+}
+
+[data-testid="stTabs"] button[role="tab"] {
+    font-weight: 600;
+    font-size: 0.98rem;
+}
+
+/* App title styling inside each tab */
+.app-title h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    margin-bottom: 0.1rem;
+}
+.app-sub {
+    font-size: 0.95rem;
+    color: #9CA3AF;
+}
+</style>
+"""
 
 
 
@@ -161,10 +199,12 @@ def _render_tab(module_name: str, nice_name: str):
 # Main router
 # -----------------------
 def main():
+    # 1) Cover first
     if st.session_state.show_cover:
         show_cover_page()
         return
 
+    # 2) Must be logged in
     if not st.session_state.user_email:
         try:
             login = _lazy_import("login")
@@ -173,36 +213,43 @@ def main():
             st.error(f"Login page error: {e}")
         return
 
-    # Sidebar: only Logout
+    # 3) Apply app-wide styling
+    st.markdown(APP_SHELL_CSS, unsafe_allow_html=True)
+
+    # 4) Sidebar: only Logout
     with st.sidebar:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.user_email = None
             st.session_state.show_cover = True
             st.rerun()
 
-    # Top tabs (full-width, stretch evenly)
-    tabs = st.tabs([
-        "Advisory",
-        "Thought Leadership",
-        "Growth Mindset",
-        "Networking",
-        "Influencing Relationship",
-    ])
+    # 5) Top “tabs” implemented as a horizontal radio
+    st.markdown('<div class="nav-label">SECTIONS</div>', unsafe_allow_html=True)
+    section = st.radio(
+        "",
+        [
+            "Advisory",
+            "Thought Leadership",
+            "Growth Mindset",
+            "Networking",
+            "Influencing Relationship",
+        ],
+        horizontal=True,
+        key="top_nav",
+    )
 
-    with tabs[0]:
+    # 6) Only run the selected page
+    if section == "Advisory":
         _render_tab("advisory", "Advisory")
-
-    with tabs[1]:
+    elif section == "Thought Leadership":
         _render_tab("thoughtleadership", "Thought Leadership")
-
-    with tabs[2]:
+    elif section == "Growth Mindset":
         _render_tab("growthmindset", "Growth Mindset")
-
-    with tabs[3]:
+    elif section == "Networking":
         _render_tab("networking", "Networking")
-
-    with tabs[4]:
+    elif section == "Influencing Relationship":
         _render_tab("influencingrelationship", "Influencing Relationship")
+
 
 if __name__ == "__main__":
     main()
