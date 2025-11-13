@@ -1,5 +1,3 @@
- 
-
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -13,15 +11,18 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
+
+
 def inject_css():
     st.markdown("""
         <style>
         :root {
-            /* 🔶 PRIMARY BRAND COLOUR
-               Replace #F26A21 with the exact orange you use in your HTML if different */
-            --primary: #F26A21;
+            /* CARE-ish brand colours */
+            --primary: #F26A21;          /* CARE orange – replace with exact hex if needed */
             --primary-soft: #FDE7D6;
-            --primary-soft-stronger: #FBD0AD;
+            --gold: #FACC15;
+            --gold-soft: #FEF3C7;
+            --silver: #E5E7EB;
 
             --bg-main: #f5f5f5;
             --card-bg: #ffffff;
@@ -70,31 +71,108 @@ def inject_css():
             color: var(--text-muted);
         }
 
-        /* App header card with CARE orange accent */
+        /* App header card with orange + gold accent */
         .app-header-card {
-            background: linear-gradient(135deg, rgba(242,106,33,0.12), rgba(255,255,255,0.9));
-            border-radius: 1.25rem;
+            position: relative;
+            background: radial-gradient(circle at top left,
+                        rgba(242,106,33,0.16),
+                        rgba(250,204,21,0.09)),
+                        #ffffff;
+            border-radius: 1.3rem;
             padding: 1.4rem 1.6rem;
-            border: 1px solid rgba(248,113,22,0.25);
-            box-shadow: 0 18px 40px rgba(15,23,42,0.08);
+            border: 1px solid rgba(148,163,184,0.55);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.12);
             margin-bottom: 1.4rem;
+            overflow: hidden;
         }
+
+        /* thin metallic gradient strip at the top */
+        .app-header-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            height: 3px;
+            background: linear-gradient(90deg,
+                #FDE68A,
+                #F26A21,
+                #E5E7EB,
+                #FACC15);
+            opacity: 0.9;
+        }
+
+        /* soft glow in bottom-right corner */
+        .app-header-card::after {
+            content: "";
+            position: absolute;
+            bottom: -40px;
+            right: -40px;
+            width: 140px;
+            height: 140px;
+            background: radial-gradient(circle,
+                rgba(250,204,21,0.35),
+                transparent 60%);
+            opacity: 0.7;
+        }
+
+        /* layout for title + badge */
+        .header-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.2rem;
+        }
+
         .app-header-card h1 {
-            margin-bottom: 0.2rem;
+            margin-bottom: 0.25rem;
         }
+
+        /* subtitle text */
         .app-header-subtitle {
             font-size: 0.9rem;
             color: var(--text-muted);
         }
+
+        /* little orange-gold pill */
         .pill {
-            display: inline-block;
-            font-size: 0.75rem;
-            padding: 0.15rem 0.7rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.78rem;
+            padding: 0.18rem 0.75rem;
             border-radius: 999px;
-            background: rgba(242,106,33,0.08);
-            border: 1px solid rgba(242,106,33,0.6);
-            color: #9A3412;
-            margin-bottom: 0.4rem;
+            background: linear-gradient(120deg,
+                rgba(242,106,33,0.08),
+                rgba(250,204,21,0.16));
+            border: 1px solid rgba(242,106,33,0.65);
+            color: #7c2d12;
+            margin-bottom: 0.35rem;
+        }
+
+        /* tiny “badge” on the right (silver + gold) */
+        .header-badge {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: flex-end;
+            padding: 0.35rem 0.9rem;
+            border-radius: 999px;
+            background: linear-gradient(135deg,
+                #E5E7EB,
+                #FACC15);
+            box-shadow: 0 10px 22px rgba(148,163,184,0.55);
+            border: 1px solid rgba(148,163,184,0.7);
+        }
+
+        .header-badge-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #4b5563;
+        }
+
+        .header-badge-text {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #7c2d12;
         }
 
         /* Section “cards” */
@@ -290,11 +368,6 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
 # ==============================
 # MAPPING + EXEMPLARS (Growth Mindset)
 # ==============================
-# IMPORTANT: Dual schema support
-#   LA→A1
-#   DS→B1 (fallback A2)
-#   IN→C1 (fallback A3)
-#   CI→D1 (fallback A4)
 QID_PREFIX_TO_SECTIONS = {
     "LA": ["A1"],
     "DS": ["B1","A2"],
@@ -531,7 +604,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     staff_id_col   = next((c for c in df.columns if c.strip().lower() in ("staff id","staff_id","staffid")), None)
     care_staff_col = next((c for c in df.columns if c.strip().lower() in ("care_staff","care staff","care-staff")), None)
 
-        # --- Date / Start / End / Duration (cleaned for ISO with offset) ---
+    # --- Date / Start / End / Duration (cleaned for ISO with offset) ---
     date_cols_pref = [
         "_submission_time","SubmissionDate","submissiondate",
         "end","End","start","Start","today","date","Date"
@@ -582,7 +655,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
     # Exact duration in minutes (including seconds)
     duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).round(2)
-
 
     # mapping resolution (now aware of dual schema + attribute rescue + CI fix)
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
@@ -636,7 +708,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
             col = resolved_for_qid.get(qid)
-            if not col: 
+            if not col:
                 continue  # nothing to read for this question
             ans = row_answers.get(qid, "")
             if not ans:
@@ -745,9 +817,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
 # ==============================
 # EXPORTS / SHEETS
-# ==============================
-# ==============================
-# EXPORTS / SHEETS (cell-safe, chunked, budget-aware)
 # ==============================
 def _ensure_ai_last(df: pd.DataFrame,
                     export_name: str = "AI_Suspected",
@@ -923,7 +992,6 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
                             "Delete old tabs or use a new spreadsheet, then try again.")
                 else:
                     # We wrote some tabs already; inform about partial write
-                    written = sum(1 for _ in range(made_tabs))
                     return (True,
                             f"⚠️ Reached workbook cell limit after writing {made_tabs} tab(s). "
                             f"Only the first {row_idx} rows were uploaded.")
@@ -1013,12 +1081,22 @@ def main():
     # --- Header card ---
     st.markdown("""
         <div class="app-header-card">
-            <div class="pill">Growth Mindset • Auto Scoring</div>
-            <h1>Growth Mindset</h1>
-            <p class="app-header-subtitle">
-                Automatically score Kobo submissions, detect AI-generated answers, and export tidy reports
-                for CARE staff growth mindset assessments.
-            </p>
+            <div class="header-title-row">
+                <div>
+                    <div class="pill">
+                        <span>CARE Uganda</span> • <span>Growth Mindset</span>
+                    </div>
+                    <h1>Growth Mindset Scoring</h1>
+                    <p class="app-header-subtitle">
+                        Automatically score Kobo submissions, detect AI-generated answers,
+                        and export clean reports to support CARE staff growth mindset assessments.
+                    </p>
+                </div>
+                <div class="header-badge">
+                    <span class="header-badge-label">Status</span>
+                    <span class="header-badge-text">Live • v1.0</span>
+                </div>
+            </div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -1048,7 +1126,7 @@ def main():
 
     # --- Section: Raw fetched dataset ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📥 Fetched dataset")
+    st.subheader("📥 Fetched dataset (all rows)")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
     st.dataframe(df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1060,17 +1138,17 @@ def main():
     st.success("✅ Scoring complete.")
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📊 Scored table")
+    st.subheader("📊 Scored table (all rows)")
     st.caption(
         "Date → Duration → Care_Staff, then source columns (excluded set removed), "
-        "per-question scores & rubrics, attribute averages, Overall score, Overall Rank, "
-        "and AI_suspected as the final column."
+        "per-question scores & rubrics, attribute averages, Overall, Overall Rank, and AI_suspected last."
     )
 
     # Optional: highlight AI-suspected rows
     def _highlight_ai(row):
         if "AI_suspected" in row and row["AI_suspected"]:
-            return ["background-color: #3f1d1d"] * len(row)  # subtle dark red tint
+            # soft warm tint for suspected rows
+            return ["background-color: #FEF3C7"] * len(row)
         return [""] * len(row)
 
     styled = scored.style.apply(_highlight_ai, axis=1)
@@ -1079,7 +1157,7 @@ def main():
 
     # --- Section: Downloads ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("⬇️ Export")
+    st.subheader("⬇️ Export scored data")
     st.caption("Download the scored results for further analysis or sharing.")
 
     col1, col2 = st.columns(2)
@@ -1101,8 +1179,11 @@ def main():
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- Optional: auto push message in its own card or under exports ---
     if AUTO_PUSH:
         with st.spinner("📤 Sending to Google Sheets..."):
             ok, msg = upload_df_to_gsheets(scored)
         (st.success if ok else st.error)(msg)
+
+
+if __name__ == "__main__":
+    main()
