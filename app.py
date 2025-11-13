@@ -4,33 +4,8 @@ import streamlit.components.v1 as components
 import importlib
 st.set_page_config(page_title="Thematic Analytics",  layout="wide")
 
-# === PAGES (make sure advisory.py exists in the same folder or is importable)
-
-# ----- optional cover -----
-# Full-bleed, true viewport cover (no scroll, no padding)
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important;
-  padding:0 !important; margin:0 !important; overflow:hidden !important;
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
 
 
-# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
-  overflow:hidden !important;
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
 
 # --- No-scroll COVER (white/grey background, CARE orange accents) ---
 COVER_HTML = """
