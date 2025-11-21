@@ -244,11 +244,7 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     if BULLET_RX.search(t):          score += 0.08
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits: score += min(0.24, 0.08*buzz_hits)
-    asl = _avg_sentence_len(t)
-    if   asl >= 26: score += 0.18
-    elif asl >= 18: score += 0.10
-    ttr = _type_token_ratio(t)
-    if ttr <= 0.45 and len(t) >= 180: score += 0.10
+    
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06: score += 0.10
@@ -1111,3 +1107,4 @@ def main():
         with st.spinner("📤 Sending to Google Sheets..."):
             ok, msg = upload_df_to_gsheets(scored)
         (st.success if ok else st.error)(msg)
+
