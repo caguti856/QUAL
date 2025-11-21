@@ -1092,7 +1092,7 @@ def main():
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("📥 Fetched dataset")
     st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Section: Scored table ---
@@ -1116,7 +1116,7 @@ def main():
         return [""] * len(row)
 
     styled = scored.style.apply(_highlight_ai, axis=1)
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(styled, width="stretch")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Section: Downloads ---
@@ -1131,16 +1131,18 @@ def main():
             data=to_excel_bytes(scored),
             file_name="Leadership_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
+
     with col2:
         st.download_button(
             "Download CSV",
             data=_ensure_ai_last(scored).to_csv(index=False).encode("utf-8"),
             file_name="Leadership_Scoring.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Optional: auto push to Google Sheets
@@ -1152,3 +1154,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
