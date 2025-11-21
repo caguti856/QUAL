@@ -223,17 +223,23 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
-# AI detection — strict, threshold-driven
-AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.62))
+# ==============================
+# AI DETECTION (aggressive)
+# ==============================
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+
 TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
+SYMBOL_RX          = re.compile(r"[—–\-]{2,}|[≥≤≧≦≈±×÷%]|[→←⇒↔↑↓]|[•●◆▶✓✔✗❌§†‡]", re.U)
+TIMEBOX_RX         = re.compile(r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)", re.I)
+AI_RX              = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
 AI_BUZZWORDS = {
-    "minimum viable", "feedback loop", "trade-off", "evidence-based",
-    "stakeholder alignment", "learners’ agency", "norm shifts",
-    "quick win", "low-lift", "scalable", "best practice"
+    "minimum viable","feedback loop","trade-off","evidence-based",
+    "stakeholder alignment","learners’ agency","norm shifts","quick win",
+    "low-lift","scalable","best practice","pilot theatre","timeboxed"
 }
-AI_HARD_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+
 
 # Google Sheets
 SCOPES = [
@@ -265,63 +271,25 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-def _avg_sentence_len(text: str) -> float:
-    s = re.split(r"[.!?]+", text)
-    s = [w for w in s if w.strip()]
-    if not s: return 0.0
-    tokens = re.findall(r"\w+", text)
-    return len(tokens) / max(len(s), 1)
 
-def _type_token_ratio(text: str) -> float:
-    toks = [t.lower() for t in re.findall(r"[a-z]+", text)]
-    if not toks: return 1.0
-    return len(set(toks)) / len(toks)
 
-def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str]]:
-    """
-    Return (score in 0..1, flags[]) — strict but fair.
-    We keep it threshold-only (no extra “two-cue” rule).
-    """
+def ai_signal_score(text: str, question_hint: str = "") -> float:
     t = clean(text)
-    flags = []
-    if not t:
-        return 0.0, flags
-
+    if not t: return 0.0
     score = 0.0
-
-    # 0) Hard cues (make it easier to flag truly AI answers)
-    if AI_HARD_RX.search(t):
-        score += 0.40
-        flags.append("hard:ai-self-declare")
-
-    # 1) Transition/list scaffolding
-    if TRANSITION_OPEN_RX.search(t):
-        score += 0.15
-        flags.append("style:transition-opening")
-    if LIST_CUES_RX.search(t):
-        score += 0.15
-        flags.append("style:list-cues")
-
-    # 2) Buzzword density
+    if SYMBOL_RX.search(t):   score += 0.35
+    if TIMEBOX_RX.search(t):  score += 0.15
+    if AI_RX.search(t):       score += 0.35
+    if TRANSITION_OPEN_RX.search(t): score += 0.12
+    if LIST_CUES_RX.search(t):       score += 0.12
+    if BULLET_RX.search(t):          score += 0.08
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
-    if buzz_hits >= 1:
-        score += min(0.25, 0.08 * buzz_hits)
-        flags.append(f"lex:buzzwords({buzz_hits})")
-
-    # 3) Bulleted formatting
-    if BULLET_RX.search(t):
-        score += 0.08
-        flags.append("format:bullets")
-
-    # 6) Low Q/A overlap (generic answer)
+    if buzz_hits: score += min(0.24, 0.08*buzz_hits)
     if question_hint:
         overlap = qa_overlap(t, question_hint)
-        if overlap < 0.06:
-            score += 0.10
-            flags.append(f"qa:low-overlap({overlap:.2f})")
+        if overlap < 0.06: score += 0.10
+    return max(0.0, min(1.0, score))
 
-    score = max(0.0, min(1.0, score))
-    return score, flags
 
 def show_status(ok: bool, msg: str) -> None:
     (st.success if ok else st.error)(msg)
