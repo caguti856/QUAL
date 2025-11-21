@@ -314,11 +314,7 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
         "pilot theatre","timeboxed"
     } if b in t.lower())
     if buzz_hits:                            score += min(0.24, 0.08*buzz_hits)
-    asl = _avg_sentence_len(t)
-    if   asl >= 26:                          score += 0.18
-    elif asl >= 18:                          score += 0.10
-    ttr = _type_token_ratio(t)
-    if ttr <= 0.45 and len(t) >= 180:        score += 0.10
+    
     if question_hint and qa_overlap(t, question_hint) < 0.06:
                                              score += 0.10
     return max(0.0, min(1.0, score))
@@ -1080,3 +1076,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
