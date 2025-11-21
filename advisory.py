@@ -313,21 +313,6 @@ def ai_signal_score(text: str, question_hint: str = "") -> tuple[float, list[str
         score += 0.08
         flags.append("format:bullets")
 
-    # 4) Long, polished sentences
-    asl = _avg_sentence_len(t)
-    if asl >= 26:
-        score += 0.18
-        flags.append(f"syntax:long(~{int(asl)})")
-    elif asl >= 18:
-        score += 0.10
-        flags.append(f"syntax:moderate(~{int(asl)})")
-
-    # 5) Low lexical variety in longer text
-    ttr = _type_token_ratio(t)
-    if ttr <= 0.45 and len(t) >= 180:
-        score += 0.10
-        flags.append(f"lex:low-variety({ttr:.2f})")
-
     # 6) Low Q/A overlap (generic answer)
     if question_hint:
         overlap = qa_overlap(t, question_hint)
