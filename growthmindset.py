@@ -196,7 +196,7 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # ==============================
-# AI DETECTION (same style)
+# AI DETECTION (aggressive)
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
@@ -212,6 +212,7 @@ AI_BUZZWORDS = {
     "low-lift","scalable","best practice","pilot theatre","timeboxed"
 }
 
+
 def clean(s):
     if s is None: return ""
     s = unicodedata.normalize("NFKC", str(s))
@@ -222,15 +223,7 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-def _avg_sentence_len(text: str) -> float:
-    sents = [s for s in re.split(r"[.!?]+", text or "") if s.strip()]
-    if not sents: return 0.0
-    toks = re.findall(r"\w+", text or "")
-    return len(toks) / max(len(sents), 1)
 
-def _type_token_ratio(text: str) -> float:
-    toks = [t.lower() for t in re.findall(r"[a-z]+", text or "")]
-    return 1.0 if not toks else len(set(toks))/len(toks)
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
     t = clean(text)
@@ -244,11 +237,11 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     if BULLET_RX.search(t):          score += 0.08
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits: score += min(0.24, 0.08*buzz_hits)
-    
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06: score += 0.10
     return max(0.0, min(1.0, score))
+
 
 # ==============================
 # KOBO
@@ -1107,4 +1100,3 @@ def main():
         with st.spinner("📤 Sending to Google Sheets..."):
             ok, msg = upload_df_to_gsheets(scored)
         (st.success if ok else st.error)(msg)
-
