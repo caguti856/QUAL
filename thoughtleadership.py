@@ -260,15 +260,7 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
-def _avg_sentence_len(text: str) -> float:
-    sents = [s for s in re.split(r"[.!?]+", text or "") if s.strip()]
-    if not sents: return 0.0
-    toks = re.findall(r"\w+", text or "")
-    return len(toks) / max(len(sents), 1)
 
-def _type_token_ratio(text: str) -> float:
-    toks = [t.lower() for t in re.findall(r"[a-z]+", text or "")]
-    return 1.0 if not toks else len(set(toks))/len(toks)
 
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
