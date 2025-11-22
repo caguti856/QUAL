@@ -200,6 +200,11 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
+# ==============================
+# AI HEURISTICS (refined)
+# ==============================
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+
 TRANSITION_OPEN_RX = re.compile(
     r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
     re.I
@@ -211,19 +216,31 @@ BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
 LONG_DASH_HARD_RX  = re.compile(r"[—–]")
 
 # Symbols (now also picks up __, --- etc.)
-SYMBOL_RX          = re.compile(
-    r"[—–\-_]{2,}"                # runs of dashes or underscores
-    r"|[≥≤≧≦≈±×÷%]"               # math-ish symbols
-    r"|[→←⇒↔↑↓]"                  # arrows
-    r"|[•●◆▶✓✔✗❌§†‡]",           # bullets / ticks / section marks
+SYMBOL_RX = re.compile(
+    r"[—–\-_]{2,}"         # runs of dashes or underscores: --, —-, ___
+    r"|[≥≤≧≦≈±×÷%]"        # math-ish symbols
+    r"|[→←⇒↔↑↓]"           # arrows
+    r"|[•●◆▶✓✔✗❌§†‡]",    # bullets / ticks / section marks
     re.U
 )
 
-TIMEBOX_RX         = re.compile(
-    r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
+# Time / duration cues
+TIMEBOX_RX = re.compile(
+    r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b"
+    r"|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
     re.I
 )
-AI_RX              = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+
+# Explicit AI confessions
+AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+
+# Planning / outline patterns
+DAY_RANGE_RX        = re.compile(r"\bday\s*\d+\s*[-–]\s*\d+\b", re.I)
+PIPE_LIST_RX        = re.compile(r"\s\|\s")  # " | " as section separator
+PARENS_ACRONYMS_RX  = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+).*?\)")
+# accepts 1.), 2) etc.
+NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
+SLASH_PAIR_RX       = re.compile(r"\b\w+/\w+\b")  # financially/economically
 
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
@@ -232,31 +249,15 @@ AI_BUZZWORDS = {
     "best practice", "pilot theatre", "timeboxed"
 }
 
-
+# ==============================
+# HELPERS
+# ==============================
 def clean(s):
     if s is None:
         return ""
-    # normalise unicode
     s = unicodedata.normalize("NFKC", str(s))
-    # normalise curly quotes so buzzwords match
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
-    # collapse whitespace
     return re.sub(r"\s+", " ", s).strip()
-
-def try_dt(x):
-    if pd.isna(x):
-        return None
-    if isinstance(x, (pd.Timestamp, datetime)):
-        return pd.to_datetime(x)
-    try:
-        return pd.to_datetime(str(x), errors="coerce")
-    except Exception:
-        return None
-
-def cos_sim(a, b):
-    if a is None or b is None:
-        return -1e9
-    return float(np.dot(a, b))
 
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
@@ -264,17 +265,21 @@ def qa_overlap(ans: str, qtext: str) -> float:
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
+    """
+    Heuristic AI-likeness score in [0,1].
+    You flag as AI when this >= AI_SUSPECT_THRESHOLD (e.g. 0.60).
+    """
     t = clean(text)
     if not t:
         return 0.0
 
-    # HARD RULE: if there is any long dash (— or –) anywhere in the answer,
-    # treat this as AI-like immediately.
+    # HARD RULE: any en/em dash anywhere → treat as AI-like
     if LONG_DASH_HARD_RX.search(t):
         return 1.0
 
     score = 0.0
 
+    # core symbol / structure cues
     if SYMBOL_RX.search(t):               score += 0.35
     if TIMEBOX_RX.search(t):              score += 0.15
     if AI_RX.search(t):                   score += 0.35
@@ -282,16 +287,38 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     if LIST_CUES_RX.search(t):            score += 0.12
     if BULLET_RX.search(t):               score += 0.08
 
-    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
+    # planning / outline patterns
+    if DAY_RANGE_RX.search(t):            score += 0.15   # "Day 1-10"
+    if PIPE_LIST_RX.search(t):            score += 0.10   # " | "
+    if PARENS_ACRONYMS_RX.search(t):      score += 0.10   # (FGDs, KII, ...)
+    if NUMBERED_BULLETS_RX.search(t):     score += 0.12   # 1.), 2)
+    if SLASH_PAIR_RX.search(t):           score += 0.08   # financially/economically
+
+    # combo bonus: if it really looks like a structured plan
+    hits = 0
+    for rx in (TIMEBOX_RX, DAY_RANGE_RX, PIPE_LIST_RX, NUMBERED_BULLETS_RX):
+        if rx.search(t):
+            hits += 1
+    if hits >= 2:
+        score += 0.25
+    if hits >= 3:
+        score += 0.15
+
+    # buzzwords
+    tl = t.lower()
+    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in tl)
     if buzz_hits:
         score += min(0.24, 0.08 * buzz_hits)
 
+    # off-topic generic answer → nudge up
     if question_hint:
         overlap = qa_overlap(t, question_hint)
         if overlap < 0.06:
             score += 0.10
 
+    # clamp to [0,1]
     return max(0.0, min(1.0, score))
+
 
 # ==============================
 # KOBO
