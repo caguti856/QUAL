@@ -229,16 +229,36 @@ MIN_QA_OVERLAP  = 0.05
 # ==============================
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
-TRANSITION_OPEN_RX = re.compile(r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b", re.I)
+TRANSITION_OPEN_RX = re.compile(
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
+    re.I
+)
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
-SYMBOL_RX          = re.compile(r"[—–\-]{2,}|[≥≤≧≦≈±×÷%]|[→←⇒↔↑↓]|[•●◆▶✓✔✗❌§†‡]", re.U)
-TIMEBOX_RX         = re.compile(r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)", re.I)
+
+# HARD trigger: any long dash (en/em)
+LONG_DASH_HARD_RX  = re.compile(r"[—–]")
+
+# SYMBOLS (includes underscores now)
+SYMBOL_RX          = re.compile(
+    r"[—–\-_]{2,}"                # long runs of dashes / underscores
+    r"|[≥≤≧≦≈±×÷%]"               # math-ish symbols
+    r"|[→←⇒↔↑↓]"                  # arrows
+    r"|[•●◆▶✓✔✗❌§†‡]",           # bullets / ticks / section marks
+    re.U
+)
+
+TIMEBOX_RX         = re.compile(
+    r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
+    re.I
+)
 AI_RX              = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
-    "stakeholder alignment", "learners’ agency", "norm shifts", "quick win",
-    "low-lift", "scalable", "best practice", "pilot theatre", "timeboxed"
+    "stakeholder alignment", "learners' agency", "learners’ agency",
+    "norm shifts", "quick win", "low-lift", "scalable",
+    "best practice", "pilot theatre", "timeboxed"
 }
 
 # Google Sheets
@@ -254,7 +274,11 @@ DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
 def clean(s):
     if s is None:
         return ""
+    # normalise unicode
     s = unicodedata.normalize("NFKC", str(s))
+    # normalise curly quotes so buzzwords match
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
+    # collapse whitespace
     return re.sub(r"\s+", " ", s).strip()
 
 def try_dt(x):
@@ -280,26 +304,28 @@ def qa_overlap(ans: str, qtext: str) -> float:
 def ai_signal_score(text: str, question_hint: str = "") -> float:
     """
     Heuristic AI-likeness score in [0,1].
-    Higher = more suspicious.
+
+    Hard rule:
+      - If we see a long dash (en/em) in a non-trivial answer, treat it as AI-like (1.0).
+    Then:
+      - Additive evidence from symbols, timeboxing, buzzwords, list structure, etc.
     """
     t = clean(text)
     if not t:
         return 0.0
 
+    # HARD: long dash in a reasonably long answer => AI-like
+    if LONG_DASH_HARD_RX.search(t) and len(t.split()) >= 8:
+        return 1.0
+
     score = 0.0
 
-    if SYMBOL_RX.search(t):
-        score += 0.35
-    if TIMEBOX_RX.search(t):
-        score += 0.15
-    if AI_RX.search(t):
-        score += 0.35
-    if TRANSITION_OPEN_RX.search(t):
-        score += 0.12
-    if LIST_CUES_RX.search(t):
-        score += 0.12
-    if BULLET_RX.search(t):
-        score += 0.08
+    if SYMBOL_RX.search(t):               score += 0.35
+    if TIMEBOX_RX.search(t):              score += 0.15
+    if AI_RX.search(t):                   score += 0.35
+    if TRANSITION_OPEN_RX.search(t):      score += 0.12
+    if LIST_CUES_RX.search(t):            score += 0.12
+    if BULLET_RX.search(t):               score += 0.08
 
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in t.lower())
     if buzz_hits:
@@ -311,9 +337,6 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
             score += 0.10
 
     return max(0.0, min(1.0, score))
-
-def show_status(ok: bool, msg: str) -> None:
-    (st.success if ok else st.error)(msg)
 
 # ==============================
 # LOADERS
@@ -1196,7 +1219,7 @@ def main():
         if AUTO_PUSH:
             with st.spinner("📤 Sending scored table to Google Sheets..."):
                 ok, msg = upload_df_to_gsheets(scored_df)
-            show_status(ok, msg)
+                # (Optional: show msg with st.info/st.error if you want)
 
     # Auto-run or manual button
     if AUTO_RUN and not st.session_state.get("advisory_auto_ran_once"):
@@ -1219,7 +1242,7 @@ def main():
             st.write("Worksheet name:", DEFAULT_WS_NAME)
             if st.button("📤 Send scored table to Google Sheets", use_container_width=True):
                 ok, msg = upload_df_to_gsheets(st.session_state["scored_df"])
-                show_status(ok, msg)
+                # (Optional: display msg)
 
 if __name__ == "__main__":
     main()
