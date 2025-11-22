@@ -1,5 +1,7 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, Date→Duration→Care_Staff first, AI last)
-# Now with: auto-updating exemplars JSONL (GitHub or local), using non-AI responses as extra training data.
+# file: leadership.py — Thought Leadership Scoring
+# - Auto-run, full source columns, Date→Duration→Care_Staff first, AI last
+# - Uses semantic centroids + exemplars from JSONL
+# - Auto-updates exemplars JSONL (GitHub or local) using non-AI responses
 
 import streamlit as st
 import gspread
@@ -202,11 +204,13 @@ MAPPING_PATH    = DATASETS_DIR / "mapping1.csv"
 EXEMPLARS_PATH  = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
 # GitHub config for exemplars auto-update
-GITHUB_TOKEN            = st.secrets.get("GITHUB_TOKEN", "")
-GITHUB_REPO             = st.secrets.get("GITHUB_REPO", "")  # "owner/repo"
-GITHUB_EXEMPLARS_PATH   = st.secrets.get("GITHUB_EXEMPLARS_PATH", "DATASETS/thought_leadership.cleaned.jsonl")
-GITHUB_BRANCH           = st.secrets.get("GITHUB_BRANCH", "main")
-AUTO_UPDATE_EXEMPLARS   = bool(st.secrets.get("AUTO_UPDATE_EXEMPLARS", False))
+GITHUB_TOKEN          = st.secrets.get("GITHUB_TOKEN", "")
+GITHUB_REPO           = st.secrets.get("GITHUB_REPO", "")  # MUST be "owner/repo", e.g. "caguti856/QUAL"
+GITHUB_EXEMPLARS_PATH = st.secrets.get("GITHUB_EXEMPLARS_PATH", "DATASETS/thought_leadership.cleaned.jsonl")
+GITHUB_BRANCH         = st.secrets.get("GITHUB_BRANCH", "main")
+
+_raw_auto_update = st.secrets.get("AUTO_UPDATE_EXEMPLARS", False)
+AUTO_UPDATE_EXEMPLARS = str(_raw_auto_update).strip().lower() in ("1", "true", "yes", "y", "on")
 
 # ==============================
 # CONSTANTS
@@ -330,7 +334,7 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     if AI_RX.search(t):                   score += 0.35
     if TRANSITION_OPEN_RX.search(t):      score += 0.12
     if LIST_CUES_RX.search(t):            score += 0.12
-    if BULLET_RX.search(t):               score += 0.08
+    if BULLET_RX.search(t):              score += 0.08
 
     # planning / outline patterns
     if DAY_RANGE_RX.search(t):            score += 0.15
@@ -442,48 +446,42 @@ def read_jsonl_path(path: Path) -> list[dict]:
 # ------------ GitHub-aware exemplars I/O ------------
 
 def _github_headers():
-    # Only send Authorization if we actually have a token
-    headers = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return headers
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
 
 def _load_exemplars_from_github() -> tuple[list[dict], dict]:
     """
     Returns (rows, meta) where meta={'source':'github','sha':...}
-    Raises on hard failures.
+    More tolerant about encoding, so it won't raise 'Unexpected encoding'.
     """
-    # Explicitly pin branch with ?ref=
-    api_url = (
-        f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
-        f"{GITHUB_EXEMPLARS_PATH}?ref={GITHUB_BRANCH}"
-    )
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_EXEMPLARS_PATH}"
     r = requests.get(api_url, headers=_github_headers(), timeout=60)
     r.raise_for_status()
     info = r.json()
 
-    content_b64 = info.get("content", "")
-    encoding = info.get("encoding", "base64")
+    content = info.get("content", "")
+    encoding = info.get("encoding")  # usually 'base64'
 
-    # Normal GitHub behaviour: base64-encoded file content
-    if encoding == "base64":
+    # Normal GitHub case: base64
+    if encoding == "base64" and content:
         try:
-            text = base64.b64decode(content_b64.encode("utf-8")).decode("utf-8")
-        except Exception as e:
-            raise ValueError(f"Failed to decode base64 content from GitHub: {e}") from e
+            text_bytes = base64.b64decode(content)
+        except Exception:
+            # fallback: treat as plain utf-8 text
+            text_bytes = content.encode("utf-8", errors="ignore")
     else:
-        # Be tolerant: treat 'content' as already plain text
-        text = content_b64
+        # Some proxies/middleware might already give plain text
+        text_bytes = str(content).encode("utf-8", errors="ignore")
 
-    rows = []
+    text = text_bytes.decode("utf-8", errors="ignore")
+
+    rows: list[dict] = []
     for line in text.splitlines():
         s = line.strip()
         if s:
-            try:
-                rows.append(json.loads(s))
-            except json.JSONDecodeError:
-                # Skip bad lines but don't crash
-                continue
+            rows.append(json.loads(s))
 
     meta = {"source": "github", "sha": info.get("sha")}
     return rows, meta
@@ -525,14 +523,11 @@ def load_exemplars_any() -> tuple[list[dict], dict]:
     Load exemplars from GitHub if configured, else from local JSONL.
     Returns (rows, meta) where meta['source'] in {'github','local'}.
     """
-    # Try GitHub if repo + path are configured (token optional for public repos)
-    if GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
+    # Try GitHub if configured
+    if GITHUB_TOKEN and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
         try:
             rows, meta = _load_exemplars_from_github()
-            if rows:
-                return rows, meta
-            # If GitHub returned empty or unparsable, fall through to local
-            st.warning("GitHub exemplars file is empty or unreadable, falling back to local file.")
+            return rows, meta
         except Exception as e:
             st.warning(f"Couldn't load exemplars from GitHub, falling back to local file: {e}")
 
@@ -542,7 +537,7 @@ def load_exemplars_any() -> tuple[list[dict], dict]:
     return rows, meta
 
 def save_exemplars_any(exemplars: list[dict], meta: dict) -> tuple[bool, str]:
-    if meta.get("source") == "github" and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
+    if meta.get("source") == "github" and GITHUB_TOKEN and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
         return _save_exemplars_to_github(exemplars, meta)
     else:
         return _save_exemplars_to_local(EXEMPLARS_PATH, exemplars)
@@ -560,7 +555,7 @@ def filter_new_exemplars(existing: list[dict], candidates: list[dict]) -> list[d
         )
         seen.add(key)
 
-    new = []
+    new: list[dict] = []
     for c in candidates:
         key = (
             (c.get("question_id") or "").strip(),
@@ -933,7 +928,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
 
-                # --- candidate exemplar for this answer ---
+                # candidate exemplar for this answer
                 q_text_for_ex = qtext_cache.get(qkey, "") if qkey else ""
                 if not q_text_for_ex:
                     q_text_for_ex = qhint_full or qhint
@@ -1090,7 +1085,8 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
         ws.clear()
         ws.spreadsheet.values_batch_update(
-            body={"valueInputOption":"USER_ENTERED","data":[{"range": f"'{ws.title}'!A1","values":[header]+values}]}
+            body={"valueInputOption":"USER_ENTERED",
+                  "data":[{"range": f"'{ws.title}'!A1","values":[header]+values}]}
         )
         _post_write_formatting(ws, len(header))
         return True, f"✅ Wrote {len(values)} rows × {len(header)} cols to '{ws.title}' (last='AI_Suspected')."
@@ -1125,12 +1121,16 @@ def main():
     try:
         exemplars, ex_meta = load_exemplars_any()
         if not exemplars:
-            st.error("Exemplars file is empty (GitHub + local).")
+            st.error("Exemplars file is empty.")
             return
-        st.caption(f"Exemplars loaded from {ex_meta.get('source','?')} — {len(exemplars)} rows.")
     except Exception as e:
         st.error(f"Failed to read exemplars: {e}")
         return
+
+    st.caption(
+        f"Exemplars loaded from: {ex_meta.get('source','?')} "
+        f"({len(exemplars)} rows)"
+    )
 
     with st.spinner("Building semantic centroids..."):
         q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
