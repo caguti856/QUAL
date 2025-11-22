@@ -791,6 +791,7 @@ def score_dataframe(
 
         per_attr = {}
         any_ai_suspected = False  # row-level
+        row_ai_score_max = 0.0    # track max AI score per row
 
         # cache question text per row for AI overlap
         qtext_cache = {}
@@ -807,9 +808,25 @@ def score_dataframe(
             if not ans:
                 continue
 
+            # ----- resolve question text for overlap / AI score -----
+            qkey = resolve_qkey(
+                q_centroids, by_qkey, question_texts, qid, qhint
+            )
+            if qkey and qkey not in qtext_cache:
+                qtext_cache[qkey] = (
+                    by_qkey.get(qkey, {}) or {}
+                ).get("question_text", "")
+            qtext_for_ai = qtext_cache.get(qkey, "") if qkey else qhint
+
+            # ----- AI detection on EVERY mapped answer -----
+            ai_score = ai_signal_score(ans, qtext_for_ai)
+            row_ai_score_max = max(row_ai_score_max, ai_score)
+            if ai_score >= AI_SUSPECT_THRESHOLD:
+                any_ai_suspected = True
+
+            # from here on, we only do centroid scoring for Q1..Q4
             vec = embed_cached(ans)
 
-            # only Q1..Q4
             qn = None
             if "_Q" in (qid or ""):
                 try:
@@ -820,15 +837,6 @@ def score_dataframe(
                 continue
 
             # ----- centroid scoring -----
-            qkey = resolve_qkey(
-                q_centroids, by_qkey, question_texts, qid, qhint
-            )
-            if qkey and qkey not in qtext_cache:
-                qtext_cache[qkey] = (
-                    by_qkey.get(qkey, {}) or {}
-                ).get("question_text", "")
-            qtext_for_ai = qtext_cache.get(qkey, "") if qkey else qhint
-
             sc = None
             if vec is not None:
                 sims_q = {
@@ -863,11 +871,6 @@ def score_dataframe(
                     if qa_overlap(ans, qtext_for_ai or qhint) < MIN_QA_OVERLAP:
                         sc = min(sc, 1)
 
-            # ----- AI detection (per answer → roll up row-level) -----
-            ai_score = ai_signal_score(ans, qtext_for_ai)
-            if ai_score >= AI_SUSPECT_THRESHOLD:
-                any_ai_suspected = True
-
             # ----- write score -----
             sk = f"{attr}_Qn{qn}"
             rk = f"{attr}_Rubric_Qn{qn}"
@@ -888,7 +891,7 @@ def score_dataframe(
                 out[f"{attr}_Avg (0–3)"] = ""
                 out[f"{attr}_RANK"] = ""
             else:
-                avg = float(np.mean(scores))
+                avg  = float(np.mean(scores))
                 band = int(round(avg))
                 overall_total += band
                 out[f"{attr}_Avg (0–3)"] = round(avg, 2)
@@ -900,6 +903,7 @@ def score_dataframe(
              if lo <= overall_total <= hi),
             ""
         )
+        out["AI_score_max"] = round(row_ai_score_max, 3)
         out["AI_suspected"] = bool(any_ai_suspected)
         rows_out.append(out)
 
@@ -915,7 +919,7 @@ def score_dataframe(
                 ]
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
-        ordered += ["Overall Total (0–24)", "Overall Rank", "AI_suspected"]
+        ordered += ["Overall Total (0–24)", "Overall Rank", "AI_score_max", "AI_suspected"]
         extras = [c for c in cols if c not in ordered]
         return [c for c in ordered if c in cols] + extras
 
@@ -1085,6 +1089,22 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
 # ==============================
 # UI / MAIN
 # ==============================
+def _highlight_ai(row):
+    # Try AI_suspected first, then AI_Suspected
+    flag = row.get("AI_suspected", row.get("AI_Suspected", False))
+    # make sure strings like "True"/"False" are handled
+    if isinstance(flag, str):
+        flag_bool = flag.strip().lower() in ("true", "1", "yes", "y")
+    else:
+        try:
+            flag_bool = bool(flag)
+        except Exception:
+            flag_bool = False
+
+    if flag_bool:
+        return ["background-color: #241E4E"] * len(row)
+    return [""] * len(row)
+
 def main():
     inject_css()
 
@@ -1144,11 +1164,6 @@ def main():
         st.success("✅ Scoring complete.")
 
         # --- highlight AI-suspected rows ---
-        def _highlight_ai(row):
-            if "AI_suspected" in row and row["AI_suspected"]:
-                return ["background-color: #241E4E"] * len(row)
-            return [""] * len(row)
-
         styled = scored_df.style.apply(_highlight_ai, axis=1)
 
         # --- Section: scored table ---
@@ -1156,7 +1171,7 @@ def main():
         st.subheader("📊 Scored table")
         st.caption(
             "Date → Duration_min → Staff ID, then per-question scores & rubrics, "
-            "attribute averages, Overall score, Overall Rank, and AI_suspected last."
+            "attribute averages, Overall score, Overall Rank, AI_score_max, and AI_suspected."
         )
         st.dataframe(styled, use_container_width=True, height=420)
         st.markdown('</div>', unsafe_allow_html=True)
