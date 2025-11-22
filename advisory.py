@@ -236,12 +236,12 @@ TRANSITION_OPEN_RX = re.compile(
 LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
 BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
 
-# HARD trigger: any long dash (en/em)
+# Hard trigger: any long dash (en/em)
 LONG_DASH_HARD_RX  = re.compile(r"[—–]")
 
-# SYMBOLS (includes underscores now)
+# Symbols (now also picks up __, --- etc.)
 SYMBOL_RX          = re.compile(
-    r"[—–\-_]{2,}"                # long runs of dashes / underscores
+    r"[—–\-_]{2,}"                # runs of dashes or underscores
     r"|[≥≤≧≦≈±×÷%]"               # math-ish symbols
     r"|[→←⇒↔↑↓]"                  # arrows
     r"|[•●◆▶✓✔✗❌§†‡]",           # bullets / ticks / section marks
@@ -260,6 +260,7 @@ AI_BUZZWORDS = {
     "norm shifts", "quick win", "low-lift", "scalable",
     "best practice", "pilot theatre", "timeboxed"
 }
+
 
 # Google Sheets
 SCOPES = [
@@ -302,20 +303,13 @@ def qa_overlap(ans: str, qtext: str) -> float:
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
-    """
-    Heuristic AI-likeness score in [0,1].
-
-    Hard rule:
-      - If we see a long dash (en/em) in a non-trivial answer, treat it as AI-like (1.0).
-    Then:
-      - Additive evidence from symbols, timeboxing, buzzwords, list structure, etc.
-    """
     t = clean(text)
     if not t:
         return 0.0
 
-    # HARD: long dash in a reasonably long answer => AI-like
-    if LONG_DASH_HARD_RX.search(t) and len(t.split()) >= 8:
+    # HARD RULE: if there is any long dash (— or –) anywhere in the answer,
+    # treat this as AI-like immediately.
+    if LONG_DASH_HARD_RX.search(t):
         return 1.0
 
     score = 0.0
@@ -337,6 +331,7 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
             score += 0.10
 
     return max(0.0, min(1.0, score))
+
 
 # ==============================
 # LOADERS
