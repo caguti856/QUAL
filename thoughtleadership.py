@@ -442,30 +442,49 @@ def read_jsonl_path(path: Path) -> list[dict]:
 # ------------ GitHub-aware exemplars I/O ------------
 
 def _github_headers():
-    return {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
+    # Only send Authorization if we actually have a token
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
 
 def _load_exemplars_from_github() -> tuple[list[dict], dict]:
     """
     Returns (rows, meta) where meta={'source':'github','sha':...}
     Raises on hard failures.
     """
-    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_EXEMPLARS_PATH}"
+    # Explicitly pin branch with ?ref=
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
+        f"{GITHUB_EXEMPLARS_PATH}?ref={GITHUB_BRANCH}"
+    )
     r = requests.get(api_url, headers=_github_headers(), timeout=60)
     r.raise_for_status()
     info = r.json()
+
     content_b64 = info.get("content", "")
     encoding = info.get("encoding", "base64")
-    if encoding != "base64":
-        raise ValueError("Unexpected encoding on GitHub file")
-    text = base64.b64decode(content_b64.encode("utf-8")).decode("utf-8")
+
+    # Normal GitHub behaviour: base64-encoded file content
+    if encoding == "base64":
+        try:
+            text = base64.b64decode(content_b64.encode("utf-8")).decode("utf-8")
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 content from GitHub: {e}") from e
+    else:
+        # Be tolerant: treat 'content' as already plain text
+        text = content_b64
+
     rows = []
     for line in text.splitlines():
         s = line.strip()
         if s:
-            rows.append(json.loads(s))
+            try:
+                rows.append(json.loads(s))
+            except json.JSONDecodeError:
+                # Skip bad lines but don't crash
+                continue
+
     meta = {"source": "github", "sha": info.get("sha")}
     return rows, meta
 
@@ -483,7 +502,7 @@ def _save_exemplars_to_github(exemplars: list[dict], meta: dict) -> tuple[bool, 
         payload["sha"] = sha
     try:
         r = requests.put(api_url, headers=_github_headers(), json=payload, timeout=60)
-        if r.status_code >= 200 and r.status_code < 300:
+        if 200 <= r.status_code < 300:
             new_sha = r.json().get("content", {}).get("sha", sha)
             meta["sha"] = new_sha
             return True, "✅ Exemplars updated on GitHub."
@@ -506,11 +525,14 @@ def load_exemplars_any() -> tuple[list[dict], dict]:
     Load exemplars from GitHub if configured, else from local JSONL.
     Returns (rows, meta) where meta['source'] in {'github','local'}.
     """
-    # Try GitHub if configured
-    if GITHUB_TOKEN and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
+    # Try GitHub if repo + path are configured (token optional for public repos)
+    if GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
         try:
             rows, meta = _load_exemplars_from_github()
-            return rows, meta
+            if rows:
+                return rows, meta
+            # If GitHub returned empty or unparsable, fall through to local
+            st.warning("GitHub exemplars file is empty or unreadable, falling back to local file.")
         except Exception as e:
             st.warning(f"Couldn't load exemplars from GitHub, falling back to local file: {e}")
 
@@ -520,7 +542,7 @@ def load_exemplars_any() -> tuple[list[dict], dict]:
     return rows, meta
 
 def save_exemplars_any(exemplars: list[dict], meta: dict) -> tuple[bool, str]:
-    if meta.get("source") == "github" and GITHUB_TOKEN and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
+    if meta.get("source") == "github" and GITHUB_REPO and GITHUB_EXEMPLARS_PATH:
         return _save_exemplars_to_github(exemplars, meta)
     else:
         return _save_exemplars_to_local(EXEMPLARS_PATH, exemplars)
@@ -912,7 +934,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 per_attr.setdefault(attr, []).append(int(sc))
 
                 # --- candidate exemplar for this answer ---
-                # use question_text from exemplars mapping if possible, else prompt_hint
                 q_text_for_ex = qtext_cache.get(qkey, "") if qkey else ""
                 if not q_text_for_ex:
                     q_text_for_ex = qhint_full or qhint
@@ -1104,8 +1125,9 @@ def main():
     try:
         exemplars, ex_meta = load_exemplars_any()
         if not exemplars:
-            st.error("Exemplars file is empty.")
+            st.error("Exemplars file is empty (GitHub + local).")
             return
+        st.caption(f"Exemplars loaded from {ex_meta.get('source','?')} — {len(exemplars)} rows.")
     except Exception as e:
         st.error(f"Failed to read exemplars: {e}")
         return
