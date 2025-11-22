@@ -330,6 +330,21 @@ def clean(s):
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     return re.sub(r"\s+", " ", s).strip()
 
+def try_dt(x):
+    if pd.isna(x):
+        return None
+    if isinstance(x, (pd.Timestamp, datetime)):
+        return pd.to_datetime(x)
+    try:
+        return pd.to_datetime(str(x), errors="coerce")
+    except Exception:
+        return None
+
+def cos_sim(a, b):
+    if a is None or b is None:
+        return -1e9
+    return float(np.dot(a, b))
+
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
