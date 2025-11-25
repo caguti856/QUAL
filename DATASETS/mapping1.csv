@@ -1,0 +1,29 @@
+column,question_id,attribute,match_score,prompt_hint
+How will you articulate a scale vision that keeps Kujenga’s grassroots strengths at the core while enabling regional reach? Name the non-negotiables and where you’d flex.,LAV_Q1,Locally Anchored Visioning,100,
+Draft two sentences you’d use with senior leadership to hard-wire local leadership into partner ToRs and budgets.,LAV_Q2,Locally Anchored Visioning,100,
+What specific risks arise if you over-index on ‘formal partners’? How would you design safeguards to prevent community voice from being sidelined?,LAV_Q3,Locally Anchored Visioning,100,
+"If you had to trade one ambition for one protection, which would you trade—and why—in service of a locally led scale?",LAV_Q4,Locally Anchored Visioning,100,
+"Design a field-first learning loop for the next 60 days (sources, cadence, artifacts). Which signal would trigger a design sprint—and what would you change first?",II_Q1,Innovation and Insight,100,
+Share an example of an insight you expect from women’s groups that might contradict HQ assumptions. How will you surface and act on it quickly?,II_Q2,Innovation and Insight,100,
+"How will you balance policy alignment (e.g., Agro-Parks) with experimentation at village level without creating ‘pilot theatre’?",II_Q3,Innovation and Insight,100,
+Name one frugal innovation you’d test in a week to strengthen women’s market access—and how you’d judge it.,II_Q4,Innovation and Insight,100,
+"Map the execution spine: who owns supply-chain engagement, MEAL learning, community liaison, and escalation paths—by name and milestone.",EP_Q1,Execution Planning,100,
+"Draft a 90-day plan on a page (3 outcomes, 5 milestones, owners, decision gates). How will you expose slippage early?",EP_Q2,Execution Planning,100,
+Where is the highest likelihood of handoff failure between partners? What artifact or ritual will you introduce to close that gap?,EP_Q3,Execution Planning,100,
+"If you had to drop two activities to regain clarity, which go—and what stays?",EP_Q4,Execution Planning,100,
+"Design a one-day alignment workshop for MEAL, Grants, Ops, Gender Advisors, and partners: goals, agenda blocks, and outputs you expect to leave with.",CFC_Q1,Cross-Functional Collaboration,100,
+How will you resolve the MEAL vs. gender-focus tension without creating parallel systems?,CFC_Q2,Cross-Functional Collaboration,100,
+What are three shared principles you want all functions to adopt—and how will you test adherence in real work?,CFC_Q3,Cross-Functional Collaboration,100,
+"Describe a decision that must be co-owned, not approved, and how you’ll structure it.",CFC_Q4,Cross-Functional Collaboration,100,
+What does an executable promise look like here? Give one commitment you will publish weekly and how you’ll enforce it.,FTD_Q1,Follow-Through Discipline,100,
+"Build a light dashboard: three leading indicators, owners, and your escalation rule if a metric turns red.",FTD_Q2,Follow-Through Discipline,100,
+A partner misses two milestones: outline your recovery conversation and decision options.,FTD_Q3,Follow-Through Discipline,100,
+How will you prevent ‘update theatre’ and keep meetings decisional?,FTD_Q4,Follow-Through Discipline,100,
+"Set up a quarterly pause-and-reflect with Kujenga and regional partners. What questions will you ask, and how will you convert answers into signed changes?",LDA_Q1,Learning-Driven Adjustment,100,Thought/Learning_Driven_Adjustment/A6_1
+"Name one strategic hypothesis you hold today. What evidence would change your mind, and what would you do the day after it changes?",LDA_Q2,Learning-Driven Adjustment,100,Thought/Learning_Driven_Adjustment/A6_2
+"Describe how you’ll handle a negative finding (e.g., gender outcomes stalling) while protecting trust and momentum.",LDA_Q3,Learning-Driven Adjustment,100,Thought/Learning_Driven_Adjustment/A6_3
+What will you stop doing next quarter to fund the adaptations you need?,LDA_Q4,Learning-Driven Adjustment,100,Thought/Learning_Driven_Adjustment/Name_one_strategic_h_day_after_it_changes
+"Lay out a side-by-side of aligning with the Ministry’s Agro-Parks vs. protecting grassroots focus: costs/benefits, equity implications, execution risks. What’s your call—and why?",RDM_Q1,Result-Oriented Decision-Making,100,
+"You must decide by Friday: which two data points do you still need, from whom, and what is your fallback if they don’t arrive?",RDM_Q2,Result-Oriented Decision-Making,100,
+"How will you socialize a hard trade-off, so partners feel informed and respected, even if they disagree?",RDM_Q3,Result-Oriented Decision-Making,100,
+"If regions diverge, what decision rule keeps coherence without killing local initiative?",RDM_Q4,Result-Oriented Decision-Making,100,
