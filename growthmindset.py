@@ -725,7 +725,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
             ans = row_answers.get(qid, "")
 
-            # NEW: handle nullish answers (blank, "none", 1 short word, etc.)
+            # nullish answers → hard 0
             if is_nullish_answer(ans):
                 qn = None
                 if "_Q" in (qid or ""):
@@ -739,7 +739,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     row[sk] = 0
                     row[rk] = BANDS[0]
                     per_attr.setdefault(attr, []).append(0)
-                # skip embeddings + AI detection for nullish
                 continue
 
             if not ans:
@@ -796,21 +795,39 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        overall_total = 0
+        # --- Overall totals (0–24) ---
+        # 1) Compute per-attribute averages + ranks
+        # 2) Sum ALL question-level scores and normalise to a 0–24 scale
+        overall_raw_total = 0   # sum of all 0–3 question scores
+        total_q_count      = 0  # number of scored questions
+
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
             if not scores:
                 row[f"{attr}_Avg (0–3)"] = ""
                 row[f"{attr}_RANK"]      = ""
             else:
-                avg = float(np.mean(scores))
+                avg  = float(np.mean(scores))
                 band = int(round(avg))
-                overall_total += band
                 row[f"{attr}_Avg (0–3)"] = round(avg, 2)
                 row[f"{attr}_RANK"]      = BANDS[band]
 
+                overall_raw_total += sum(scores)
+                total_q_count      += len(scores)
+
+        if total_q_count > 0:
+            # Maximum raw = 3 * number of answered questions
+            max_possible_raw = 3 * total_q_count
+            scaled = (overall_raw_total / max_possible_raw) * 4.0
+            overall_total = int(round(scaled))
+        else:
+            overall_total = 0
+
         row["Overall Total (0–24)"] = overall_total
-        row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        row["Overall Rank"] = next(
+            (label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi),
+            ""
+        )
         row["AI_suspected"] = bool(any_ai)
         out_rows.append(row)
 
