@@ -197,7 +197,7 @@ AUTO_RUN        = True  # no buttons
 
 DATASETS_DIR    = Path("DATASETS")
 MAPPING_PATH    = DATASETS_DIR / "mapping1.csv"
-EXEMPLARS_PATH  = DATASETS_DIR / "thought_leadership.jsonl"
+EXEMPLARS_PATH  = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
 # ==============================
 # CONSTANTS
@@ -1073,4 +1073,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
