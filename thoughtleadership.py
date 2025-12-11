@@ -1,5 +1,3 @@
-# file: leadership.py — Thought Leadership Scoring (auto-run, full source columns, Date→Duration→Care_Staff first, AI last)
-
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -13,6 +11,8 @@ import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import fuzz, process
+from sklearn.linear_model import LogisticRegression  # <-- NEW
+
 def inject_css():
     st.markdown("""
         <style>
@@ -185,6 +185,7 @@ def inject_css():
         header { visibility: hidden; }
         </style>
     """, unsafe_allow_html=True)
+
 # ==============================
 # SECRETS / PATHS
 # ==============================
@@ -296,7 +297,21 @@ def clean(s):
     s = unicodedata.normalize("NFKC", str(s))
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     return re.sub(r"\s+", " ", s).strip()
+def is_null_or_one_word(text: str) -> bool:
+    """
+    Treat empty / NULL / None / NA / single-word answers as '0-score' answers.
+    """
+    t = clean(text)
+    if not t:
+        return True
 
+    tl = t.lower()
+    if tl in {"none", "null", "n/a", "na", "-", "--"}:
+        return True
+
+    # Count "words" (letters/digits). If only one or zero -> too short, score 0.
+    tokens = re.findall(r"\w+", t)
+    return len(tokens) <= 1
 def qa_overlap(ans: str, qtext: str) -> float:
     at = set(re.findall(r"\w+", (ans or "").lower()))
     qt = set(re.findall(r"\w+", (qtext or "").lower()))
@@ -432,7 +447,7 @@ def build_kobo_base_from_qid(question_id: str) -> list[str] | None:
     prefix = qid.split("_Q")[0]
     sect = QID_PREFIX_TO_SECTION.get(prefix)
     if not sect: return None
-    token = f"{sect}_{qn}"
+    token = f"{sect}_{qn}"""
     roots = ["Thought Leadership", "Leadership"]
     return [f"{root}/{sect}_Section/{token}" for root in roots]
 
@@ -574,11 +589,51 @@ def resolve_qkey(q_centroids, by_qkey, question_texts, qid: str, prompt_hint: st
     return None
 
 # ==============================
+# NEW: TRAIN LOGISTIC REGRESSION CLASSIFIER
+# ==============================
+def train_score_classifier(exemplars: list[dict]) -> LogisticRegression | None:
+    """
+    Train a simple multinomial logistic regression classifier on top of
+    SentenceTransformer embeddings of CONTEXT:
+    "Question: ... Attribute: ... Answer: ..."
+    """
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    ctx_texts = []
+    labels = []
+    for e in exemplars:
+        qtext = clean(e.get("question_text",""))
+        attr  = clean(e.get("attribute",""))
+        txt   = clean(e.get("text",""))
+        if not txt:
+            continue
+        score = int(e.get("score",0))
+        ctx = f"Question: {qtext}\nAttribute: {attr}\nAnswer: {txt}"
+        ctx_texts.append(ctx)
+        labels.append(score)
+    if not ctx_texts:
+        return None
+    try:
+        X = embedder.encode(
+            ctx_texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False
+        )
+        y = np.array(labels, dtype=int)
+        clf = LogisticRegression(multi_class="multinomial", max_iter=1000)
+        clf.fit(X, y)
+        return clf
+    except Exception as e:
+        st.warning(f"Could not train logistic regression scorer; using centroid-only scoring. ({e})")
+        return None
+
+# ==============================
 # SCORING (per-question + averages; with passthrough)
 # ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_centroids, attr_centroids, global_centroids,
-                    by_qkey, question_texts):
+                    by_qkey, question_texts,
+                    clf: LogisticRegression | None = None):
 
     df_cols = list(df.columns)
 
@@ -641,13 +696,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     else:
         end_dt = pd.Series([pd.NaT] * n_rows)
 
-    # Exact duration in minutes (including seconds)
-        # Duration in minutes (float), then clipped and rounded later per-row
+    # Duration in minutes (float), then clipped and rounded later per-row
     duration_min = (end_dt - start_dt).dt.total_seconds() / 60.0
     # Avoid negative values if timestamps are odd
     duration_min = duration_min.clip(lower=0)
-
-
 
     # mapping resolution
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
@@ -658,7 +710,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
         if hit: resolved_for_qid[qid] = hit
 
-    # batch-embed all distinct answers once
+    # batch-embed all distinct answers once (for centroid path)
     distinct_answers = set()
     for _, row in df.iterrows():
         for r in all_mapping:
@@ -667,6 +719,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 a = clean(row.get(col, ""))
                 if a: distinct_answers.add(a)
     embed_many(list(distinct_answers))
+
+    embedder_for_clf = get_embedder() if clf is not None else None
 
     out_rows = []
     for i, resp in df.iterrows():
@@ -707,7 +761,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if not col: continue
             ans = row_answers.get(qid, "")
             if not ans: continue
-            vec = emb_of(ans)
+
+            vec = emb_of(ans)  # still used for centroid path
 
             qkey = resolve_qkey(q_centroids, by_qkey, question_texts, qid, qhint)
             if qkey and qkey not in qtext_cache:
@@ -715,7 +770,25 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             qhint_full = qtext_cache.get(qkey, "") if qkey else qhint
 
             sc = None
-            if vec is not None:
+
+            # ---- Primary: logistic regression classifier if available ----
+            if clf is not None and embedder_for_clf is not None:
+                ctx_question = qhint_full or qhint or ""
+                ctx = f"Question: {ctx_question}\nAttribute: {attr}\nAnswer: {ans}"
+                try:
+                    vec_ctx = embedder_for_clf.encode(
+                        [ctx],
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                        show_progress_bar=False
+                    )[0]
+                    probs = clf.predict_proba(vec_ctx.reshape(1, -1))[0]
+                    sc = int(probs.argmax())
+                except Exception:
+                    sc = None  # fall back to centroid path
+
+            # ---- Fallback: original centroid-based scoring ----
+            if sc is None and vec is not None:
                 def best_sim(cent_dict):
                     best_s, best_v = None, -1e9
                     for s, c in cent_dict.items():
@@ -729,8 +802,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sc = best_sim(attr_centroids[attr])
                 if sc is None:
                     sc = best_sim(global_centroids)
-                if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
-                    sc = min(sc, 1)
+
+            # apply QA overlap clamp to whatever score we got
+            if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
+                sc = min(int(sc), 1)
 
             # per-answer AI suspicion
             ai_score = ai_signal_score(ans, qhint_full)
@@ -744,7 +819,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 except: qn = None
             if qn in (1,2,3,4) and sc is not None:
                 sk = f"{attr}_Qn{qn}"
-                rk = f"{attr}_Rubric_Qn{qn}"
+                rk = f"{attr}_Rubric_Qn{qn}"""
                 row[sk] = int(sc)
                 row[rk] = BANDS[int(sc)]
                 per_attr.setdefault(attr, []).append(int(sc))
@@ -925,6 +1000,10 @@ def main():
     with st.spinner("Building semantic centroids..."):
         q_c, a_c, g_c, by_q, qtexts = build_centroids(exemplars)
 
+    clf = None
+    with st.spinner("Training logistic regression scorer (0–3)..."):
+        clf = train_score_classifier(exemplars)
+
     with st.spinner("Fetching Kobo submissions..."):
         df = fetch_kobo_dataframe()
     if df.empty:
@@ -940,7 +1019,7 @@ def main():
 
     # --- Section: Scored table ---
     with st.spinner("Scoring (+ AI detection)..."):
-        scored = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts)
+        scored = score_dataframe(df, mapping, q_c, a_c, g_c, by_q, qtexts, clf)
 
     st.success("✅ Scoring complete.")
 
