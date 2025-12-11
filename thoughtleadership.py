@@ -203,10 +203,10 @@ EXEMPLARS_PATH  = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 # ==============================
 BANDS = {0:"Counterproductive",1:"Compliant",2:"Strategic",3:"Transformative"}
 OVERALL_BANDS = [
-    ("Exemplary Thought Leader", 21, 24),
-    ("Strategic Advisor",       16, 20),
-    ("Emerging Advisor",        10, 15),
-    ("Needs Capacity Support",   0,  9),
+    ("Exemplary Thought Leader", 19, 21),
+    ("Strategic Advisor",       14, 18),
+    ("Emerging Advisor",        8, 13),
+    ("Needs Capacity Support",   0,  7),
 ]
 ORDERED_ATTRS = [
     "Locally Anchored Visioning",
@@ -768,7 +768,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 row[f"{attr}_Avg (0–3)"] = round(avg, 2)
                 row[f"{attr}_RANK"]      = BANDS[band]
 
-        row["Overall Total (0–24)"] = overall_total
+        row["Overall Total (0–21)"] = overall_total
         row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
         row["AI_suspected"] = bool(any_ai)
         out_rows.append(row)
@@ -798,7 +798,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     ordered += [c for c in mid_a if c in res.columns]
 
     # 5) Overall then AI (AI must be right after Overall Rank AND be the last column)
-    ordered += [c for c in ["Overall Total (0–24)","Overall Rank"] if c in res.columns]
+    ordered += [c for c in ["Overall Total (0–21)","Overall Rank"] if c in res.columns]
     if "AI_suspected" in res.columns:
         ordered += ["AI_suspected"]
 
