@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import hashlib
@@ -26,15 +24,143 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 # UI / STYLING (minimal)
 # =============================================================================
 def inject_css():
-    st.markdown(
-        """
+    st.markdown("""
         <style>
-        [data-testid="stSidebar"] { display: none; }
-        .main .block-container { max-width: 1200px; padding-top: 1.2rem; }
+        :root {
+            /* Brand colours */
+            --primary: #F26A21;            /* CARE orange */
+            --primary-soft: #FDE7D6;
+            --primary-soft-stronger: #FBD0AD;
+
+            --gold: #FACC15;
+            --gold-soft: #FEF9C3;
+            --silver: #E5E7EB;
+
+            --bg-main: #f5f5f5;
+            --card-bg: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border-subtle: #e5e7eb;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
+            color: var(--text-main);
+        }
+
+        [data-testid="stSidebar"] {
+            background: #111827;
+            border-right: 1px solid #1f2937;
+            color: #e5e7eb;
+        }
+        [data-testid="stSidebar"] * { color: #e5e7eb !important; }
+
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+
+        h1, h2, h3 {
+            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text-main);
+        }
+        h1 { font-size: 2.1rem; font-weight: 700; }
+        h2 { margin-top: 1.5rem; font-size: 1.3rem; }
+        p, span, label { color: var(--text-muted); }
+
+        .app-header-card {
+            position: relative;
+            background:
+                radial-gradient(circle at top left,
+                    rgba(242,106,33,0.15),
+                    rgba(250,204,21,0.06),
+                    #ffffff);
+            border-radius: 1.25rem;
+            padding: 1.4rem 1.6rem;
+            border: 1px solid rgba(148,163,184,0.6);
+            box-shadow: 0 18px 40px rgba(15,23,42,0.12);
+            margin-bottom: 1.4rem;
+            overflow: hidden;
+        }
+        .app-header-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            height: 3px;
+            background: linear-gradient(90deg,
+                var(--gold-soft),
+                var(--primary),
+                var(--silver),
+                var(--gold));
+            opacity: 0.95;
+        }
+        .app-header-card::after {
+            content: "";
+            position: absolute;
+            bottom: -40px;
+            right: -40px;
+            width: 140px;
+            height: 140px;
+            background: radial-gradient(circle,
+                rgba(250,204,21,0.35),
+                transparent 60%);
+            opacity: 0.7;
+        }
+        .app-header-subtitle { font-size: 0.9rem; color: var(--text-muted); }
+
+        .pill {
+            display: inline-block;
+            font-size: 0.75rem;
+            padding: 0.15rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(242,106,33,0.08);
+            border: 1px solid rgba(242,106,33,0.6);
+            color: #9A3412;
+            margin-bottom: 0.4rem;
+        }
+
+        .section-card {
+            background: var(--card-bg);
+            border-radius: 1rem;
+            border: 1px solid var(--border-subtle);
+            padding: 1rem 1.1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 18px 40px rgba(15,23,42,0.04);
+        }
+
+        .stDataFrame table {
+            font-size: 13px;
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-subtle);
+        }
+        .stDataFrame table thead tr th {
+            background-color: var(--primary-soft);
+            font-weight: 600;
+            color: #7c2d12;
+        }
+
+        .stDownloadButton button, .stButton button {
+            border-radius: 999px !important;
+            padding: 0.35rem 1.2rem !important;
+            font-weight: 600 !important;
+            border: 1px solid rgba(242,106,33,0.85) !important;
+            background: linear-gradient(135deg, var(--primary) 0%, #FB923C 100%) !important;
+            color: #FFFBEB !important;
+        }
+        .stDownloadButton button:hover, .stButton button:hover {
+            filter: brightness(1.03);
+            transform: translateY(-1px);
+            box-shadow: 0 12px 25px rgba(248,113,22,0.45);
+        }
+
+        .stAlert { border-radius: 0.8rem; }
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header { visibility: hidden; }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    """, unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -771,6 +897,17 @@ def main():
     inject_css()
     st.title("Thought Leadership • Fast Meaning Scoring")
 
+    # 1) Fetch Kobo FIRST so users see data immediately.
+    with st.spinner("Fetching Kobo submissions…"):
+        df = fetch_kobo_dataframe()
+    if df.empty:
+        st.warning("No Kobo submissions found (or Kobo credentials missing).")
+        return
+
+    st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns):,}")
+    st.dataframe(df, use_container_width=True)
+
+    # 2) Load mapping + exemplars (local files) next.
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
     except Exception as e:
@@ -786,18 +923,11 @@ def main():
         st.error(f"Failed to read exemplars: {e}")
         return
 
-    with st.spinner("Building exemplar packs (cached)…"):
+    # 3) Build packs (cached). This can be slow on the first run, fast afterwards.
+    with st.spinner("Preparing exemplar index (cached)…"):
         packs = build_packs(exemplars)
 
-    with st.spinner("Fetching Kobo submissions…"):
-        df = fetch_kobo_dataframe()
-    if df.empty:
-        st.warning("No Kobo submissions found.")
-        return
-
-    st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns):,}")
-    st.dataframe(df, use_container_width=True)
-
+    # 4) Score
     with st.spinner("Scoring (retrieve → rerank → meaning-cluster vote)…"):
         scored = score_dataframe(df, mapping, packs)
 
