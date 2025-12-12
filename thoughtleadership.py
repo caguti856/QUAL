@@ -11,6 +11,7 @@
 #
 # NOTE: This file is designed to be drop-in for your Streamlit deployment.
 #       Keep the same secrets keys you already have; new optional keys are documented below.
+from __future__ import annotations
 
 import json
 import re
@@ -18,7 +19,7 @@ import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -184,25 +185,33 @@ ORDERED_ATTRS = [
 ]
 
 # Similarity search / fusion
-KNN_K = int(st.secrets.get("KNN_K", 15))
-KNN_TEMP = float(st.secrets.get("KNN_TEMP", 0.07))
+KNN_K = int(st.secrets.get("KNN_K", 25))
+KNN_TEMP = float(st.secrets.get("KNN_TEMP", 0.09))
+
+# Sentence-level ensemble (prevents verbosity bias)
+MAX_SENTS_USED = int(st.secrets.get("MAX_SENTS_USED", 8))        # cap evidence sentences per answer
+SENT_MIN_WORDS = int(st.secrets.get("SENT_MIN_WORDS", 6))        # ignore very short sentences
+MMR_CANDIDATES = int(st.secrets.get("MMR_CANDIDATES", 80))       # candidate pool before diversity selection
+MMR_LAMBDA = float(st.secrets.get("MMR_LAMBDA", 0.72))           # 0..1, higher = prioritize relevance
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.85))         # exemplar similarity threshold for "same meaning"
+CONSENSUS_FLOOR = float(st.secrets.get("CONSENSUS_FLOOR", 0.55))  # if consensus below, don't allow score=3
 
 # Score fusion: how much weight to give KNN vs centroids
-CENTROID_ALPHA = float(st.secrets.get("CENTROID_ALPHA", 0.7))  # 0..1
+CENTROID_ALPHA = float(st.secrets.get("CENTROID_ALPHA", 0.60))  # 0..1
 
 # Duplicate reuse
 DUP_SIM = float(st.secrets.get("DUP_SIM", 0.94))
 
 # Off-topic detection (semantic, not just word overlap)
-OFFTOPIC_QSIM = float(st.secrets.get("OFFTOPIC_QSIM", 0.17))  # lower = less strict
-OFFTOPIC_CAP = int(st.secrets.get("OFFTOPIC_CAP", 1))  # cap score to <= this if off-topic
+OFFTOPIC_QSIM = float(st.secrets.get("OFFTOPIC_QSIM", 0.12))  # lower = less strict
+OFFTOPIC_CAP = int(st.secrets.get("OFFTOPIC_CAP", 2))  # cap score to <= this if off-topic
 
 # Lexical overlap only used as a weak signal (never alone to clamp)
-MIN_QA_OVERLAP = float(st.secrets.get("MIN_QA_OVERLAP", 0.02))
+MIN_QA_OVERLAP = float(st.secrets.get("MIN_QA_OVERLAP", 0.01))
 
 # Rubric override controls
 RUBRIC_OVERRIDE = bool(st.secrets.get("RUBRIC_OVERRIDE", True))
-RUBRIC_UPGRADE_CONF = float(st.secrets.get("RUBRIC_UPGRADE_CONF", 0.72))
+RUBRIC_UPGRADE_CONF = float(st.secrets.get("RUBRIC_UPGRADE_CONF", 0.65))
 RUBRIC_DOWNGRADE = bool(st.secrets.get("RUBRIC_DOWNGRADE", False))
 RUBRIC_SHOW_AUDIT = bool(st.secrets.get("RUBRIC_SHOW_AUDIT", False))
 
@@ -252,6 +261,298 @@ def qa_overlap(ans: str, qtext: str) -> float:
     qt = set(re.findall(r"\w+", q_s))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
 
+
+# =============================================================================
+# ADAPTIVE STRICTNESS (AUTOMATIC)
+# =============================================================================
+def _adaptive_thresholds(ans: str, ex_conf: float, qsim: float, lex: float) -> dict:
+    """
+    Automatically adjust strictness per answer.
+    Goals:
+      - Avoid false low scores for long, detailed paraphrases (common in your dataset)
+      - Still catch truly off-topic short answers
+      - Be more cautious when exemplar confidence is low
+    Returns a dict with:
+      off_topic_qsim, min_lex, cap, cap_now_rule (callable)
+    """
+    a = clean(ans)
+    n_chars = len(a)
+    n_words = len(_WORD_RX.findall(a))
+
+    # Base thresholds (lenient)
+    off_qsim = OFFTOPIC_QSIM          # default 0.12 in lenient file
+    min_lex  = MIN_QA_OVERLAP         # default 0.01 in lenient file
+    cap      = OFFTOPIC_CAP           # default 2 in lenient file
+
+    # If answer is long/detailed, relax topic thresholds (paraphrases)
+    if n_chars >= 180 or n_words >= 35:
+        off_qsim = min(off_qsim, 0.10)
+        min_lex  = min(min_lex, 0.008)
+        cap      = max(cap, 2)
+
+    # If answer is very short, tighten topic checks (likely off-topic / low effort)
+    if n_chars <= 70 or n_words <= 12:
+        off_qsim = max(off_qsim, 0.14)
+        min_lex  = max(min_lex, 0.015)
+        cap      = min(cap, 1)  # short off-topic should not exceed 1
+
+    # If exemplar confidence is low, be more willing to flag off-topic for review,
+    # but don't automatically cap unless it's also short or extremely off-topic.
+    low_conf = ex_conf is not None and ex_conf < 0.55
+
+    # Extremely off-topic semantic signal
+    extremely_off = (qsim is not None and qsim < (off_qsim - 0.05)) and (lex is not None and lex < (min_lex * 0.8))
+
+    def cap_now(score: int) -> bool:
+        if score is None:
+            return False
+        # Cap if:
+        #  - answer is short, OR
+        #  - extremely off-topic, OR
+        #  - model is trying to give 3 while topic is clearly low
+        if n_chars <= 120 or n_words <= 20:
+            return True
+        if extremely_off:
+            return True
+        if score >= 3 and qsim is not None and qsim < (off_qsim - 0.04):
+            return True
+        # If low confidence AND topic is low, cap only if score is high
+        if low_conf and score >= 2 and qsim is not None and qsim < off_qsim:
+            return True
+        return False
+
+    return {"off_qsim": off_qsim, "min_lex": min_lex, "cap": cap, "cap_now": cap_now}
+
+# =============================================================================
+# SENTENCE-LEVEL EXEMPLAR ENSEMBLE (KEY UPGRADE)
+# =============================================================================
+_SENT_SPLIT_RX = re.compile(r"(?<=[.!?])\s+|\n+")
+
+def split_sentences(text: str) -> List[str]:
+    """
+    Split into sentences/clauses robustly.
+    We also split on newlines. Very short fragments are filtered later.
+    """
+    t = clean(text)
+    if not t:
+        return []
+    parts = [p.strip() for p in _SENT_SPLIT_RX.split(t) if p and p.strip()]
+    return parts
+
+def _mmr_select(query_vec: np.ndarray, doc_vecs: np.ndarray, sims: np.ndarray, k: int, lam: float) -> np.ndarray:
+    """
+    Maximal Marginal Relevance selection to diversify top exemplars.
+    Works on a candidate set already sorted by similarity.
+    """
+    if doc_vecs.size == 0:
+        return np.zeros((0,), dtype=np.int64)
+    k = max(1, min(int(k), doc_vecs.shape[0]))
+    lam = float(np.clip(lam, 0.0, 1.0))
+
+    selected = []
+    selected_mask = np.zeros(doc_vecs.shape[0], dtype=bool)
+
+    # Precompute pairwise similarity on-demand against selected
+    for _ in range(k):
+        best_idx = None
+        best_score = -1e9
+        if not selected:
+            # pick most similar first
+            best_idx = int(np.argmax(sims))
+            selected.append(best_idx)
+            selected_mask[best_idx] = True
+            continue
+
+        sel_vecs = doc_vecs[selected]
+        # diversity term: max similarity to any already selected exemplar
+        div = np.max(doc_vecs @ sel_vecs.T, axis=1)  # (n,)
+        mmr = lam * sims - (1.0 - lam) * div
+        mmr[selected_mask] = -1e9
+        best_idx = int(np.argmax(mmr))
+        selected.append(best_idx)
+        selected_mask[best_idx] = True
+
+    return np.array(selected, dtype=np.int64)
+
+def _consensus_score(doc_vecs: np.ndarray, labels: np.ndarray, sim_thr: float) -> Tuple[float, float, int]:
+    """
+    Estimate "same meaning" consensus among selected exemplars.
+    We build a graph where edges connect exemplars with cosine sim >= sim_thr,
+    then take the largest connected component.
+    Returns: (consensus_share, purity, dominant_label)
+    """
+    n = doc_vecs.shape[0]
+    if n <= 1:
+        lab = int(labels[0]) if n == 1 else 0
+        return 1.0 if n == 1 else 0.0, 1.0 if n == 1 else 0.0, lab
+
+    sims = doc_vecs @ doc_vecs.T
+    adj = sims >= float(sim_thr)
+    np.fill_diagonal(adj, False)
+
+    # union-find
+    parent = np.arange(n, dtype=np.int64)
+    rank = np.zeros(n, dtype=np.int64)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            parent[ra] = rb
+        elif rank[ra] > rank[rb]:
+            parent[rb] = ra
+        else:
+            parent[rb] = ra
+            rank[ra] += 1
+
+    # connect edges
+    xs, ys = np.where(adj)
+    for a, b in zip(xs.tolist(), ys.tolist()):
+        union(a, b)
+
+    # component sizes
+    roots = np.array([find(i) for i in range(n)], dtype=np.int64)
+    unique, counts = np.unique(roots, return_counts=True)
+    largest_root = int(unique[int(np.argmax(counts))])
+    comp_idx = np.where(roots == largest_root)[0]
+    consensus_share = float(len(comp_idx) / n)
+
+    comp_labels = labels[comp_idx]
+    # purity in largest component
+    vals, cts = np.unique(comp_labels, return_counts=True)
+    dom_label = int(vals[int(np.argmax(cts))])
+    purity = float(np.max(cts) / len(comp_idx)) if len(comp_idx) else 0.0
+    return consensus_share, purity, dom_label
+
+def score_text_against_pack(pack, ans: str, ans_vec: np.ndarray):
+    """
+    Sentence-level ensemble scoring:
+      - Split answer into sentences (cap MAX_SENTS_USED)
+      - For each sentence, retrieve diverse top-k exemplars (MMR) from a candidate pool
+      - Convert exemplar similarities to a class distribution
+      - Average distributions across sentences (prevents length bias)
+      - Apply consensus penalty if exemplar meanings disagree
+    """
+    if pack is None or pack.vecs.size == 0 or ans_vec is None:
+        return None
+
+    sents = split_sentences(ans)
+    if not sents:
+        return None
+
+    # Filter short sentences and cap count by selecting most informative (by word count)
+    scored_sents = []
+    for s in sents:
+        w = len(_WORD_RX.findall(s))
+        if w >= SENT_MIN_WORDS:
+            scored_sents.append((w, s))
+    if not scored_sents:
+        # fallback to whole answer if nothing passes
+        scored_sents = [(len(_WORD_RX.findall(ans)), ans)]
+
+    scored_sents.sort(reverse=True, key=lambda x: x[0])
+    picked = [s for _, s in scored_sents[:MAX_SENTS_USED]]
+
+    embed_many(picked)
+    sent_vecs = []
+    for s in picked:
+        v = emb_of(s)
+        if v is not None:
+            sent_vecs.append(v)
+    if not sent_vecs:
+        # fallback to whole answer vector
+        sent_vecs = [ans_vec]
+
+    dists = []
+    max_sim_overall = -1.0
+    margin_overall = 0.0
+    consensus_penalties = []
+
+    for sv in sent_vecs:
+        sims_all = pack.vecs @ sv
+        if sims_all.size == 0:
+            continue
+
+        # Candidate pool
+        cN = max(10, min(int(MMR_CANDIDATES), sims_all.size))
+        cand_idx = np.argpartition(-sims_all, cN - 1)[:cN]
+        cand_idx = cand_idx[np.argsort(-sims_all[cand_idx])]
+
+        cand_vecs = pack.vecs[cand_idx]
+        cand_sims = sims_all[cand_idx]
+        # Select diverse top-k
+        k = max(1, min(int(KNN_K), cand_sims.size))
+        sel_local = _mmr_select(sv, cand_vecs, cand_sims, k=k, lam=MMR_LAMBDA)
+        sel_idx = cand_idx[sel_local]
+
+        top_sims = sims_all[sel_idx]
+        top_scores = pack.scores[sel_idx]
+
+        # Softmax weights over similarities
+        w = _softmax((top_sims - float(top_sims.max())) / float(KNN_TEMP))
+        dist = np.zeros(4, dtype=np.float32)
+        for s, wi in zip(top_scores, w):
+            s = int(s)
+            if 0 <= s <= 3:
+                dist[s] += float(wi)
+
+        # Centroid distribution as stabilizer
+        cent_sims = pack.centroids @ sv
+        cent_mask = (pack.counts >= 1).astype(np.float32)
+        cent_sims = cent_sims * cent_mask + (-10.0) * (1.0 - cent_mask)
+        cent_dist = _softmax(cent_sims / max(1e-6, float(KNN_TEMP)))
+
+        alpha = float(CENTROID_ALPHA)
+        if pack.vecs.shape[0] < 25:
+            alpha = min(0.9, max(alpha, 0.75))
+
+        dist = alpha * dist + (1.0 - alpha) * cent_dist
+        dist = dist / (dist.sum() + 1e-9)
+
+        # Consensus penalty: do selected exemplars agree on meaning?
+        sel_vecs = pack.vecs[sel_idx]
+        consensus_share, purity, dom_label = _consensus_score(sel_vecs, top_scores.astype(int), CLUSTER_SIM)
+        # penalty is higher when agreement is low
+        penalty = float(np.clip(1.0 - (0.65 * consensus_share + 0.35 * purity), 0.0, 0.6))
+        consensus_penalties.append(penalty)
+
+        dists.append(dist)
+
+        if float(top_sims.max()) > max_sim_overall:
+            max_sim_overall = float(top_sims.max())
+            if len(top_sims) >= 2:
+                margin_overall = float(np.sort(top_sims)[-1] - np.sort(top_sims)[-2])
+
+    if not dists:
+        return None
+
+    # Average across sentences (NO length bonus)
+    dist = np.mean(np.vstack(dists), axis=0)
+    dist = dist / (dist.sum() + 1e-9)
+
+    # Expected score and prediction
+    expected = float(np.dot(dist, np.arange(4)))
+    pred = int(np.clip(int(round(expected)), 0, 3))
+    conf = float(dist.max())
+
+    # Apply consensus penalty to confidence (not directly to score)
+    if consensus_penalties:
+        conf = float(np.clip(conf * (1.0 - float(np.mean(consensus_penalties))), 0.0, 1.0))
+
+    # Prevent easy "3" if consensus is weak overall (automatic)
+    if pred >= 3:
+        # derive a rough consensus from the averaged distribution dominance
+        if conf < CONSENSUS_FLOOR:
+            pred = 2
+
+    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=float(max_sim_overall), margin=float(margin_overall), method="sentence_mmr+centroid")
 
 # =============================================================================
 # AI DETECTION (your original logic, unchanged)
@@ -492,14 +793,14 @@ class ScoreDist:
     method: str                 # "knn+centroid" etc.
 
 @dataclass
-class ExemplarPack:
+class Any:
     vecs: np.ndarray            # (n, d)
     scores: np.ndarray          # (n,)
     texts: List[str]            # (n,)
     centroids: np.ndarray       # (4, d) normalized
     counts: np.ndarray          # (4,)
 
-def _build_pack(texts: List[str], scores: List[int]) -> ExemplarPack:
+def _build_pack(texts: List[str], scores: List[int]) -> Any:
     # de-dup exact pairs
     seen = set()
     tt, ss = [], []
@@ -548,7 +849,7 @@ def _build_pack(texts: List[str], scores: List[int]) -> ExemplarPack:
             # keep as zeros
             centroids[s] = np.zeros_like(centroids[s])
 
-    return ExemplarPack(vecs=mat, scores=scores_arr, texts=keep_t, centroids=centroids, counts=counts)
+    return Any(vecs=mat, scores=scores_arr, texts=keep_t, centroids=centroids, counts=counts)
 
 def build_exemplar_packs(exemplars: List[dict]):
     """Build packs by question_id and by attribute, plus global pack.
@@ -638,7 +939,7 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     ex = np.exp(x)
     return ex / (np.sum(ex) + 1e-9)
 
-def score_vec_against_pack(pack: ExemplarPack, vec: np.ndarray) -> Optional[ScoreDist]:
+def score_vec_against_pack(pack: Any, vec: np.ndarray) -> Optional['ScoreDist']:
     """Return a fused score distribution from top-k exemplars + per-score centroids."""
     if pack is None or pack.vecs.size == 0 or vec is None:
         return None
@@ -827,7 +1128,7 @@ def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: s
 # SCORE COMBINATION LOGIC
 # =============================================================================
 def _combine_scores(
-    ex: Optional[ScoreDist],
+    ex: Optional['ScoreDist'],
     rub_sc: int,
     rub_conf: float,
     rub_reason: str,
@@ -858,7 +1159,7 @@ def _combine_scores(
         return int(ex.pred), 0, float(ex.conf), "exemplar_only"
 
     # If exemplar confidence is low and rubric is confident, lean to rubric (upgrade common).
-    if ex.pred <= 1 and rub_sc >= 2 and rub_conf >= RUBRIC_UPGRADE_CONF and ex.conf < 0.70:
+    if ex.pred <= 1 and rub_sc >= 2 and rub_conf >= RUBRIC_UPGRADE_CONF and ex.conf < 0.88:
         overrides += 1
         return int(rub_sc), overrides, float(max(ex.conf, rub_conf)), "rubric_upgrade"
 
@@ -884,9 +1185,9 @@ def _combine_scores(
 def score_dataframe(
     df: pd.DataFrame,
     mapping: pd.DataFrame,
-    q_packs: Dict[str, ExemplarPack],
-    a_packs: Dict[str, ExemplarPack],
-    g_pack: ExemplarPack,
+    q_packs: Dict[str, Any],
+    a_packs: Dict[str, Any],
+    g_pack: Any,
     by_qkey: Dict[str, dict],
     question_texts: List[str],
 ) -> pd.DataFrame:
@@ -1046,7 +1347,7 @@ def score_dataframe(
                     reused = True
 
             # Exemplar scoring (question -> attribute -> global)
-            ex: Optional[ScoreDist] = None
+            ex: Optional['ScoreDist'] = None
             qkey = resolve_qkey(q_packs, by_qkey, question_texts, qid, qhint)
             qtext_full = ""
             if qkey:
@@ -1055,15 +1356,15 @@ def score_dataframe(
             if sc is None:
                 # Try question-specific pack
                 if qkey and qkey in q_packs:
-                    ex = score_vec_against_pack(q_packs[qkey], vec)
+                    ex = score_text_against_pack(q_packs[qkey], ans, vec)
 
                 # fallback: attribute pack
                 if ex is None and attr in a_packs:
-                    ex = score_vec_against_pack(a_packs[attr], vec)
+                    ex = score_text_against_pack(a_packs[attr], ans, vec)
 
                 # fallback: global pack
                 if ex is None:
-                    ex = score_vec_against_pack(g_pack, vec)
+                    ex = score_text_against_pack(g_pack, ans, vec)
 
             # Rubric
             rub_sc, rub_conf, rub_reason = rubric_validate(qid, ans)
@@ -1076,9 +1377,15 @@ def score_dataframe(
             if qv is not None:
                 qsim = float(np.dot(vec, qv))
                 lex = qa_overlap(ans, qref)
-                # Only declare off-topic if BOTH semantic similarity and lexical overlap are low.
-                if qsim < OFFTOPIC_QSIM and lex < MIN_QA_OVERLAP:
+
+                # Adaptive strictness per answer (automatic; no sidebar controls)
+                ex_conf_for_adapt = ex.conf if ex is not None else 0.0
+                thr = _adaptive_thresholds(ans, ex_conf_for_adapt, qsim, lex)
+
+                # Only declare off-topic if BOTH semantic similarity and lexical overlap are low (adaptive thresholds)
+                if qsim < thr["off_qsim"] and lex < thr["min_lex"]:
                     off_topic = True
+                    # NOTE: We only *cap* later if answer is short or exemplar confidence is low.
 
             # Combine
             if sc is None:
@@ -1086,10 +1393,13 @@ def score_dataframe(
                 override_count += overrides
                 sc = final_sc
 
-                # Off-topic cap (after combining)
+                # Off-topic handling (after combining)
+                # Automatic adaptive thresholds; no manual tuning required.
                 if off_topic:
-                    if sc > OFFTOPIC_CAP:
-                        sc = int(OFFTOPIC_CAP)
+                    ex_conf_for_adapt = ex.conf if ex is not None else 0.0
+                    thr = _adaptive_thresholds(ans, ex_conf_for_adapt, qsim, lex if qsim is not None else 0.0)
+                    if thr["cap_now"](sc) and sc > thr["cap"]:
+                        sc = int(thr["cap"])
                     needs_review = True
 
             # Cache scored result
