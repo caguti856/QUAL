@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -15,153 +14,42 @@ import pandas as pd
 import requests
 import streamlit as st
 
-import gspread
-from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 
 # =============================================================================
-# UI / STYLING (minimal)
+# UI / STYLING (minimal but nice)
 # =============================================================================
 def inject_css():
-    st.markdown("""
+    st.markdown(
+        """
         <style>
         :root {
-            /* Brand colours */
-            --primary: #F26A21;            /* CARE orange */
-            --primary-soft: #FDE7D6;
-            --primary-soft-stronger: #FBD0AD;
-
-            --gold: #FACC15;
-            --gold-soft: #FEF9C3;
-            --silver: #E5E7EB;
-
-            --bg-main: #f5f5f5;
-            --card-bg: #ffffff;
-            --text-main: #111827;
-            --text-muted: #6b7280;
-            --border-subtle: #e5e7eb;
+            --primary: #F26A21; /* CARE orange */
+            --bg: #F7F7F8;
+            --card: #ffffff;
+            --text: #111827;
+            --muted: #6b7280;
+            --border: #e5e7eb;
         }
-
-        [data-testid="stAppViewContainer"] {
-            background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
-            color: var(--text-main);
-        }
-
-        [data-testid="stSidebar"] {
-            background: #111827;
-            border-right: 1px solid #1f2937;
-            color: #e5e7eb;
-        }
-        [data-testid="stSidebar"] * { color: #e5e7eb !important; }
-
-        .main .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 3rem;
-            max-width: 1200px;
-        }
-
-        h1, h2, h3 {
-            font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-            color: var(--text-main);
-        }
-        h1 { font-size: 2.1rem; font-weight: 700; }
-        h2 { margin-top: 1.5rem; font-size: 1.3rem; }
-        p, span, label { color: var(--text-muted); }
-
-        .app-header-card {
-            position: relative;
-            background:
-                radial-gradient(circle at top left,
-                    rgba(242,106,33,0.15),
-                    rgba(250,204,21,0.06),
-                    #ffffff);
-            border-radius: 1.25rem;
-            padding: 1.4rem 1.6rem;
-            border: 1px solid rgba(148,163,184,0.6);
-            box-shadow: 0 18px 40px rgba(15,23,42,0.12);
-            margin-bottom: 1.4rem;
-            overflow: hidden;
-        }
-        .app-header-card::before {
-            content: "";
-            position: absolute;
-            inset: 0;
-            height: 3px;
-            background: linear-gradient(90deg,
-                var(--gold-soft),
-                var(--primary),
-                var(--silver),
-                var(--gold));
-            opacity: 0.95;
-        }
-        .app-header-card::after {
-            content: "";
-            position: absolute;
-            bottom: -40px;
-            right: -40px;
-            width: 140px;
-            height: 140px;
-            background: radial-gradient(circle,
-                rgba(250,204,21,0.35),
-                transparent 60%);
-            opacity: 0.7;
-        }
-        .app-header-subtitle { font-size: 0.9rem; color: var(--text-muted); }
-
-        .pill {
-            display: inline-block;
-            font-size: 0.75rem;
-            padding: 0.15rem 0.7rem;
-            border-radius: 999px;
-            background: rgba(242,106,33,0.08);
-            border: 1px solid rgba(242,106,33,0.6);
-            color: #9A3412;
-            margin-bottom: 0.4rem;
-        }
-
+        [data-testid="stAppViewContainer"] { background: var(--bg); color: var(--text); }
         .section-card {
-            background: var(--card-bg);
-            border-radius: 1rem;
-            border: 1px solid var(--border-subtle);
-            padding: 1rem 1.1rem;
-            margin-bottom: 1rem;
-            box-shadow: 0 18px 40px rgba(15,23,42,0.04);
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 14px 14px;
+            margin: 10px 0 14px 0;
         }
-
-        .stDataFrame table {
-            font-size: 13px;
-            border-radius: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--border-subtle);
+        .pill {
+            display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.7rem; border-radius: 999px;
+            background: rgba(242,106,33,0.08); border: 1px solid rgba(242,106,33,0.55);
+            color: #9A3412;
         }
-        .stDataFrame table thead tr th {
-            background-color: var(--primary-soft);
-            font-weight: 600;
-            color: #7c2d12;
-        }
-
-        .stDownloadButton button, .stButton button {
-            border-radius: 999px !important;
-            padding: 0.35rem 1.2rem !important;
-            font-weight: 600 !important;
-            border: 1px solid rgba(242,106,33,0.85) !important;
-            background: linear-gradient(135deg, var(--primary) 0%, #FB923C 100%) !important;
-            color: #FFFBEB !important;
-        }
-        .stDownloadButton button:hover, .stButton button:hover {
-            filter: brightness(1.03);
-            transform: translateY(-1px);
-            box-shadow: 0 12px 25px rgba(248,113,22,0.45);
-        }
-
-        .stAlert { border-radius: 0.8rem; }
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header { visibility: hidden; }
         </style>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # =============================================================================
@@ -170,30 +58,18 @@ def inject_css():
 KOBO_BASE = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID1 = st.secrets.get("KOBO_ASSET_ID1", "")
 KOBO_TOKEN = st.secrets.get("KOBO_TOKEN", "")
-AUTO_PUSH = bool(st.secrets.get("AUTO_PUSH", False))
 
 DATASETS_DIR = Path("DATASETS")
 MAPPING_PATH = DATASETS_DIR / "mapping1.csv"
 EXEMPLARS_PATH = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
-# Local/dev fallbacks
-if not MAPPING_PATH.exists():
-    alt = Path("/mnt/data/mapping1.csv")
-    if alt.exists():
-        MAPPING_PATH = alt
-if not EXEMPLARS_PATH.exists():
-    alt1 = Path("/mnt/data/thought_leadership.cleaned.jsonl")
-    alt2 = Path("/mnt/data/thought_leadership.jsonl")
-    if alt1.exists():
-        EXEMPLARS_PATH = alt1
-    elif alt2.exists():
-        EXEMPLARS_PATH = alt2
 
 
 # =============================================================================
-# SCORING CONSTANTS (AUTO)
+# CONFIG (fast defaults for your dataset size)
 # =============================================================================
 BANDS = {0: "Counterproductive", 1: "Compliant", 2: "Strategic", 3: "Transformative"}
+
 ORDERED_ATTRS = [
     "Locally Anchored Visioning",
     "Innovation and Insight",
@@ -204,28 +80,30 @@ ORDERED_ATTRS = [
     "Result-Oriented Decision-Making",
 ]
 
-# Retrieval + rerank
-TOPN_RETRIEVE = 70          # retrieve by embeddings (fast)
-TOPM_RERANK = 40            # rerank best M from retrieved (accurate)
-SEED_TRIES = 6              # cluster seeds tried from reranked list
-CLUSTER_SIM = 0.78          # cosine sim threshold among exemplars for "same meaning"
-MIN_CLUSTER = 4             # minimum exemplars in cluster to trust cluster vote
-RERANK_TEMP = 0.35          # softmax temperature over reranker scores (lower = sharper)
+# Retrieve + rerank sizes (fast + accurate)
+TOPN_RETRIEVE = int(st.secrets.get("TOPN_RETRIEVE", 50))   # embedding shortlist
+TOPM_RERANK = int(st.secrets.get("TOPM_RERANK", 12))       # cross-encoder rerank inside shortlist
+RERANK_BATCH = int(st.secrets.get("RERANK_BATCH", 96))     # cross-encoder batch size
 
-# Off-topic (very conservative)
-OFFTOPIC_QSIM = 0.06        # only if answer is truly unrelated
-OFFTOPIC_CAP = 2            # if off-topic, cap at <=2 (still not punitive)
+# Meaning cluster vote
+SEED_TRIES = int(st.secrets.get("SEED_TRIES", 4))
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 3))
+RERANK_TEMP = float(st.secrets.get("RERANK_TEMP", 0.35))
 
-# Model choices (fast + strong)
+# Off-topic: flag only (do not change score)
+OFFTOPIC_FLAG_QSIM = float(st.secrets.get("OFFTOPIC_FLAG_QSIM", 0.05))
+
+# Model choices (allow overriding in secrets)
+# If speed is still an issue, change BI_ENCODER_NAME to "intfloat/e5-small-v2"
 BI_ENCODER_NAME = st.secrets.get("BI_ENCODER_NAME", "intfloat/e5-base-v2")
 CROSS_ENCODER_NAME = st.secrets.get("CROSS_ENCODER_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-# Caches (disk)
+# Cache directories (single files, not many tiny files)
 CACHE_DIR = Path(st.secrets.get("TL_CACHE_DIR", ".tl_cache"))
-EMB_DIR = CACHE_DIR / "emb"
-RERANK_DIR = CACHE_DIR / "rerank"
 PACK_DIR = CACHE_DIR / "packs"
-for d in (EMB_DIR, RERANK_DIR, PACK_DIR):
+EMB_DIR = CACHE_DIR / "emb"
+for d in (PACK_DIR, EMB_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 PASSTHROUGH_HINTS = [
@@ -233,17 +111,17 @@ PASSTHROUGH_HINTS = [
     "submissiondate", "submission_date", "start", "_start", "end", "_end", "today", "date", "deviceid",
     "username", "enumerator", "submitted_via_web", "_xform_id_string", "formid", "assetid"
 ]
+
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id", "formhub/uuid", "start", "end", "today", "staff_id", "meta/instanceid",
     "_xform_id_string", "_uuid", "meta/rootuuid", "_submission_time", "_validation_status"
 }
 
 _WORD_RX = re.compile(r"\w+")
-_SENT_SPLIT_RX = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 # =============================================================================
-# TEXT HELPERS
+# HELPERS
 # =============================================================================
 def clean(s) -> str:
     if s is None:
@@ -264,21 +142,13 @@ def _sha1(s: str) -> str:
 def _softmax_temp(x: np.ndarray, temp: float) -> np.ndarray:
     x = x.astype(np.float32)
     t = max(1e-6, float(temp))
-    x = x / t
-    x = x - np.max(x)
-    ex = np.exp(x)
+    z = (x / t) - np.max(x / t)
+    ex = np.exp(z)
     return ex / (np.sum(ex) + 1e-9)
-
-def split_sentences(text: str) -> List[str]:
-    t = clean(text)
-    if not t:
-        return []
-    parts = [p.strip() for p in _SENT_SPLIT_RX.split(t) if p and p.strip()]
-    return parts
 
 
 # =============================================================================
-# MODELS (cached)
+# MODELS (cached in memory)
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_biencoder() -> SentenceTransformer:
@@ -291,21 +161,22 @@ def get_crossencoder() -> CrossEncoder:
 def _is_e5_model() -> bool:
     return "e5" in BI_ENCODER_NAME.lower()
 
-def _e5_prefix_query(t: str) -> str:
+def _e5_query(t: str) -> str:
     return f"query: {t}"
 
-def _e5_prefix_passage(t: str) -> str:
+def _e5_passage(t: str) -> str:
     return f"passage: {t}"
 
+
+# =============================================================================
+# EMBEDDINGS (disk cached, but as .npy per text — manageable at your size)
+# =============================================================================
 def _emb_cache_path(text: str, kind: str) -> Path:
-    # kind: "q" or "p"
-    return EMB_DIR / f"{_sha1(kind + '|' + BI_ENCODER_NAME + '|' + clean(text))}.npy"
+    # kind: "q" (answers/questions), "p" (exemplar passages)
+    key = _sha1(kind + "|" + BI_ENCODER_NAME + "|" + clean(text))
+    return EMB_DIR / f"{key}.npy"
 
 def embed_texts(texts: List[str], kind: str) -> Dict[str, np.ndarray]:
-    """
-    kind="q" for queries (answers/questions), kind="p" for passages (exemplars).
-    Uses disk cache; batch encodes cache misses.
-    """
     out: Dict[str, np.ndarray] = {}
     uniq = []
     seen = set()
@@ -330,7 +201,7 @@ def embed_texts(texts: List[str], kind: str) -> Dict[str, np.ndarray]:
     if missing:
         model = get_biencoder()
         if _is_e5_model():
-            enc_in = [_e5_prefix_query(t) if kind == "q" else _e5_prefix_passage(t) for t in missing]
+            enc_in = [_e5_query(t) if kind == "q" else _e5_passage(t) for t in missing]
         else:
             enc_in = missing
 
@@ -353,24 +224,15 @@ def embed_texts(texts: List[str], kind: str) -> Dict[str, np.ndarray]:
 
 
 # =============================================================================
-# EXEMPLAR PACKS
+# EXEMPLAR PACKS (per question_id; embeds ONLY exemplar 'text')
 # =============================================================================
 @dataclass
 class ExemplarPack:
-    vecs: np.ndarray     # (n, d) normalized, exemplar TEXT embeddings (passages)
-    scores: np.ndarray   # (n,) int 0..3
-    texts: List[str]     # exemplar answers
-    qtext: str           # question_text (routing/off-topic only)
-    attr: str            # attribute (output column grouping)
-
-@dataclass
-class ScoreDist:
-    dist: np.ndarray     # (4,)
-    expected: float
-    pred: int
-    conf: float
-    max_sim: float
-    method: str
+    vecs: np.ndarray           # (n, d) normalized
+    scores: np.ndarray         # (n,) int 0..3
+    texts: List[str]           # exemplar answers ("text")
+    qtext: str                 # question_text (for flagging only)
+    attr: str                  # attribute label
 
 def read_jsonl_path(path: Path) -> List[dict]:
     out = []
@@ -388,19 +250,16 @@ def read_jsonl_path(path: Path) -> List[dict]:
                 out.append(json.loads(s2))
     return out
 
-def _pack_cache_key(qid: str) -> Path:
-    return PACK_DIR / f"{_sha1(BI_ENCODER_NAME + '|' + qid)}.npz"
+def _pack_cache_path(qid: str) -> Path:
+    return PACK_DIR / f"{_sha1(BI_ENCODER_NAME + '|pack|' + qid)}.npz"
 
 def build_packs(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
-    """
-    Build one pack per question_id, embedding ONLY exemplar 'text'.
-    """
     by_q: Dict[str, dict] = {}
     for e in exemplars:
         qid = clean(e.get("question_id", ""))
         if not qid:
             continue
-        txt = clean(e.get("text", ""))
+        txt = clean(e.get("text", ""))  # IMPORTANT: compare against "text" ONLY
         if not txt:
             continue
         qtext = clean(e.get("question_text", ""))
@@ -410,6 +269,7 @@ def build_packs(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
         except Exception:
             sc = 0
         sc = int(np.clip(sc, 0, 3))
+
         d = by_q.setdefault(qid, {"texts": [], "scores": [], "qtext": qtext, "attr": attr})
         d["texts"].append(txt)
         d["scores"].append(sc)
@@ -420,7 +280,7 @@ def build_packs(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
     packs: Dict[str, ExemplarPack] = {}
     for qid, d in by_q.items():
-        cachep = _pack_cache_key(qid)
+        cachep = _pack_cache_path(qid)
         if cachep.exists():
             try:
                 npz = np.load(cachep, allow_pickle=True)
@@ -460,118 +320,7 @@ def build_packs(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
 
 # =============================================================================
-# RERANK CACHE
-# =============================================================================
-def _rerank_cache_path(qid: str, ans: str, ex_text: str) -> Path:
-    key = _sha1(CROSS_ENCODER_NAME + "|" + qid + "|" + clean(ans) + "|" + clean(ex_text))
-    return RERANK_DIR / f"{key}.txt"
-
-def rerank_pairs_cached(qid: str, ans: str, ex_texts: List[str]) -> np.ndarray:
-    """
-    Cross-encoder scores for (ans, exemplar_text) pairs with per-pair disk caching.
-    """
-    scores = np.empty(len(ex_texts), dtype=np.float32)
-    to_score = []
-    idxs = []
-    for i, t in enumerate(ex_texts):
-        p = _rerank_cache_path(qid, ans, t)
-        if p.exists():
-            try:
-                scores[i] = float(p.read_text().strip())
-                continue
-            except Exception:
-                pass
-        to_score.append((ans, t))
-        idxs.append(i)
-
-    if to_score:
-        ce = get_crossencoder()
-        preds = ce.predict(to_score, batch_size=64, show_progress_bar=False)
-        preds = np.array(preds, dtype=np.float32)
-        for i, v in zip(idxs, preds.tolist()):
-            scores[i] = float(v)
-            try:
-                _rerank_cache_path(qid, ans, ex_texts[i]).write_text(str(float(v)))
-            except Exception:
-                pass
-
-    return scores
-
-
-# =============================================================================
-# MEANING-CLUSTER VOTE SCORER
-# =============================================================================
-def score_answer(qid: str, ans: str, ans_vec: np.ndarray, pack: ExemplarPack) -> ScoreDist:
-    # retrieve
-    sims = pack.vecs @ ans_vec  # (n,)
-    n = sims.size
-    topn = min(TOPN_RETRIEVE, n)
-    idx = np.argpartition(-sims, topn - 1)[:topn]
-    idx = idx[np.argsort(-sims[idx])]
-
-    cand_texts = [pack.texts[i] for i in idx]
-    cand_scores = pack.scores[idx].astype(np.int32)
-    cand_vecs = pack.vecs[idx]
-
-    # rerank topm
-    topm = min(TOPM_RERANK, len(cand_texts))
-    cand_texts_m = cand_texts[:topm]
-    cand_scores_m = cand_scores[:topm]
-    cand_vecs_m = cand_vecs[:topm]
-
-    ce_scores = rerank_pairs_cached(qid, ans, cand_texts_m)  # (topm,)
-    w = _softmax_temp(ce_scores, RERANK_TEMP)
-
-    order = np.argsort(-ce_scores)
-    ce_scores = ce_scores[order]
-    w = w[order]
-    cand_scores_m = cand_scores_m[order]
-    cand_vecs_m = cand_vecs_m[order]
-    cand_texts_m = [cand_texts_m[i] for i in order]
-
-    # best coherent meaning cluster (seed-based threshold)
-    seeds = list(range(min(SEED_TRIES, topm)))
-    best_members = None
-    best_mass = -1.0
-    for s in seeds:
-        seed_vec = cand_vecs_m[s]
-        sim_to_seed = cand_vecs_m @ seed_vec
-        members = np.where(sim_to_seed >= CLUSTER_SIM)[0]
-        if members.size == 0:
-            continue
-        mass = float(np.sum(w[members]))
-        if mass > best_mass:
-            best_mass = mass
-            best_members = members
-
-    if best_members is None:
-        best_members = np.arange(topm, dtype=np.int64)
-
-    if best_members.size < MIN_CLUSTER:
-        best_members = np.arange(min(topm, max(MIN_CLUSTER, 10)), dtype=np.int64)
-
-    # vote inside cluster
-    dist = np.zeros(4, dtype=np.float32)
-    for i in best_members.tolist():
-        s = int(cand_scores_m[i])
-        if 0 <= s <= 3:
-            dist[s] += float(w[i])
-
-    if float(dist.sum()) <= 1e-8:
-        top_label = int(cand_scores_m[0]) if topm else 1
-        top_label = int(np.clip(top_label, 0, 3))
-        dist[top_label] = 1.0
-
-    dist = dist / (dist.sum() + 1e-9)
-    expected = float(np.dot(dist, np.arange(4)))
-    pred = int(np.clip(int(round(expected)), 0, 3))
-    conf = float(dist.max())
-    max_sim = float(sims[idx[0]]) if len(idx) else 0.0
-    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=max_sim, method="retrieve+rerank+cluster_vote")
-
-
-# =============================================================================
-# KOBO + MAPPING
+# KOBO
 # =============================================================================
 def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
@@ -581,6 +330,7 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     if not KOBO_ASSET_ID1 or not KOBO_TOKEN:
         st.warning("Set KOBO_ASSET_ID1 and KOBO_TOKEN in st.secrets.")
         return pd.DataFrame()
+
     headers = {"Authorization": f"Token {KOBO_TOKEN}"}
     for kind in ("submissions", "data"):
         url = kobo_url(KOBO_ASSET_ID1, kind)
@@ -600,9 +350,16 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
         except Exception as e:
             st.error(f"Kobo fetch failed: {type(e).__name__}: {e}")
             return pd.DataFrame()
+
     return pd.DataFrame()
 
+
+# =============================================================================
+# MAPPING + KOBO COLUMN RESOLUTION
+# =============================================================================
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Mapping file not found: {path}")
     df = pd.read_csv(path)
     df.columns = [c.strip() for c in df.columns]
     if "prompt_hint" not in df.columns and "column" in df.columns:
@@ -627,6 +384,7 @@ def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: s
     qid = (qid or "").strip()
     if not qid:
         return None
+
     token = None
     if "_Q" in qid:
         try:
@@ -637,6 +395,7 @@ def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: s
         sect = _QID_PREFIX_TO_SECTION.get(prefix)
         if sect and qn is not None:
             token = f"{sect}_{qn}"
+
     if token:
         best, bs = None, 0
         for c in df_cols:
@@ -645,36 +404,183 @@ def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: s
                 bs, best = sc, c
         if best and bs >= 82:
             return best
+
     hint = clean(prompt_hint or "")
     if hint:
         hits = process.extract(hint, df_cols, scorer=fuzz.partial_token_set_ratio, limit=5)
         for col, score, _ in hits:
             if score >= 80:
                 return col
+
     return None
 
 
 # =============================================================================
-# OFF-TOPIC (VERY CONSERVATIVE)
+# SCORING CORE (batched per question_id)
 # =============================================================================
-def conservative_offtopic(ans_vec: np.ndarray, qref: str) -> bool:
-    qref = clean(qref)
-    if not qref:
-        return False
-    q_emb = embed_texts([qref], kind="q").get(qref)
-    if q_emb is None:
-        return False
-    qsim = float(np.dot(ans_vec, q_emb))
-    return qsim < OFFTOPIC_QSIM
+@dataclass
+class ScoreResult:
+    pred: int
+    conf: float
+    needs_review: bool
+
+def _best_cluster_vote(
+    cand_vecs: np.ndarray,      # (M, d)
+    cand_scores: np.ndarray,    # (M,)
+    ce_scores: np.ndarray,      # (M,)
+) -> Tuple[int, float]:
+    # Sort by reranker
+    order = np.argsort(-ce_scores)
+    ce_scores = ce_scores[order]
+    cand_scores = cand_scores[order]
+    cand_vecs = cand_vecs[order]
+
+    w = _softmax_temp(ce_scores, RERANK_TEMP)  # weights per candidate
+
+    topm = cand_vecs.shape[0]
+    seeds = range(min(SEED_TRIES, topm))
+    best_members = None
+    best_mass = -1.0
+
+    for s in seeds:
+        seed = cand_vecs[s]
+        sim = cand_vecs @ seed
+        members = np.where(sim >= CLUSTER_SIM)[0]
+        if members.size == 0:
+            continue
+        mass = float(np.sum(w[members]))
+        if mass > best_mass:
+            best_mass = mass
+            best_members = members
+
+    if best_members is None:
+        best_members = np.arange(topm, dtype=np.int64)
+
+    if best_members.size < MIN_CLUSTER:
+        # fallback: trust top candidates rather than expanding to all
+        best_members = np.arange(min(topm, max(MIN_CLUSTER, 8)), dtype=np.int64)
+
+    dist = np.zeros(4, dtype=np.float32)
+    for i in best_members.tolist():
+        s = int(cand_scores[i])
+        if 0 <= s <= 3:
+            dist[s] += float(w[i])
+
+    if float(dist.sum()) <= 1e-8:
+        # fallback to top label
+        top_label = int(np.clip(int(cand_scores[0]), 0, 3))
+        dist[top_label] = 1.0
+
+    dist = dist / (dist.sum() + 1e-9)
+    expected = float(np.dot(dist, np.arange(4)))
+    pred = int(np.clip(int(round(expected)), 0, 3))
+    conf = float(dist.max())
+    return pred, conf
+
+def _score_question_batched(
+    qid: str,
+    answers: List[str],              # len = N (one per submission row; may include "")
+    answer_vecs: List[Optional[np.ndarray]],
+    pack: ExemplarPack,
+) -> List[Optional[ScoreResult]]:
+    """
+    Scores all answers for one qid in a batched way:
+      - retrieve topN by embeddings
+      - rerank topM by cross-encoder in one big batch
+      - per-answer coherent cluster vote
+    Returns list aligned with answers length (None where answer missing).
+    """
+    ce = get_crossencoder()
+
+    # Collect valid indices
+    valid_idx = [i for i, (a, v) in enumerate(zip(answers, answer_vecs)) if a and v is not None]
+    if not valid_idx:
+        return [None] * len(answers)
+
+    A = np.vstack([answer_vecs[i] for i in valid_idx]).astype(np.float32)  # (Nv, d)
+
+    # retrieve
+    sims = pack.vecs @ A.T  # (n_ex, Nv)
+    n_ex, Nv = sims.shape
+    topn = min(TOPN_RETRIEVE, n_ex)
+    # indices of topn per column
+    idx_topn = np.argpartition(-sims, topn - 1, axis=0)[:topn, :]  # (topn, Nv)
+
+    # Now build rerank pairs for topM per answer
+    pairs = []
+    meta = []  # (local_answer_j, candidate_k, exemplar_index)
+    for j in range(Nv):
+        inds = idx_topn[:, j]
+        # sort those by similarity
+        inds = inds[np.argsort(-sims[inds, j])]
+        inds = inds[: min(TOPM_RERANK, len(inds))]
+        ans_text = answers[valid_idx[j]]
+        for k, ex_i in enumerate(inds.tolist()):
+            pairs.append((ans_text, pack.texts[ex_i]))
+            meta.append((j, k, ex_i))
+
+    if not pairs:
+        return [None] * len(answers)
+
+    # batched rerank
+    ce_scores_flat = np.array(
+        ce.predict(pairs, batch_size=RERANK_BATCH, show_progress_bar=False),
+        dtype=np.float32,
+    )
+
+    # group scores back per answer
+    # Build structure: for each j, keep list of (ex_i, ce_score)
+    per_j: List[List[Tuple[int, float]]] = [[] for _ in range(Nv)]
+    for (j, k, ex_i), sc in zip(meta, ce_scores_flat.tolist()):
+        per_j[j].append((ex_i, float(sc)))
+
+    # precompute question embedding for review flagging (meaning only; no score change)
+    qref = clean(pack.qtext)
+    qref_vec = embed_texts([qref], kind="q").get(qref) if qref else None
+
+    out: List[Optional[ScoreResult]] = [None] * len(answers)
+
+    for j in range(Nv):
+        items = per_j[j]
+        if not items:
+            continue
+
+        # build candidate arrays
+        ex_inds = np.array([x[0] for x in items], dtype=np.int32)
+        ce_s = np.array([x[1] for x in items], dtype=np.float32)
+
+        cand_vecs = pack.vecs[ex_inds]
+        cand_scores = pack.scores[ex_inds]
+
+        pred, conf = _best_cluster_vote(cand_vecs, cand_scores, ce_s)
+
+        # flag off-topic ONLY (does not change score)
+        needs_review = False
+        if qref_vec is not None:
+            av = answer_vecs[valid_idx[j]]
+            if av is not None:
+                qsim = float(np.dot(av, qref_vec))
+                if qsim < OFFTOPIC_FLAG_QSIM:
+                    needs_review = True
+
+        out[valid_idx[j]] = ScoreResult(pred=int(pred), conf=float(conf), needs_review=needs_review)
+
+    return out
 
 
 # =============================================================================
 # DATAFRAME SCORING
 # =============================================================================
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+        df.to_excel(w, index=False)
+    return bio.getvalue()
+
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs: Dict[str, ExemplarPack]) -> pd.DataFrame:
     df_cols = list(df.columns)
 
-    def want_col(c):
+    def want_col(c: str) -> bool:
         lc = c.strip().lower()
         return any(h in lc for h in PASSTHROUGH_HINTS)
 
@@ -685,116 +591,123 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs: Dict[str, Ex
     staff_id_col = next((c for c in df.columns if c.strip().lower() in ("staff id", "staff_id", "staffid")), None)
     care_staff_col = next((c for c in df.columns if c.strip().lower() in ("care_staff", "care staff", "care-staff")), None)
 
-    date_cols_pref = ["_submission_time","SubmissionDate","submissiondate","end","End","start","Start","today","date","Date"]
+    date_cols_pref = ["_submission_time", "SubmissionDate", "submissiondate", "end", "End", "start", "Start", "today", "date", "Date"]
     date_col = next((c for c in date_cols_pref if c in df.columns), df.columns[0])
 
-    start_col = next((c for c in ["start"] if c in df.columns), None)
-    end_col = next((c for c in ["end"] if c in df.columns), None)
+    start_col = "start" if "start" in df.columns else None
+    end_col = "end" if "end" in df.columns else None
 
     n_rows = len(df)
-
-    dt_series = pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce") if date_col in df.columns else pd.Series([pd.NaT]*n_rows)
+    dt_series = pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce") if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
 
     if start_col:
         start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
-        start_dt = pd.Series([pd.NaT]*n_rows)
+        start_dt = pd.Series([pd.NaT] * n_rows)
     if end_col:
         end_dt = pd.to_datetime(df[end_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
-        end_dt = pd.Series([pd.NaT]*n_rows)
+        end_dt = pd.Series([pd.NaT] * n_rows)
     duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
 
-    rows = [r for r in mapping.to_dict(orient="records") if clean(r.get("attribute","")) in ORDERED_ATTRS]
+    rows = [r for r in mapping.to_dict(orient="records") if clean(r.get("attribute", "")) in ORDERED_ATTRS]
 
+    # Resolve Kobo response columns for each qid
     resolved_for_qid: Dict[str, str] = {}
+    qid_to_attr: Dict[str, str] = {}
+    qid_to_hint: Dict[str, str] = {}
     for r in rows:
-        qid = clean(r.get("question_id",""))
-        qhint = r.get("prompt_hint","") or r.get("column","")
-        col = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
+        qid = clean(r.get("question_id", ""))
+        attr = clean(r.get("attribute", ""))
+        hint = clean(r.get("prompt_hint", "") or r.get("column", ""))
+        if not qid or not attr:
+            continue
+        col = resolve_kobo_column_for_mapping(df_cols, qid, hint)
         if col:
             resolved_for_qid[qid] = col
+            qid_to_attr[qid] = attr
+            qid_to_hint[qid] = hint
+
+    # Build all answers per qid, and embed unique answer texts once
+    answers_by_qid: Dict[str, List[str]] = {qid: [""] * n_rows for qid in resolved_for_qid.keys()}
+    all_answer_texts: List[str] = []
+
+    for qid, col in resolved_for_qid.items():
+        for i in range(n_rows):
+            a = clean(df.iloc[i].get(col, ""))
+            answers_by_qid[qid][i] = a
+            if a:
+                all_answer_texts.append(a)
 
     # embed unique answers once
-    answers = []
-    for _, rec in df.iterrows():
-        for r in rows:
-            qid = clean(r.get("question_id",""))
-            col = resolved_for_qid.get(qid)
-            if col and col in df.columns:
-                a = clean(rec.get(col,""))
-                if a:
-                    answers.append(a)
-    emb_map = embed_texts(list(set(answers)), kind="q")
+    emb_map = embed_texts(list(set(all_answer_texts)), kind="q")
 
-    out_rows = []
-    for i, rec in df.iterrows():
-        row = {}
-        row["Date"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(dt_series.iloc[i]) else str(i)
-        row["Duration"] = int(round(duration_min.iloc[i])) if not pd.isna(duration_min.iloc[i]) else ""
-
-        who_col = care_staff_col or staff_id_col
-        row["Care_Staff"] = str(rec.get(who_col)) if who_col else ""
-
+    # Prepare output rows (metadata first)
+    out_rows: List[dict] = []
+    for i in range(n_rows):
+        rec = df.iloc[i]
+        row = {
+            "Date": pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(dt_series.iloc[i]) else str(i),
+            "Duration": int(round(duration_min.iloc[i])) if not pd.isna(duration_min.iloc[i]) else "",
+            "Care_Staff": str(rec.get(care_staff_col or staff_id_col)) if (care_staff_col or staff_id_col) else "",
+        }
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
                 continue
-            if c in ("Date","Duration","Care_Staff"):
+            if c in ("Date", "Duration", "Care_Staff"):
                 continue
-            row[c] = rec.get(c,"")
+            row[c] = rec.get(c, "")
+        out_rows.append(row)
 
-        per_attr: Dict[str, List[int]] = {}
-        needs_review = False
+    # Score per question in batches (fast)
+    any_needs_review = [False] * n_rows
+    per_attr_scores: List[Dict[str, List[int]]] = [dict() for _ in range(n_rows)]
 
-        for r in rows:
-            qid = clean(r.get("question_id",""))
-            attr = clean(r.get("attribute",""))
-            col = resolved_for_qid.get(qid)
-            if not col or col not in df.columns:
+    for qid, answers in answers_by_qid.items():
+        pack = packs.get(qid)
+        if pack is None or pack.vecs.size == 0:
+            # no exemplars: leave blanks (or default 1 if you prefer)
+            continue
+
+        # align answer vecs with rows
+        answer_vecs: List[Optional[np.ndarray]] = [emb_map.get(a) if a else None for a in answers]
+
+        results = _score_question_batched(qid, answers, answer_vecs, pack)
+
+        attr = qid_to_attr.get(qid, "")
+        # determine question number for output columns
+        qn = None
+        if "_Q" in qid:
+            try:
+                qn = int(qid.split("_Q")[-1])
+            except Exception:
+                qn = None
+
+        if qn not in (1, 2, 3, 4):
+            continue
+
+        for i, sr in enumerate(results):
+            if sr is None:
                 continue
-            ans = clean(rec.get(col,""))
-            if not ans:
-                continue
-            ans_vec = emb_map.get(ans)
-            if ans_vec is None:
-                continue
+            sc = int(sr.pred)
+            out_rows[i][f"{attr}_Qn{qn}"] = sc
+            out_rows[i][f"{attr}_Rubric_Qn{qn}"] = BANDS[sc]
+            per_attr_scores[i].setdefault(attr, []).append(sc)
+            if sr.needs_review:
+                any_needs_review[i] = True
 
-            pack = packs.get(qid)
-            if pack is None or pack.vecs.size == 0:
-                sc = 1
-                row[f"{attr}_Qn{int(qid.split('_Q')[-1])}"] = sc if "_Q" in qid else sc
-                continue
-
-            sd = score_answer(qid, ans, ans_vec, pack)
-
-            # off-topic cap (rare)
-            qref = pack.qtext or (r.get("prompt_hint","") or "")
-            if conservative_offtopic(ans_vec, qref):
-                needs_review = True
-                if sd.pred > OFFTOPIC_CAP:
-                    sd = ScoreDist(dist=sd.dist, expected=sd.expected, pred=int(OFFTOPIC_CAP), conf=sd.conf, max_sim=sd.max_sim, method=sd.method+"+offtopic_cap")
-
-            qn = None
-            if "_Q" in qid:
-                try:
-                    qn = int(qid.split("_Q")[-1])
-                except Exception:
-                    qn = None
-
-            if qn in (1,2,3,4):
-                row[f"{attr}_Qn{qn}"] = int(sd.pred)
-                row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sd.pred)]
-                per_attr.setdefault(attr, []).append(int(sd.pred))
-
+    # Fill blanks + compute averages and overall
+    for i in range(n_rows):
+        row = out_rows[i]
+        overall_total = 0
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            # ensure q columns exist
+            for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        overall_total = 0
-        for attr in ORDERED_ATTRS:
-            scores = per_attr.get(attr, [])
+            scores = per_attr_scores[i].get(attr, [])
             if not scores:
                 row[f"{attr}_Avg (0–3)"] = ""
                 row[f"{attr}_RANK"] = ""
@@ -806,19 +719,19 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs: Dict[str, Ex
                 row[f"{attr}_RANK"] = BANDS[band]
 
         row["Overall Total (0–21)"] = overall_total
-        row["Needs_Review"] = bool(needs_review)
-        out_rows.append(row)
+        row["Needs_Review"] = bool(any_needs_review[i])
 
     res = pd.DataFrame(out_rows)
 
-    ordered = [c for c in ["Date","Duration","Care_Staff"] if c in res.columns]
+    # Order columns nicely
+    ordered = [c for c in ["Date", "Duration", "Care_Staff"] if c in res.columns]
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
-    source_cols = [c for c in source_cols if c not in ("Date","Duration","Care_Staff")]
+    source_cols = [c for c in source_cols if c not in ("Date", "Duration", "Care_Staff")]
     ordered += [c for c in source_cols if c in res.columns]
 
     mid_q = []
     for attr in ORDERED_ATTRS:
-        for qn in (1,2,3,4):
+        for qn in (1, 2, 3, 4):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
     ordered += [c for c in mid_q if c in res.columns]
 
@@ -832,93 +745,38 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs: Dict[str, Ex
 
 
 # =============================================================================
-# EXPORTS / SHEETS
-# =============================================================================
-def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
-    return bio.getvalue()
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Thought Leadership")
-
-def _normalize_sa_dict(raw: dict) -> dict:
-    if not raw:
-        raise ValueError("gcp_service_account missing in secrets.")
-    sa = dict(raw)
-    if "token_ur" in sa and "token_uri" not in sa:
-        sa["token_uri"] = sa.pop("token_ur")
-    if sa.get("private_key") and "\\n" in sa["private_key"]:
-        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-    sa.setdefault("token_uri", "https://oauth2.googleapis.com/token")
-    sa.setdefault("auth_uri", "https://accounts.google.com/o/oauth2/auth")
-    sa.setdefault("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs")
-    required = ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri"]
-    missing = [k for k in required if not sa.get(k)]
-    if missing:
-        raise ValueError(f"gcp_service_account missing fields: {', '.join(missing)}")
-    return sa
-
-@st.cache_resource(show_spinner=False)
-def gs_client():
-    sa = _normalize_sa_dict(st.secrets.get("gcp_service_account"))
-    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-def _open_ws_by_key() -> gspread.Worksheet:
-    key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
-    if not key:
-        raise ValueError("GSHEETS_SPREADSHEET_KEY not set in secrets.")
-    gc = gs_client()
-    sh = gc.open_by_key(key)
-    try:
-        return sh.worksheet(DEFAULT_WS_NAME)
-    except gspread.WorksheetNotFound:
-        return sh.add_worksheet(title=DEFAULT_WS_NAME, rows="20000", cols="150")
-
-def upload_df_to_gsheets(df: pd.DataFrame) -> Tuple[bool, str]:
-    try:
-        ws = _open_ws_by_key()
-        header = df.columns.astype(str).tolist()
-        values = df.astype(object).where(pd.notna(df), "").values.tolist()
-        ws.clear()
-        ws.spreadsheet.values_batch_update(
-            body={"valueInputOption": "USER_ENTERED", "data": [{"range": f"'{ws.title}'!A1", "values": [header] + values}]}
-        )
-        return True, f"✅ Wrote {len(values)} rows × {len(header)} cols to '{ws.title}'."
-    except Exception as e:
-        return False, f"❌ {type(e).__name__}: {e}"
-
-
-# =============================================================================
 # MAIN
 # =============================================================================
 def main():
     inject_css()
 
-    st.markdown("""
-        <div class="app-header-card">
-            <div class="pill">Thought Leadership • Auto Scoring</div>
-            <h1>Thought Leadership</h1>
-            <p class="app-header-subtitle">
-                Importing Kobo submissions, scoring CARE thought leadership attributes (nearest exemplars),
-                flagging AI-like responses, and exporting results to Google Sheets.
-            </p>
+    st.markdown(
+        """
+        <div class="section-card">
+          <div class="pill">Thought Leadership • Fast Meaning Scoring</div>
+          <h2 style="margin:8px 0 0 0;">Thought Leadership Scoring</h2>
+          <div style="color:#6b7280; margin-top:6px;">
+            Scoring = meaning match between <b>response</b> and exemplar <b>text</b> only (not the question),
+            using retrieve → rerank → coherent cluster vote.
+          </div>
         </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # 1) Fetch Kobo FIRST so users see data immediately.
+    # 1) Kobo first
     with st.spinner("Fetching Kobo submissions…"):
         df = fetch_kobo_dataframe()
     if df.empty:
-        st.warning("No Kobo submissions found (or Kobo credentials missing).")
+        st.warning("No Kobo submissions found (or Kobo secrets missing).")
         return
 
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns):,}")
     st.dataframe(df, width="stretch")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # 2) Load mapping + exemplars (local files) next.
+    # 2) Load mapping + exemplars
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
     except Exception as e:
@@ -934,17 +792,28 @@ def main():
         st.error(f"Failed to read exemplars: {e}")
         return
 
-    # 3) Build packs (cached). This can be slow on the first run, fast afterwards.
-    with st.spinner("Preparing exemplar index (cached)…"):
+    # Button to start scoring (prevents reruns from auto-triggering long work)
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.write("Models:", BI_ENCODER_NAME, " + ", CROSS_ENCODER_NAME)
+    st.write(f"Retrieve TOPN={TOPN_RETRIEVE}, Rerank TOPM={TOPM_RERANK}, ClusterSim={CLUSTER_SIM}")
+    go = st.button("Score now", type="primary")
+    st.markdown("</div>", unsafe_allow_html=True)
+    if not go:
+        return
+
+    # 3) Build packs (cached)
+    with st.spinner("Preparing exemplar packs (cached as single files)…"):
         packs = build_packs(exemplars)
 
     # 4) Score
-    with st.spinner("Scoring (retrieve → rerank → meaning-cluster vote)…"):
+    with st.spinner("Scoring (meaning-based)…"):
         scored = score_dataframe(df, mapping, packs)
 
     st.success("✅ Done.")
-    st.dataframe(scored, width="stretch")
 
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.dataframe(scored, width="stretch")
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.download_button(
         "Download Excel",
@@ -960,10 +829,6 @@ def main():
         mime="text/csv",
         width="stretch",
     )
-
-    if AUTO_PUSH:
-        ok, msg = upload_df_to_gsheets(scored)
-        (st.success if ok else st.error)(msg)
 
 
 if __name__ == "__main__":
