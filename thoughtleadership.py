@@ -198,13 +198,10 @@ MIN_QA_OVERLAP  = 0.05
 DUP_SIM = float(st.secrets.get("DUP_SIM", 0.92))
 
 # exemplar-nearest scoring controls
-KNN_METHOD   = st.secrets.get("KNN_METHOD", "softmax").lower().strip()  # "top1" or "softmax"
-KNN_K        = int(st.secrets.get("KNN_K", 15))
+KNN_METHOD   = st.secrets.get("KNN_METHOD", "top1").lower().strip()  # "top1" or "softmax"
+KNN_K        = int(st.secrets.get("KNN_K", 7))
 KNN_TEMP     = float(st.secrets.get("KNN_TEMP", 0.08))
 CONF_CLAMP   = float(st.secrets.get("CONF_CLAMP", 0.0))  # 0 disables; e.g. 0.45 clamps high scores on low confidence
-
-# explainability: "off" | "basic"
-EXPLAIN_LEVEL = str(st.secrets.get("EXPLAIN_LEVEL", "basic")).lower().strip()
 
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
@@ -563,60 +560,6 @@ def _build_pack(texts: list[str], scores: list[int]):
 
     return {"vecs": mat, "scores": np.array(keep_s, dtype=int), "texts": keep_t}
 
-def calibrate_pack_thresholds(pack: dict, sample: int = 60) -> dict:
-    """
-    Data-driven thresholds learned from exemplars for this question.
-    Returns {min_best_sim, min_margin} used to call a prediction "high confidence".
-    """
-    vecs = pack.get("vecs")
-    scores = pack.get("scores")
-    if vecs is None or scores is None or vecs.size == 0:
-        return {"min_best_sim": 0.55, "min_margin": 0.12}
-
-    n = vecs.shape[0]
-    if n < 8:
-        return {"min_best_sim": 0.55, "min_margin": 0.10}
-
-    rng = np.random.default_rng(42)
-    idxs = rng.choice(n, size=min(sample, n), replace=False)
-
-    best_sames = []
-    gaps = []
-
-    # precompute score masks for speed
-    for i in idxs:
-        v = vecs[i]
-        s = int(scores[i])
-
-        sims = vecs @ v  # cosine sim (normalized)
-        sims[i] = -1.0
-
-        same_mask = (scores == s)
-        same_mask[i] = False
-        diff_mask = ~same_mask
-
-        if not np.any(same_mask):
-            continue
-
-        best_same = float(np.max(sims[same_mask]))
-        best_diff = float(np.max(sims[diff_mask])) if np.any(diff_mask) else -1.0
-        best_sames.append(best_same)
-        gaps.append(best_same - best_diff)
-
-    if not best_sames:
-        return {"min_best_sim": 0.55, "min_margin": 0.12}
-
-    # Conservative: use lower quartiles so we don't over-claim confidence
-    min_best_sim = float(np.quantile(best_sames, 0.25))
-    min_margin = float(np.quantile(gaps, 0.25)) if gaps else 0.12
-
-    # floor values (avoid too-low thresholds)
-    min_best_sim = max(0.48, min_best_sim)
-    min_margin = max(0.06, min_margin)
-
-    return {"min_best_sim": min_best_sim, "min_margin": min_margin}
-
-
 def build_exemplar_packs(exemplars: list[dict]):
     by_qkey, by_attr, question_texts = {}, {}, []
     all_texts = []
@@ -668,10 +611,7 @@ def build_exemplar_packs(exemplars: list[dict]):
     # de-dup question_texts
     seen=set(); question_texts=[x for x in question_texts if not (x in seen or seen.add(x))]
 
-    # thresholds per question (data-driven)
-    q_thresholds = {qid: calibrate_pack_thresholds(pack) for qid, pack in q_packs.items()}
-
-    return q_packs, a_packs, g_pack, by_qkey, question_texts, q_thresholds
+    return q_packs, a_packs, g_pack, by_qkey, question_texts
 
 def resolve_qkey(q_packs, by_qkey, question_texts, qid: str, prompt_hint: str):
     qid = (qid or "").strip()
@@ -689,54 +629,42 @@ def resolve_qkey(q_packs, by_qkey, question_texts, qid: str, prompt_hint: str):
     return None
 
 def score_vec_against_pack(pack: dict, vec: np.ndarray):
-    """
-    Explainable kNN scorer.
-    Returns: (pred_score, conf, margin, matches)
-      - conf: winning class weight (0..1)
-      - margin: conf - runner_up (0..1)
-      - matches: list of (sim, score, text) for top-k
-    """
     if pack is None or pack["vecs"].size == 0 or vec is None:
-        return None, 0.0, 0.0, []
+        return None, 0.0
 
     sims = pack["vecs"] @ vec  # cosine similarity (normalized embeddings)
     if sims.size == 0:
-        return None, 0.0, 0.0, []
+        return None, 0.0
 
+    # top1: score of nearest exemplar
+    if KNN_METHOD == "top1":
+        i = int(np.argmax(sims))
+        return int(pack["scores"][i]), float(sims[i])
+
+    # softmax vote over top-k
     k = max(1, min(KNN_K, sims.size))
     idx = np.argpartition(-sims, k-1)[:k]
     idx = idx[np.argsort(-sims[idx])]
-
     top_sims = sims[idx]
     top_scores = pack["scores"][idx]
-    top_texts = [pack["texts"][int(i)] for i in idx]
-    matches = [(float(s), int(sc), t) for s, sc, t in zip(top_sims, top_scores, top_texts)]
 
-    if KNN_METHOD == "top1":
-        pred = int(matches[0][1])
-        conf = float(matches[0][0])
-        margin = float(matches[0][0] - matches[1][0]) if len(matches) > 1 else conf
-        return pred, conf, margin, matches
-
-    # softmax vote over top-k
     w = np.exp((top_sims - top_sims.max()) / float(KNN_TEMP))
     w = w / (w.sum() + 1e-9)
-
     class_w = np.zeros(4, dtype=float)
     for s, wi in zip(top_scores, w):
         if 0 <= int(s) <= 3:
             class_w[int(s)] += float(wi)
-
     pred = int(class_w.argmax())
-    sorted_w = np.sort(class_w)[::-1]
-    conf = float(sorted_w[0])
-    margin = float(sorted_w[0] - sorted_w[1]) if len(sorted_w) > 1 else conf
+    conf = float(class_w.max())
+    return pred, conf
 
-    return pred, conf, margin, matches
 
+# ==============================
+# SCORING (keeps your working table layout)
+# ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_packs, a_packs, g_pack,
-                    by_qkey, question_texts, q_thresholds):
+                    by_qkey, question_texts):
 
     df_cols = list(df.columns)
 
@@ -848,13 +776,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
-            # derive question number early (needed for explainability columns)
-            qn = None
-            if "_Q" in (qid or ""):
-                try:
-                    qn = int(str(qid).split("_Q")[-1])
-                except Exception:
-                    qn = None
             col = resolved_for_qid.get(qid)
             if not col:
                 continue
@@ -883,74 +804,30 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sc = int(best_dup_sc)
                     reused = True
 
-            
-# NEW scoring: nearest exemplar (question -> attribute -> global) + confidence + evidence
-            ex_conf = None
-            ex_margin = None
-            ex_best_sim = None
-            ex_matches = []
+            # NEW scoring: nearest exemplar (question -> attribute -> global)
+            if sc is None and vec is not None:
+                sc2, conf = None, 0.0
 
-            if vec is not None:
-                sc2 = None
-                # Prefer question-specific exemplars
                 if qkey and qkey in q_packs:
-                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(q_packs[qkey], vec)
+                    sc2, conf = score_vec_against_pack(q_packs[qkey], vec)
 
-                # fallback: attribute exemplars
                 if sc2 is None and attr in a_packs:
-                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(a_packs[attr], vec)
+                    sc2, conf = score_vec_against_pack(a_packs[attr], vec)
 
-                # fallback: global exemplars
                 if sc2 is None:
-                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(g_pack, vec)
+                    sc2, conf = score_vec_against_pack(g_pack, vec)
 
-                # If score already cached, keep it, but still compute confidence/evidence for explainability.
-                if sc is None:
-                    sc = sc2
-
-                if ex_matches:
-                    ex_best_sim = float(ex_matches[0][0])
+                sc = sc2
 
                 # optional low-confidence clamp (disabled by default)
-                if sc is not None and CONF_CLAMP > 0 and ex_conf is not None and ex_conf < CONF_CLAMP:
+                if sc is not None and CONF_CLAMP > 0 and conf < CONF_CLAMP:
                     sc = min(int(sc), 1)
 
                 # off-topic clamp (keep your old behavior)
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(int(sc), 1)
 
-            # confidence tier (data-driven per question when available)
-            conf_tier = ""
-            if qkey and qkey in q_thresholds and ex_conf is not None and ex_margin is not None and ex_best_sim is not None:
-                thr = q_thresholds[qkey]
-                min_sim = float(thr.get("min_best_sim", 0.55))
-                min_margin = float(thr.get("min_margin", 0.12))
-
-                if (ex_conf >= 0.70) and (ex_best_sim >= min_sim) and (ex_margin >= min_margin):
-                    conf_tier = "High"
-                elif (ex_conf >= 0.55) and (ex_best_sim >= (0.95 * min_sim)):
-                    conf_tier = "Medium"
-                else:
-                    conf_tier = "Low"
-
-            # record explainability fields (basic)
-            if EXPLAIN_LEVEL != "off" and qn in (1,2,3,4):
-                row[f"{attr}_Conf_Qn{qn}"] = round(float(ex_conf), 3) if ex_conf is not None else ""
-                row[f"{attr}_Margin_Qn{qn}"] = round(float(ex_margin), 3) if ex_margin is not None else ""
-                row[f"{attr}_BestSim_Qn{qn}"] = round(float(ex_best_sim), 3) if ex_best_sim is not None else ""
-                row[f"{attr}_ConfidenceTier_Qn{qn}"] = conf_tier
-                if ex_matches:
-                    # top-3: sim:score:snippet
-                    tops = []
-                    for sim, scx, txt in ex_matches[:3]:
-                        snippet = clean(txt)[:120]
-                        tops.append(f"{sim:.2f}|{scx}|{snippet}")
-                    row[f"{attr}_TopMatches_Qn{qn}"] = " || ".join(tops)
-                else:
-                    row[f"{attr}_TopMatches_Qn{qn}"] = ""
-
             if sc is not None and not was_cached:
-
                 exact_sc_cache[(qid, ans)] = int(sc)
                 if vec is not None and not reused:
                     bank = dup_bank.setdefault(qid, [])
@@ -960,6 +837,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
+
+            qn = None
+            if "_Q" in (qid or ""):
+                try:
+                    qn = int(qid.split("_Q")[-1])
+                except Exception:
+                    qn = None
 
             if qn in (1,2,3,4) and sc is not None:
                 sk = f"{attr}_Qn{qn}"
@@ -1005,14 +889,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     for attr in ORDERED_ATTRS:
         for qn in (1,2,3,4):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
-            if EXPLAIN_LEVEL != "off":
-                mid_q += [
-                    f"{attr}_Conf_Qn{qn}",
-                    f"{attr}_Margin_Qn{qn}",
-                    f"{attr}_BestSim_Qn{qn}",
-                    f"{attr}_ConfidenceTier_Qn{qn}",
-                    f"{attr}_TopMatches_Qn{qn}",
-                ]
     ordered += [c for c in mid_q if c in res.columns]
 
     mid_a = []
@@ -1152,7 +1028,7 @@ def main():
         return
 
     with st.spinner("Building exemplar packs (nearest-neighbour scorer)..."):
-        q_packs, a_packs, g_pack, by_q, qtexts, q_thresholds = build_exemplar_packs(exemplars)
+        q_packs, a_packs, g_pack, by_q, qtexts = build_exemplar_packs(exemplars)
 
     with st.spinner("Fetching Kobo submissions..."):
         df = fetch_kobo_dataframe()
@@ -1167,7 +1043,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     with st.spinner("Scoring (+ AI detection)..."):
-        scored = score_dataframe(df, mapping, q_packs, a_packs, g_pack, by_q, qtexts, q_thresholds)
+        scored = score_dataframe(df, mapping, q_packs, a_packs, g_pack, by_q, qtexts)
 
     st.success("✅ Scoring complete.")
 
