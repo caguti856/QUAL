@@ -1,6 +1,5 @@
 # thoughtleadership.py — Kobo mapping + Meaning scoring (Option B: Top-K weighted vote)
 # Scores ANSWER TEXT against exemplar TEXT per question_id (no centroid, no review flags)
-# Output: NO BestMatch columns. Diagnostics only in UI.
 
 from __future__ import annotations
 
@@ -52,9 +51,12 @@ def inject_css():
         }
         [data-testid="stSidebar"] * { color: #e5e7eb !important; }
 
-        .main .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1200px; }
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
         h1 { font-size: 2.0rem; font-weight: 750; }
-
         .app-header-card {
             position: relative;
             background: radial-gradient(circle at top left, rgba(242,106,33,0.15), rgba(250,204,21,0.06), #ffffff);
@@ -161,17 +163,6 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
     "_xform_id_string", "_uuid", "meta/rootuuid", "_submission_time", "_validation_status"
 }
 
-# Option B scoring defaults (AUTO)
-TOPK = 40
-TEMP = 1.0
-CLOSE_MARGIN = 0.02     # include exemplars within (cutoff - margin)
-MAX_EXTRA = 40          # cap extras for speed
-
-# Weak-match smoothing to prevent "all zeros" when similarity evidence is weak
-MIN_BEST_SIM = 0.28     # if best_sim below this, blend more with prior
-MIN_CONF = 0.45         # if vote is too uncertain, blend more with prior
-PRIOR_BLEND_FLOOR = 0.35  # minimum reliance on prior when weak evidence (0..1)
-
 WORD_RX = re.compile(r"\w+")
 
 
@@ -238,6 +229,7 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
 
+    # normalize expected columns
     if "prompt_hint" not in df.columns and "column" in df.columns:
         df = df.rename(columns={"column": "prompt_hint"})
 
@@ -245,6 +237,7 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not required.issubset(set(df.columns)):
         raise ValueError(f"mapping.csv must include: {', '.join(sorted(required))}")
 
+    # snap attribute names to ORDERED_ATTRS
     norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
     target = {norm(a): a for a in ORDERED_ATTRS}
 
@@ -276,6 +269,10 @@ def _score_kobo_header(col: str, token: str) -> int:
 
 
 def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: str) -> Optional[str]:
+    """
+    Maps question_id -> Kobo column in the fetched dataframe.
+    Works with tokens like A1_1, A2_3, etc and fuzzy fallback to prompt_hint.
+    """
     qid = (qid or "").strip()
     if not qid:
         return None
@@ -327,6 +324,7 @@ def read_jsonl_path(path: Path) -> List[dict]:
             try:
                 out.append(json.loads(s))
             except json.JSONDecodeError:
+                # tolerate trailing comma
                 s2 = re.sub(r",\s*$", "", s)
                 out.append(json.loads(s2))
     return out
@@ -337,7 +335,6 @@ class ExemplarPack:
     vecs: np.ndarray       # (n, d) normalized
     scores: np.ndarray     # (n,) int 0..3
     texts: List[str]       # exemplar text
-    prior: np.ndarray      # (4,) prior distribution for this question
 
 
 # =============================================================================
@@ -345,6 +342,7 @@ class ExemplarPack:
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
+    # Small & fast semantic model
     return SentenceTransformer(st.secrets.get("EMBED_MODEL", "all-MiniLM-L6-v2"))
 
 
@@ -376,6 +374,10 @@ def embed_map(texts: List[str]) -> Dict[str, np.ndarray]:
 
 
 def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
+    """
+    Build pack per question_id using exemplar 'text' ONLY.
+    (No centroids. Every answer matches to real exemplar texts.)
+    """
     by_qid: Dict[str, Dict[str, list]] = {}
     all_texts: List[str] = []
 
@@ -414,31 +416,19 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
             vecs.append(v)
 
         if not vecs:
-            prior = np.array([0.05, 0.55, 0.35, 0.05], dtype=np.float32)  # safe neutral prior
-            packs[qid] = ExemplarPack(
-                vecs=np.zeros((0, 384), dtype=np.float32),
-                scores=np.array([], dtype=np.int32),
-                texts=[],
-                prior=prior,
-            )
+            packs[qid] = ExemplarPack(vecs=np.zeros((0, 384), dtype=np.float32), scores=np.array([], dtype=np.int32), texts=[])
         else:
-            sc_arr = np.array(scores, dtype=np.int32)
-            # prior = empirical distribution (smoothed)
-            cnt = np.bincount(sc_arr, minlength=4).astype(np.float32)
-            prior = (cnt + 1.0) / (cnt.sum() + 4.0)
-
             packs[qid] = ExemplarPack(
                 vecs=np.vstack(vecs).astype(np.float32),
-                scores=sc_arr,
+                scores=np.array(scores, dtype=np.int32),
                 texts=texts,
-                prior=prior,
             )
 
     return packs
 
 
 # =============================================================================
-# OPTION B: Top-K weighted vote scoring (meaning-based) + near-cutoff extras + smoothing
+# OPTION B: Top-K weighted vote scoring (meaning-based)
 # =============================================================================
 def softmax(x: np.ndarray, temp: float) -> np.ndarray:
     t = float(max(1e-6, temp))
@@ -447,68 +437,49 @@ def softmax(x: np.ndarray, temp: float) -> np.ndarray:
     return ex / (ex.sum() + 1e-9)
 
 
-def _select_topk_plus_extras(sims: np.ndarray, k: int) -> np.ndarray:
-    n = sims.size
-    k = int(max(1, min(k, n)))
-    order = np.argsort(-sims)
-    base = order[:k]
-
-    if n <= k:
-        return base
-
-    cutoff = float(sims[order[k - 1]])
-    rest = order[k:]
-    close_mask = sims[rest] >= (cutoff - CLOSE_MARGIN)
-    extras = rest[close_mask][:MAX_EXTRA]
-
-    if extras.size:
-        return np.concatenate([base, extras])
-    return base
-
-
-def score_against_pack_vote(pack: ExemplarPack, ans_vec: np.ndarray) -> Tuple[int, float, float]:
+def score_against_pack_vote(
+    pack: ExemplarPack,
+    ans_vec: np.ndarray,
+    k: int = 7,
+    temp: float = 0.08,
+) -> Tuple[Optional[int], float, str, float]:
     """
-    Returns: (pred_score, conf, best_sim)
-    - No bestmatch text returned (kept in background only).
+    Returns:
+      pred_score (0..3 or None),
+      conf (max class weight),
+      best_match_text,
+      best_match_sim
     """
-    # safe neutral if missing
     if pack is None or pack.vecs.size == 0 or ans_vec is None:
-        # neutral-ish: prefer 1
-        return 1, 0.0, 0.0
+        return None, 0.0, "", 0.0
 
-    sims = pack.vecs @ ans_vec
+    sims = pack.vecs @ ans_vec  # cosine similarity, vecs normalized
     if sims.size == 0:
-        return 1, 0.0, 0.0
+        return None, 0.0, "", 0.0
 
-    best_sim = float(sims.max())
+    # best match (for traceability)
+    best_i = int(np.argmax(sims))
+    best_text = pack.texts[best_i]
+    best_sim = float(sims[best_i])
 
-    idx = _select_topk_plus_extras(sims, TOPK)
-    top_sims = sims[idx].astype(np.float32)
-    top_scores = pack.scores[idx].astype(np.int32)
+    # vote over top-k
+    kk = int(max(1, min(k, sims.size)))
+    idx = np.argpartition(-sims, kk - 1)[:kk]
+    idx = idx[np.argsort(-sims[idx])]
 
-    w = softmax(top_sims, temp=TEMP)
+    top_sims = sims[idx]
+    top_scores = pack.scores[idx]
+
+    w = softmax(top_sims.astype(np.float32), temp=temp)
 
     class_w = np.zeros(4, dtype=np.float32)
     for sc, wi in zip(top_scores.tolist(), w.tolist()):
         if 0 <= int(sc) <= 3:
             class_w[int(sc)] += float(wi)
 
+    pred = int(class_w.argmax())
     conf = float(class_w.max())
-    if class_w.sum() <= 1e-9:
-        return 1, 0.0, best_sim
-
-    # --- smoothing when evidence is weak ---
-    # alpha = reliance on similarity vote (0..1)
-    alpha_sim = 0.0 if best_sim <= MIN_BEST_SIM else min(1.0, (best_sim - MIN_BEST_SIM) / max(1e-6, (1.0 - MIN_BEST_SIM)))
-    alpha_conf = 0.0 if conf <= MIN_CONF else min(1.0, (conf - MIN_CONF) / max(1e-6, (1.0 - MIN_CONF)))
-    alpha = min(alpha_sim, alpha_conf)
-
-    # ensure some prior influence when weak
-    alpha = max(alpha, 1.0 - PRIOR_BLEND_FLOOR)
-
-    blended = alpha * (class_w / (class_w.sum() + 1e-9)) + (1.0 - alpha) * pack.prior
-    pred = int(blended.argmax())
-    return pred, float(blended.max()), best_sim
+    return pred, conf, best_text, best_sim
 
 
 # =============================================================================
@@ -521,7 +492,14 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.getvalue()
 
 
-def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[str, ExemplarPack]) -> pd.DataFrame:
+def score_dataframe(
+    df: pd.DataFrame,
+    mapping: pd.DataFrame,
+    packs_by_qid: Dict[str, ExemplarPack],
+    knn_k: int,
+    knn_temp: float,
+    include_match_cols: bool = True,
+) -> pd.DataFrame:
     df_cols = list(df.columns)
 
     def want_col(c: str) -> bool:
@@ -543,11 +521,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
 
     n_rows = len(df)
 
-    dt_series = pd.to_datetime(
-        df[date_col].astype(str).str.strip().str.lstrip(","),
-        errors="coerce",
-    ) if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
+    # Parse date
+    dt_series = pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce") if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
 
+    # Duration
     if start_col:
         start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
@@ -574,7 +551,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
         else:
             missing_qids.append(qid)
 
-    # Batch-embed all unique answers for speed
+    # Batch-embed ALL unique answers across df for speed
     all_answers = []
     for _, rec in df.iterrows():
         for r in rows:
@@ -588,10 +565,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
     ans_emb = embed_map(list(set(all_answers)))
 
     # cache exact same (qid, answer) scoring
-    exact_cache: Dict[Tuple[str, str], Tuple[int, float, float]] = {}
-
-    # diagnostics aggregator (background only)
-    diag = {}  # qid -> {"n":..., "pred0":..., "avg_sim":..., "pack_prior":...}
+    exact_cache: Dict[Tuple[str, str], Tuple[int, float, str, float]] = {}
 
     out_rows = []
     for i, rec in df.iterrows():
@@ -602,6 +576,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(rec.get(who_col)) if who_col else ""
 
+        # passthrough
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
@@ -612,6 +587,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
 
         per_attr: Dict[str, List[int]] = {}
 
+        # per-question scoring
         for r in rows:
             qid = clean(r.get("question_id", ""))
             attr = clean(r.get("attribute", ""))
@@ -634,31 +610,38 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
 
             cache_key = (qid, ans)
             if cache_key in exact_cache:
-                sc, conf, best_sim = exact_cache[cache_key]
+                sc, conf, best_txt, best_sim = exact_cache[cache_key]
             else:
                 vec = ans_emb.get(ans)
                 pack = packs_by_qid.get(qid)
-                sc, conf, best_sim = score_against_pack_vote(pack=pack, ans_vec=vec)
-                exact_cache[cache_key] = (int(sc), float(conf), float(best_sim))
+                sc, conf, best_txt, best_sim = score_against_pack_vote(
+                    pack=pack,
+                    ans_vec=vec,
+                    k=knn_k,
+                    temp=knn_temp,
+                )
+                if sc is None:
+                    sc = 1  # safe default if no pack/embedding
+                exact_cache[cache_key] = (int(sc), float(conf), str(best_txt), float(best_sim))
 
             row[f"{attr}_Qn{qn}"] = int(sc)
             row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
+            if include_match_cols:
+                row[f"{attr}_Qn{qn}_MatchText"] = best_txt
+                row[f"{attr}_Qn{qn}_MatchSim"] = round(float(best_sim), 4)
+
             per_attr.setdefault(attr, []).append(int(sc))
 
-            # diagnostics accumulation
-            d = diag.setdefault(qid, {"n": 0, "pred0": 0, "sim_sum": 0.0, "prior": None})
-            d["n"] += 1
-            d["pred0"] += 1 if int(sc) == 0 else 0
-            d["sim_sum"] += float(best_sim)
-            if d["prior"] is None and packs_by_qid.get(qid) is not None:
-                d["prior"] = packs_by_qid[qid].prior.tolist()
-
-        # fill blanks
+        # fill blanks (so table is consistent)
         for attr in ORDERED_ATTRS:
             for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
+                if include_match_cols:
+                    row.setdefault(f"{attr}_Qn{qn}_MatchText", "")
+                    row.setdefault(f"{attr}_Qn{qn}_MatchSim", "")
 
+        # attribute averages + total
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -678,7 +661,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
 
     res = pd.DataFrame(out_rows)
 
-    # readable ordering
+    # column ordering (keep it readable)
     ordered = [c for c in ["Date", "Duration", "Care_Staff"] if c in res.columns]
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
     source_cols = [c for c in source_cols if c not in ("Date", "Duration", "Care_Staff")]
@@ -688,6 +671,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
     for attr in ORDERED_ATTRS:
         for qn in (1, 2, 3, 4):
             q_cols += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
+            if include_match_cols:
+                q_cols += [f"{attr}_Qn{qn}_MatchText", f"{attr}_Qn{qn}_MatchSim"]
     ordered += [c for c in q_cols if c in res.columns]
 
     a_cols = []
@@ -698,8 +683,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
     ordered += [c for c in ["Overall Total (0–21)", "Overall Rank"] if c in res.columns]
     res = res.reindex(columns=[c for c in ordered if c in res.columns])
 
-    st.session_state["missing_qids"] = sorted(set(missing_qids))
-    st.session_state["diag_qid"] = diag
+    if missing_qids:
+        # show once in UI via session state
+        st.session_state["missing_qids"] = sorted(set(missing_qids))
+
     return res
 
 
@@ -773,13 +760,19 @@ def main():
             <div class="pill">Thought Leadership • Meaning Scoring (Option B)</div>
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
-                Scores each response by comparing <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>,
-                using <b>Top-K=40</b>, <b>temperature=1.0</b>, plus weak-match smoothing. No centroids.
+                Scores each response by comparing the <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>,
+                using a <b>Top-K weighted vote</b>. No centroids. No review flags.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    with st.sidebar:
+        st.subheader("Scoring controls")
+        knn_k = st.slider("Top-K exemplars", min_value=3, max_value=25, value=int(st.secrets.get("KNN_K", 7)), step=1)
+        knn_temp = st.slider("Softmax temperature", min_value=0.02, max_value=0.30, value=float(st.secrets.get("KNN_TEMP", 0.08)), step=0.01)
+        include_match_cols = st.checkbox("Include matched exemplar text + similarity columns", value=True)
 
     # Load mapping + exemplars
     try:
@@ -813,40 +806,20 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
 
     with st.spinner("Scoring (Top-K vote per question)…"):
-        scored = score_dataframe(df=df, mapping=mapping, packs_by_qid=packs_by_qid)
-
-    missing_qids = st.session_state.get("missing_qids", [])
-    if missing_qids:
-        st.info(
-            "Some mapping question_id(s) could not be matched to Kobo columns: "
-            + ", ".join(missing_qids[:12])
-            + (" …" if len(missing_qids) > 12 else "")
+        scored = score_dataframe(
+            df=df,
+            mapping=mapping,
+            packs_by_qid=packs_by_qid,
+            knn_k=knn_k,
+            knn_temp=knn_temp,
+            include_match_cols=include_match_cols,
         )
 
-    # Background diagnostics (no extra columns)
-    with st.expander("Diagnostics (background)", expanded=False):
-        diag = st.session_state.get("diag_qid", {})
-        if not diag:
-            st.write("No diagnostics available.")
-        else:
-            rows = []
-            for qid, d in diag.items():
-                n = int(d["n"])
-                if n <= 0:
-                    continue
-                pct0 = float(d["pred0"]) / n
-                avg_sim = float(d["sim_sum"]) / n
-                rows.append(
-                    {
-                        "question_id": qid,
-                        "% predicted 0": round(100 * pct0, 1),
-                        "avg best_sim": round(avg_sim, 3),
-                        "exemplar_prior": d.get("prior", None),
-                    }
-                )
-            dd = pd.DataFrame(rows).sort_values(by="% predicted 0", ascending=False)
-            st.caption("If a question is ~100% predicted 0 AND its exemplar_prior is also heavy in 0, your exemplars are the root cause (not temperature).")
-            st.dataframe(dd, width="stretch")
+    # Show mapping gaps (informational only)
+    missing_qids = st.session_state.get("missing_qids", [])
+    if missing_qids:
+        st.info(f"Some mapping question_id(s) could not be matched to Kobo columns: {', '.join(missing_qids[:12])}"
+                + (" …" if len(missing_qids) > 12 else ""))
 
     st.success("✅ Scoring complete.")
 
