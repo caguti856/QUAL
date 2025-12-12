@@ -916,7 +916,7 @@ def main():
         return
 
     st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns):,}")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     # 2) Load mapping + exemplars (local files) next.
     try:
@@ -943,21 +943,22 @@ def main():
         scored = score_dataframe(df, mapping, packs)
 
     st.success("✅ Done.")
-    st.dataframe(scored, use_container_width=True)
+    st.dataframe(scored, width="stretch")
+
 
     st.download_button(
         "Download Excel",
         data=to_excel_bytes(scored),
         file_name="ThoughtLeadership_Scored.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
     )
     st.download_button(
         "Download CSV",
         data=scored.to_csv(index=False).encode("utf-8"),
         file_name="ThoughtLeadership_Scored.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 
     if AUTO_PUSH:
