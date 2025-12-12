@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -164,6 +165,10 @@ if not EXEMPLARS_PATH.exists():
 
 
 # =============================================================================
+# Embedding disk cache (speeds up scoring across reruns/restarts)
+EMB_DISK_CACHE_DIR = Path(st.secrets.get("EMB_DISK_CACHE_DIR", ".emb_cache_tl"))
+EMB_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 # SCORING CONFIG (safe defaults)
 # =============================================================================
 BANDS = {0: "Counterproductive", 1: "Compliant", 2: "Strategic", 3: "Transformative"}
@@ -185,13 +190,13 @@ ORDERED_ATTRS = [
 ]
 
 # Similarity search / fusion
-KNN_K = int(st.secrets.get("KNN_K", 25))
+KNN_K = int(st.secrets.get("KNN_K", 12))
 KNN_TEMP = float(st.secrets.get("KNN_TEMP", 0.10))
 
 # Sentence-level ensemble (prevents verbosity bias)
 MAX_SENTS_USED = int(st.secrets.get("MAX_SENTS_USED", 8))        # cap evidence sentences per answer
 SENT_MIN_WORDS = int(st.secrets.get("SENT_MIN_WORDS", 6))        # ignore very short sentences
-MMR_CANDIDATES = int(st.secrets.get("MMR_CANDIDATES", 80))       # candidate pool before diversity selection
+MMR_CANDIDATES = int(st.secrets.get("MMR_CANDIDATES", 45))       # candidate pool before diversity selection
 MMR_LAMBDA = float(st.secrets.get("MMR_LAMBDA", 0.80))           # 0..1, higher = prioritize relevance
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.80))         # exemplar similarity threshold for "same meaning"
 CONSENSUS_FLOOR = float(st.secrets.get("CONSENSUS_FLOOR", 0.45))
@@ -783,10 +788,47 @@ def _embed_texts_cached(texts_tuple: Tuple[str, ...]) -> Dict[str, np.ndarray]:
 
 _EMB_CACHE: Dict[str, np.ndarray] = {}
 
+def _emb_cache_path(text: str) -> Path:
+    h = hashlib.sha1(clean(text).encode("utf-8", errors="ignore")).hexdigest()
+    return EMB_DISK_CACHE_DIR / f"{h}.npy"
+
 def embed_many(texts: List[str]) -> None:
-    missing = [t for t in texts if t and t not in _EMB_CACHE]
+    """Embed texts with in-memory + disk cache; batch encode cache misses."""
+    normed = []
+    seen = set()
+    for t in texts:
+        t = clean(t)
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        normed.append(t)
+
+    missing = [t for t in normed if t not in _EMB_CACHE]
     if not missing:
         return
+
+    still_missing = []
+    for t in missing:
+        p = _emb_cache_path(t)
+        if p.exists():
+            try:
+                _EMB_CACHE[t] = np.load(p)
+            except Exception:
+                still_missing.append(t)
+        else:
+            still_missing.append(t)
+
+    if not still_missing:
+        return
+
+    pack = _embed_texts_cached(tuple(still_missing))
+    _EMB_CACHE.update(pack)
+
+    for t in still_missing:
+        try:
+            np.save(_emb_cache_path(t), _EMB_CACHE[t])
+        except Exception:
+            pass
     pack = _embed_texts_cached(tuple(missing))
     _EMB_CACHE.update(pack)
 
@@ -978,6 +1020,51 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x)
     ex = np.exp(x)
     return ex / (np.sum(ex) + 1e-9)
+
+def score_text_against_pack_fast(pack, ans_vec: np.ndarray) -> Optional["ScoreDist"]:
+    """Fast answer-level scoring vs exemplar TEXT embeddings (no per-sentence embedding)."""
+    if pack is None or pack.vecs.size == 0 or ans_vec is None:
+        return None
+    sims_all = pack.vecs @ ans_vec
+    if sims_all.size == 0:
+        return None
+    cN = max(30, min(int(MMR_CANDIDATES), sims_all.size))
+    cand_idx = np.argpartition(-sims_all, cN - 1)[:cN]
+    cand_idx = cand_idx[np.argsort(-sims_all[cand_idx])]
+    cand_vecs = pack.vecs[cand_idx]
+    cand_sims = sims_all[cand_idx]
+    k = max(1, min(int(KNN_K), cand_sims.size))
+    sel_local = _mmr_select(ans_vec, cand_vecs, cand_sims, k=k, lam=MMR_LAMBDA)
+    sel_idx = cand_idx[sel_local]
+    top_sims = sims_all[sel_idx]
+    top_scores = pack.scores[sel_idx]
+    w = _softmax((top_sims - float(top_sims.max())) / float(KNN_TEMP))
+    dist = np.zeros(4, dtype=np.float32)
+    for s, wi in zip(top_scores, w):
+        s = int(s)
+        if 0 <= s <= 3:
+            dist[s] += float(wi)
+    cent_sims = pack.centroids @ ans_vec
+    cent_mask = (pack.counts >= 1).astype(np.float32)
+    cent_sims = cent_sims * cent_mask + (-10.0) * (1.0 - cent_mask)
+    cent_dist = _softmax(cent_sims / max(1e-6, float(KNN_TEMP)))
+    alpha = float(CENTROID_ALPHA)
+    if pack.vecs.shape[0] < 25:
+        alpha = min(0.9, max(alpha, 0.75))
+    dist = alpha * dist + (1.0 - alpha) * cent_dist
+    dist = dist / (dist.sum() + 1e-9)
+    sel_vecs = pack.vecs[sel_idx]
+    consensus_share, purity, _ = _consensus_score(sel_vecs, top_scores.astype(int), CLUSTER_SIM)
+    conf = float(dist.max())
+    penalty = float(np.clip(1.0 - (0.75 * consensus_share + 0.25 * purity), 0.0, 0.30))
+    conf = float(np.clip(conf * (1.0 - penalty), 0.0, 1.0))
+    expected = float(np.dot(dist, np.arange(4)))
+    pred = int(np.clip(int(round(expected)), 0, 3))
+    if pred >= 3 and conf < CONSENSUS_FLOOR:
+        pred = 2
+    max_sim = float(top_sims.max()) if top_sims.size else float(np.max(sims_all))
+    margin = float(np.sort(top_sims)[-1] - np.sort(top_sims)[-2]) if top_sims.size >= 2 else float(max_sim)
+    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=max_sim, margin=margin, method="fast_mmr+centroid")
 
 def score_vec_against_pack(pack: Any, vec: np.ndarray) -> Optional['ScoreDist']:
     """Return a fused score distribution from top-k exemplars + per-score centroids."""
@@ -1668,7 +1755,12 @@ def main():
 
     # Sidebar controls (safe & transparent)
     st.sidebar.header("Scoring controls")
-    
+    st.sidebar.caption("These adjust behaviour without editing code (optional).")
+    st.sidebar.write(f"KNN_K = {KNN_K}")
+    st.sidebar.write(f"KNN_TEMP = {KNN_TEMP}")
+    st.sidebar.write(f"OFFTOPIC_QSIM = {OFFTOPIC_QSIM}")
+    st.sidebar.write(f"RUBRIC_OVERRIDE = {RUBRIC_OVERRIDE}")
+    st.sidebar.write(f"RUBRIC_SHOW_AUDIT = {RUBRIC_SHOW_AUDIT}")
 
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
