@@ -293,14 +293,38 @@ AI_BUZZWORDS = {
 def clean(s):
     if s is None:
         return ""
+    # treat NaN as empty
+    try:
+        if isinstance(s, float) and s != s:
+            return ""
+    except Exception:
+        pass
+
     s = unicodedata.normalize("NFKC", str(s))
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     return re.sub(r"\s+", " ", s).strip()
 
-def qa_overlap(ans: str, qtext: str) -> float:
-    at = set(re.findall(r"\w+", (ans or "").lower()))
-    qt = set(re.findall(r"\w+", (qtext or "").lower()))
+
+def qa_overlap(ans, qtext) -> float:
+    # handle NaN/None/etc safely
+    def _t(x) -> str:
+        if x is None:
+            return ""
+        # NaN check: NaN != NaN is True
+        try:
+            if isinstance(x, float) and x != x:
+                return ""
+        except Exception:
+            pass
+        return str(x)
+
+    ans_s = _t(ans).lower()
+    q_s   = _t(qtext).lower()
+
+    at = set(re.findall(r"\w+", ans_s))
+    qt = set(re.findall(r"\w+", q_s))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
+
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
     """
