@@ -848,6 +848,13 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         for r in all_mapping:
             qid, attr, qhint = r["question_id"], r["attribute"], r.get("prompt_hint","")
+            # derive question number early (needed for explainability columns)
+            qn = None
+            if "_Q" in (qid or ""):
+                try:
+                    qn = int(str(qid).split("_Q")[-1])
+                except Exception:
+                    qn = None
             col = resolved_for_qid.get(qid)
             if not col:
                 continue
@@ -953,13 +960,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             ai_score = ai_signal_score(ans, qhint_full)
             if ai_score >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
-
-            qn = None
-            if "_Q" in (qid or ""):
-                try:
-                    qn = int(qid.split("_Q")[-1])
-                except Exception:
-                    qn = None
 
             if qn in (1,2,3,4) and sc is not None:
                 sk = f"{attr}_Qn{qn}"
