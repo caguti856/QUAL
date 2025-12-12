@@ -220,6 +220,7 @@ ORDERED_ATTRS = [
 FUZZY_THRESHOLD = 80
 MIN_QA_OVERLAP  = 0.05
 
+DUP_SIM        = float(st.secrets.get("DUP_SIM", 0.92))  # reuse score if answer is semantically same for a question
 # passthrough source columns we keep (front of table)
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
@@ -682,15 +683,25 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         hit = resolve_kobo_column_for_mapping(df_cols, qid, qhint)
         if hit: resolved_for_qid[qid] = hit
 
-    # batch-embed all distinct answers once
-    distinct_answers = set()
+    # batch-embed distinct answers ONCE, but grouped per question (qid)
+    distinct_by_qid: dict[str, set[str]] = {}
     for _, row in df.iterrows():
         for r in all_mapping:
-            col = resolved_for_qid.get(r["question_id"])
+            qid = r["question_id"]
+            col = resolved_for_qid.get(qid)
             if col and col in df.columns:
                 a = clean(row.get(col, ""))
-                if a: distinct_answers.add(a)
-    embed_many(list(distinct_answers))
+                if a:
+                    distinct_by_qid.setdefault(qid, set()).add(a)
+
+    all_distinct = set()
+    for s in distinct_by_qid.values():
+        all_distinct |= s
+    embed_many(list(all_distinct))
+
+    # caches to enforce within-question consistency (reuse score for paraphrases)
+    exact_sc_cache: dict[tuple[str, str], int] = {}   # (qid, answer_text) -> score
+    dup_bank: dict[str, list[tuple[np.ndarray, int]]] = {}  # qid -> [(vec, score)]
 
     out_rows = []
     for i, resp in df.iterrows():
@@ -738,8 +749,23 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                 qtext_cache[qkey] = (by_qkey.get(qkey, {}) or {}).get("question_text","")
             qhint_full = qtext_cache.get(qkey, "") if qkey else qhint
 
-            sc = None
-            if vec is not None:
+            was_cached = (qid, ans) in exact_sc_cache
+            sc = exact_sc_cache.get((qid, ans))
+            reused = False
+
+            # 1) Exact-match cache (fast path), then semantic duplicate reuse within SAME question (qid)
+            if sc is None and vec is not None:
+                best_dup_sc, best_dup_sim = None, -1.0
+                for v2, sc2 in dup_bank.get(qid, []):
+                    sim = float(np.dot(vec, v2))  # cosine similarity (embeddings are normalized)
+                    if sim > best_dup_sim:
+                        best_dup_sim, best_dup_sc = sim, sc2
+                if best_dup_sc is not None and best_dup_sim >= DUP_SIM:
+                    sc = int(best_dup_sc)
+                    reused = True
+
+            # 2) If not a duplicate, score against exemplars
+            if sc is None and vec is not None:
                 def best_sim(cent_dict):
                     best_s, best_v = None, -1e9
                     for s, c in cent_dict.items():
@@ -755,6 +781,15 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sc = best_sim(global_centroids)
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(sc, 1)
+
+            # cache result for consistency within the same question
+            if sc is not None and not was_cached:
+                exact_sc_cache[(qid, ans)] = int(sc)
+                if vec is not None and not reused:
+                    bank = dup_bank.setdefault(qid, [])
+                    if len(bank) < 300:
+                        bank.append((vec, int(sc)))
+
 
             # per-answer AI suspicion
             ai_score = ai_signal_score(ans, qhint_full)
