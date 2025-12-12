@@ -186,15 +186,21 @@ ORDERED_ATTRS = [
 
 # Similarity search / fusion
 KNN_K = int(st.secrets.get("KNN_K", 25))
-KNN_TEMP = float(st.secrets.get("KNN_TEMP", 0.09))
+KNN_TEMP = float(st.secrets.get("KNN_TEMP", 0.10))
 
 # Sentence-level ensemble (prevents verbosity bias)
 MAX_SENTS_USED = int(st.secrets.get("MAX_SENTS_USED", 8))        # cap evidence sentences per answer
 SENT_MIN_WORDS = int(st.secrets.get("SENT_MIN_WORDS", 6))        # ignore very short sentences
 MMR_CANDIDATES = int(st.secrets.get("MMR_CANDIDATES", 80))       # candidate pool before diversity selection
-MMR_LAMBDA = float(st.secrets.get("MMR_LAMBDA", 0.72))           # 0..1, higher = prioritize relevance
-CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.85))         # exemplar similarity threshold for "same meaning"
-CONSENSUS_FLOOR = float(st.secrets.get("CONSENSUS_FLOOR", 0.55))  # if consensus below, don't allow score=3
+MMR_LAMBDA = float(st.secrets.get("MMR_LAMBDA", 0.80))           # 0..1, higher = prioritize relevance
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.80))         # exemplar similarity threshold for "same meaning"
+CONSENSUS_FLOOR = float(st.secrets.get("CONSENSUS_FLOOR", 0.45))
+
+# Mixture weights across packs (question / attribute / global)
+WQ_MIX = float(st.secrets.get("WQ_MIX", 0.70))
+WA_MIX = float(st.secrets.get("WA_MIX", 0.20))
+WG_MIX = float(st.secrets.get("WG_MIX", 0.10))
+  # if consensus below, don't allow score=3
 
 # Score fusion: how much weight to give KNN vs centroids
 CENTROID_ALPHA = float(st.secrets.get("CENTROID_ALPHA", 0.60))  # 0..1
@@ -520,7 +526,8 @@ def score_text_against_pack(pack, ans: str, ans_vec: np.ndarray):
         sel_vecs = pack.vecs[sel_idx]
         consensus_share, purity, dom_label = _consensus_score(sel_vecs, top_scores.astype(int), CLUSTER_SIM)
         # penalty is higher when agreement is low
-        penalty = float(np.clip(1.0 - (0.65 * consensus_share + 0.35 * purity), 0.0, 0.6))
+        # Softer consensus penalty (avoid overly-strict confidence collapse)
+        penalty = float(np.clip(1.0 - (0.75 * consensus_share + 0.25 * purity), 0.0, 0.35))
         consensus_penalties.append(penalty)
 
         dists.append(dist)
@@ -533,11 +540,22 @@ def score_text_against_pack(pack, ans: str, ans_vec: np.ndarray):
     if not dists:
         return None
 
-    # Average across sentences (NO length bonus)
-    dist = np.mean(np.vstack(dists), axis=0)
+    # Aggregate across sentences WITHOUT length bonus:
+    # We use a weighted average so strong, highly-supported sentences carry more weight,
+    # but adding more sentences does not automatically increase the score.
+    mat = np.vstack(dists)  # (S, 4)
+
+    # Sentence weights: higher if distribution is confident and similarity is strong.
+    # Use a mild floor so no single sentence dominates completely.
+    sent_conf = np.max(mat, axis=1)  # (S,)
+    # Convert max_sim proxies from penalties list length; we don't have per-sentence max_sim stored,
+    # so use confidence as the primary weight.
+    w = 0.15 + 0.85 * sent_conf
+    w = w / (w.sum() + 1e-9)
+
+    dist = (mat * w[:, None]).sum(axis=0)
     dist = dist / (dist.sum() + 1e-9)
 
-    # Expected score and prediction
     expected = float(np.dot(dist, np.arange(4)))
     pred = int(np.clip(int(round(expected)), 0, 3))
     conf = float(dist.max())
@@ -546,13 +564,11 @@ def score_text_against_pack(pack, ans: str, ans_vec: np.ndarray):
     if consensus_penalties:
         conf = float(np.clip(conf * (1.0 - float(np.mean(consensus_penalties))), 0.0, 1.0))
 
-    # Prevent easy "3" if consensus is weak overall (automatic)
-    if pred >= 3:
-        # derive a rough consensus from the averaged distribution dominance
-        if conf < CONSENSUS_FLOOR:
-            pred = 2
+    # Prevent accidental 3s only when consensus/confidence is genuinely weak
+    if pred >= 3 and conf < CONSENSUS_FLOOR:
+        pred = 2
 
-    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=float(max_sim_overall), margin=float(margin_overall), method="sentence_mmr+centroid")
+    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=float(max_sim_overall), margin=float(margin_overall), method="sentence_mmr+centroid_weighted")
 
 # =============================================================================
 # AI DETECTION (your original logic, unchanged)
@@ -799,6 +815,30 @@ class Any:
     texts: List[str]            # (n,)
     centroids: np.ndarray       # (4, d) normalized
     counts: np.ndarray          # (4,)
+
+
+def _mix_dists(dists, weights):
+    """
+    Mix multiple ScoreDist distributions (question/attribute/global).
+    Uses only the 'dist' field, and recomputes expected/pred/conf.
+    """
+    if dists is None or weights is None:
+        return None
+    present = [(d, float(w)) for d, w in zip(dists, weights) if d is not None and float(w) > 0]
+    if not present:
+        return None
+    ws = np.array([w for _, w in present], dtype=np.float32)
+    ws = ws / (ws.sum() + 1e-9)
+    mat = np.vstack([d.dist for d, _ in present]).astype(np.float32)
+    dist = (mat * ws[:, None]).sum(axis=0)
+    dist = dist / (dist.sum() + 1e-9)
+    expected = float(np.dot(dist, np.arange(4)))
+    pred = int(np.clip(int(round(expected)), 0, 3))
+    conf = float(dist.max())
+    max_sim = float(max(d.max_sim for d, _ in present))
+    margin = float(max(d.margin for d, _ in present))
+    method = "mix"
+    return ScoreDist(dist=dist, expected=expected, pred=pred, conf=conf, max_sim=max_sim, margin=margin, method=method)
 
 def _build_pack(texts: List[str], scores: List[int]) -> Any:
     # de-dup exact pairs
@@ -1354,17 +1394,12 @@ def score_dataframe(
                 qtext_full = clean((by_qkey.get(qkey, {}) or {}).get("question_text", ""))
 
             if sc is None:
-                # Try question-specific pack
-                if qkey and qkey in q_packs:
-                    ex = score_text_against_pack(q_packs[qkey], ans, vec)
+                # Score against ALL packs and mix (reduces strictness when question exemplars are sparse)
+                ex_q = score_text_against_pack(q_packs[qkey], ans, vec) if (qkey and qkey in q_packs) else None
+                ex_a = score_text_against_pack(a_packs[attr], ans, vec) if (attr in a_packs) else None
+                ex_g = score_text_against_pack(g_pack, ans, vec)
 
-                # fallback: attribute pack
-                if ex is None and attr in a_packs:
-                    ex = score_text_against_pack(a_packs[attr], ans, vec)
-
-                # fallback: global pack
-                if ex is None:
-                    ex = score_text_against_pack(g_pack, ans, vec)
+                ex = _mix_dists([ex_q, ex_a, ex_g], [WQ_MIX, WA_MIX, WG_MIX])
 
             # Rubric
             rub_sc, rub_conf, rub_reason = rubric_validate(qid, ans)
@@ -1382,10 +1417,13 @@ def score_dataframe(
                 ex_conf_for_adapt = ex.conf if ex is not None else 0.0
                 thr = _adaptive_thresholds(ans, ex_conf_for_adapt, qsim, lex)
 
-                # Only declare off-topic if BOTH semantic similarity and lexical overlap are low (adaptive thresholds)
-                if qsim < thr["off_qsim"] and lex < thr["min_lex"]:
-                    off_topic = True
-                    # NOTE: We only *cap* later if answer is short or exemplar confidence is low.
+                # Off-topic flagging (semantic-first; lexical overlap is unreliable for paraphrases)
+                if qsim < thr["off_qsim"]:
+                    if len(ans) < 90:
+                        if lex < thr["min_lex"]:
+                            off_topic = True
+                    else:
+                        off_topic = True
 
             # Combine
             if sc is None:
@@ -1394,13 +1432,13 @@ def score_dataframe(
                 sc = final_sc
 
                 # Off-topic handling (after combining)
-                # Automatic adaptive thresholds; no manual tuning required.
+                # For open-ended questions, paraphrases can look "off-topic" lexically.
+                # We therefore *mostly* flag for review and only cap when clearly unrelated and short.
                 if off_topic:
-                    ex_conf_for_adapt = ex.conf if ex is not None else 0.0
-                    thr = _adaptive_thresholds(ans, ex_conf_for_adapt, qsim, lex if qsim is not None else 0.0)
-                    if thr["cap_now"](sc) and sc > thr["cap"]:
-                        sc = int(thr["cap"])
                     needs_review = True
+                    if (len(ans) < 90) and (qsim is not None and qsim < 0.06):
+                        if sc > 1:
+                            sc = 1
 
             # Cache scored result
             if sc is not None and not was_cached:
@@ -1630,12 +1668,7 @@ def main():
 
     # Sidebar controls (safe & transparent)
     st.sidebar.header("Scoring controls")
-    st.sidebar.caption("These adjust behaviour without editing code (optional).")
-    st.sidebar.write(f"KNN_K = {KNN_K}")
-    st.sidebar.write(f"KNN_TEMP = {KNN_TEMP}")
-    st.sidebar.write(f"OFFTOPIC_QSIM = {OFFTOPIC_QSIM}")
-    st.sidebar.write(f"RUBRIC_OVERRIDE = {RUBRIC_OVERRIDE}")
-    st.sidebar.write(f"RUBRIC_SHOW_AUDIT = {RUBRIC_SHOW_AUDIT}")
+    
 
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
