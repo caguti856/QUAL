@@ -1,5 +1,8 @@
-# thoughtleadership.py — Kobo mapping + Meaning scoring (Option B: Top-K weighted vote)
-# Scores ANSWER TEXT against exemplar TEXT per question_id (no centroid, no review flags)
+# thoughtleadership.py — Kobo mapping + Meaning scoring (Option B: Adaptive Top-K + Adaptive Temperature)
+# Scores ANSWER TEXT against exemplar TEXT per question_id (no centroid, no review flags, no best-match columns)
+# - Per-answer adaptive Top-K (up to 40) using a similarity margin from top1
+# - Per-answer adaptive Temperature chosen to match an effective number of neighbors (n_eff)
+# - Lightweight model: all-MiniLM-L6-v2 by default
 
 from __future__ import annotations
 
@@ -167,6 +170,27 @@ WORD_RX = re.compile(r"\w+")
 
 
 # =============================================================================
+# ADAPTIVE SCORING CONTROLS (AUTO)
+# =============================================================================
+# Top-K selection (per answer)
+KMAX = int(st.secrets.get("KMAX", 40))
+KMIN = int(st.secrets.get("KMIN", 10))
+TOP_MARGIN = float(st.secrets.get("TOP_MARGIN", 0.04))  # keep neighbors within (top1 - margin)
+
+# Temperature auto-tuning using effective neighbor count (per answer)
+NEFF_MIN = float(st.secrets.get("NEFF_MIN", 4.0))
+NEFF_MAX = float(st.secrets.get("NEFF_MAX", 18.0))
+SPREAD_REF = float(st.secrets.get("SPREAD_REF", 0.08))  # similarity spread at which we consider evidence "sharp"
+T_LO = float(st.secrets.get("TEMP_LO", 0.05))
+T_HI = float(st.secrets.get("TEMP_HI", 3.0))
+T_ITERS = int(st.secrets.get("TEMP_ITERS", 20))
+
+# Safety: if nearest similarity is very low, default to 1 to avoid random 0s
+LOW_SIM_DEFAULT = float(st.secrets.get("LOW_SIM_DEFAULT", 0.32))
+LOW_SIM_SCORE = int(st.secrets.get("LOW_SIM_SCORE", 1))
+
+
+# =============================================================================
 # CLEANING
 # =============================================================================
 def clean(s) -> str:
@@ -229,7 +253,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
 
-    # normalize expected columns
     if "prompt_hint" not in df.columns and "column" in df.columns:
         df = df.rename(columns={"column": "prompt_hint"})
 
@@ -237,7 +260,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not required.issubset(set(df.columns)):
         raise ValueError(f"mapping.csv must include: {', '.join(sorted(required))}")
 
-    # snap attribute names to ORDERED_ATTRS
     norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
     target = {norm(a): a for a in ORDERED_ATTRS}
 
@@ -250,6 +272,7 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
 
     df["attribute"] = df["attribute"].apply(snap_attr)
     df = df[df["attribute"].notna()].copy()
+
     if "prompt_hint" not in df.columns:
         df["prompt_hint"] = ""
 
@@ -269,10 +292,6 @@ def _score_kobo_header(col: str, token: str) -> int:
 
 
 def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: str) -> Optional[str]:
-    """
-    Maps question_id -> Kobo column in the fetched dataframe.
-    Works with tokens like A1_1, A2_3, etc and fuzzy fallback to prompt_hint.
-    """
     qid = (qid or "").strip()
     if not qid:
         return None
@@ -324,7 +343,6 @@ def read_jsonl_path(path: Path) -> List[dict]:
             try:
                 out.append(json.loads(s))
             except json.JSONDecodeError:
-                # tolerate trailing comma
                 s2 = re.sub(r",\s*$", "", s)
                 out.append(json.loads(s2))
     return out
@@ -334,7 +352,7 @@ def read_jsonl_path(path: Path) -> List[dict]:
 class ExemplarPack:
     vecs: np.ndarray       # (n, d) normalized
     scores: np.ndarray     # (n,) int 0..3
-    texts: List[str]       # exemplar text
+    texts: List[str]       # exemplar text (kept for completeness; not exported)
 
 
 # =============================================================================
@@ -342,7 +360,6 @@ class ExemplarPack:
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
-    # Small & fast semantic model
     return SentenceTransformer(st.secrets.get("EMBED_MODEL", "all-MiniLM-L6-v2"))
 
 
@@ -374,10 +391,6 @@ def embed_map(texts: List[str]) -> Dict[str, np.ndarray]:
 
 
 def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
-    """
-    Build pack per question_id using exemplar 'text' ONLY.
-    (No centroids. Every answer matches to real exemplar texts.)
-    """
     by_qid: Dict[str, Dict[str, list]] = {}
     all_texts: List[str] = []
 
@@ -400,7 +413,6 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
     packs: Dict[str, ExemplarPack] = {}
     for qid, d in by_qid.items():
-        # de-dup exact text+score pairs
         seen = set()
         texts, scores, vecs = [], [], []
         for t, s in zip(d["texts"], d["scores"]):
@@ -416,7 +428,11 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
             vecs.append(v)
 
         if not vecs:
-            packs[qid] = ExemplarPack(vecs=np.zeros((0, 384), dtype=np.float32), scores=np.array([], dtype=np.int32), texts=[])
+            packs[qid] = ExemplarPack(
+                vecs=np.zeros((0, 384), dtype=np.float32),
+                scores=np.array([], dtype=np.int32),
+                texts=[],
+            )
         else:
             packs[qid] = ExemplarPack(
                 vecs=np.vstack(vecs).astype(np.float32),
@@ -428,7 +444,7 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
 
 # =============================================================================
-# OPTION B: Top-K weighted vote scoring (meaning-based)
+# OPTION B: Adaptive Top-K + Adaptive Temperature vote (meaning-based)
 # =============================================================================
 def softmax(x: np.ndarray, temp: float) -> np.ndarray:
     t = float(max(1e-6, temp))
@@ -437,38 +453,62 @@ def softmax(x: np.ndarray, temp: float) -> np.ndarray:
     return ex / (ex.sum() + 1e-9)
 
 
-def score_against_pack_vote(
-    pack: ExemplarPack,
-    ans_vec: np.ndarray,
-    k: int = 7,
-    temp: float = 0.08,
-) -> Tuple[Optional[int], float, str, float]:
-    """
-    Returns:
-      pred_score (0..3 or None),
-      conf (max class weight),
-      best_match_text,
-      best_match_sim
-    """
+def effective_neighbors(w: np.ndarray) -> float:
+    return float(1.0 / (np.sum(w * w) + 1e-9))
+
+
+def choose_topk_idx(sims: np.ndarray, kmax: int, kmin: int, margin: float) -> np.ndarray:
+    order = np.argsort(-sims)
+    sims_sorted = sims[order]
+    top1 = float(sims_sorted[0])
+
+    keep = np.where(sims_sorted >= (top1 - margin))[0]
+    kk = int(np.clip(len(keep), kmin, min(kmax, sims.size)))
+    return order[:kk]
+
+
+def solve_temp_for_neff(
+    top_sims: np.ndarray,
+    target_neff: float,
+    t_lo: float,
+    t_hi: float,
+    iters: int,
+) -> float:
+    lo, hi = float(t_lo), float(t_hi)
+    for _ in range(int(iters)):
+        mid = (lo + hi) / 2.0
+        w = softmax(top_sims.astype(np.float32), temp=mid)
+        neff = effective_neighbors(w)
+        if neff < target_neff:
+            lo = mid
+        else:
+            hi = mid
+    return float((lo + hi) / 2.0)
+
+
+def score_against_pack_adaptive(pack: ExemplarPack, ans_vec: np.ndarray) -> Tuple[Optional[int], float]:
     if pack is None or pack.vecs.size == 0 or ans_vec is None:
-        return None, 0.0, "", 0.0
+        return None, 0.0
 
-    sims = pack.vecs @ ans_vec  # cosine similarity, vecs normalized
+    sims = pack.vecs @ ans_vec
     if sims.size == 0:
-        return None, 0.0, "", 0.0
+        return None, 0.0
 
-    # best match (for traceability)
-    best_i = int(np.argmax(sims))
-    best_text = pack.texts[best_i]
-    best_sim = float(sims[best_i])
+    top1 = float(np.max(sims))
+    if top1 < LOW_SIM_DEFAULT:
+        return int(LOW_SIM_SCORE), 0.0
 
-    # vote over top-k
-    kk = int(max(1, min(k, sims.size)))
-    idx = np.argpartition(-sims, kk - 1)[:kk]
-    idx = idx[np.argsort(-sims[idx])]
-
+    idx = choose_topk_idx(sims, kmax=KMAX, kmin=KMIN, margin=TOP_MARGIN)
     top_sims = sims[idx]
     top_scores = pack.scores[idx]
+
+    spread = float(top_sims.max() - top_sims.min())
+    sharpness = min(1.0, spread / max(1e-6, SPREAD_REF))
+    # sharp -> lower neff (sharper weights), mixed -> higher neff (flatter weights)
+    target_neff = NEFF_MIN + (NEFF_MAX - NEFF_MIN) * (1.0 - sharpness)
+    target_neff = float(np.clip(target_neff, NEFF_MIN, min(NEFF_MAX, float(len(top_sims)))))
+
+    temp = solve_temp_for_neff(top_sims, target_neff=target_neff, t_lo=T_LO, t_hi=T_HI, iters=T_ITERS)
 
     w = softmax(top_sims.astype(np.float32), temp=temp)
 
@@ -479,11 +519,11 @@ def score_against_pack_vote(
 
     pred = int(class_w.argmax())
     conf = float(class_w.max())
-    return pred, conf, best_text, best_sim
+    return pred, conf
 
 
 # =============================================================================
-# DATAFRAME SCORING
+# EXPORTS
 # =============================================================================
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
@@ -492,13 +532,13 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.getvalue()
 
 
+# =============================================================================
+# DATAFRAME SCORING
+# =============================================================================
 def score_dataframe(
     df: pd.DataFrame,
     mapping: pd.DataFrame,
     packs_by_qid: Dict[str, ExemplarPack],
-    knn_k: int,
-    knn_temp: float,
-    include_match_cols: bool = True,
 ) -> pd.DataFrame:
     df_cols = list(df.columns)
 
@@ -521,10 +561,11 @@ def score_dataframe(
 
     n_rows = len(df)
 
-    # Parse date
-    dt_series = pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce") if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
+    dt_series = pd.to_datetime(
+        df[date_col].astype(str).str.strip().str.lstrip(","),
+        errors="coerce"
+    ) if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
 
-    # Duration
     if start_col:
         start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
@@ -537,7 +578,6 @@ def score_dataframe(
 
     duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
 
-    # Resolve mapping -> Kobo columns
     rows = [r for r in mapping.to_dict(orient="records") if clean(r.get("attribute", "")) in ORDERED_ATTRS]
 
     resolved_for_qid: Dict[str, str] = {}
@@ -551,7 +591,7 @@ def score_dataframe(
         else:
             missing_qids.append(qid)
 
-    # Batch-embed ALL unique answers across df for speed
+    # Batch-embed ALL unique answers across df
     all_answers = []
     for _, rec in df.iterrows():
         for r in rows:
@@ -565,7 +605,7 @@ def score_dataframe(
     ans_emb = embed_map(list(set(all_answers)))
 
     # cache exact same (qid, answer) scoring
-    exact_cache: Dict[Tuple[str, str], Tuple[int, float, str, float]] = {}
+    exact_cache: Dict[Tuple[str, str], Tuple[int, float]] = {}
 
     out_rows = []
     for i, rec in df.iterrows():
@@ -576,7 +616,6 @@ def score_dataframe(
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(rec.get(who_col)) if who_col else ""
 
-        # passthrough
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
@@ -587,7 +626,6 @@ def score_dataframe(
 
         per_attr: Dict[str, List[int]] = {}
 
-        # per-question scoring
         for r in rows:
             qid = clean(r.get("question_id", ""))
             attr = clean(r.get("attribute", ""))
@@ -610,38 +648,26 @@ def score_dataframe(
 
             cache_key = (qid, ans)
             if cache_key in exact_cache:
-                sc, conf, best_txt, best_sim = exact_cache[cache_key]
+                sc, conf = exact_cache[cache_key]
             else:
                 vec = ans_emb.get(ans)
                 pack = packs_by_qid.get(qid)
-                sc, conf, best_txt, best_sim = score_against_pack_vote(
-                    pack=pack,
-                    ans_vec=vec,
-                    k=knn_k,
-                    temp=knn_temp,
-                )
+                sc, conf = score_against_pack_adaptive(pack=pack, ans_vec=vec)
                 if sc is None:
-                    sc = 1  # safe default if no pack/embedding
-                exact_cache[cache_key] = (int(sc), float(conf), str(best_txt), float(best_sim))
+                    sc = 1
+                    conf = 0.0
+                exact_cache[cache_key] = (int(sc), float(conf))
 
             row[f"{attr}_Qn{qn}"] = int(sc)
             row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
-            if include_match_cols:
-                row[f"{attr}_Qn{qn}_MatchText"] = best_txt
-                row[f"{attr}_Qn{qn}_MatchSim"] = round(float(best_sim), 4)
-
             per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill blanks (so table is consistent)
+        # fill blanks
         for attr in ORDERED_ATTRS:
             for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
-                if include_match_cols:
-                    row.setdefault(f"{attr}_Qn{qn}_MatchText", "")
-                    row.setdefault(f"{attr}_Qn{qn}_MatchSim", "")
 
-        # attribute averages + total
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -661,7 +687,6 @@ def score_dataframe(
 
     res = pd.DataFrame(out_rows)
 
-    # column ordering (keep it readable)
     ordered = [c for c in ["Date", "Duration", "Care_Staff"] if c in res.columns]
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
     source_cols = [c for c in source_cols if c not in ("Date", "Duration", "Care_Staff")]
@@ -671,8 +696,6 @@ def score_dataframe(
     for attr in ORDERED_ATTRS:
         for qn in (1, 2, 3, 4):
             q_cols += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
-            if include_match_cols:
-                q_cols += [f"{attr}_Qn{qn}_MatchText", f"{attr}_Qn{qn}_MatchSim"]
     ordered += [c for c in q_cols if c in res.columns]
 
     a_cols = []
@@ -684,7 +707,6 @@ def score_dataframe(
     res = res.reindex(columns=[c for c in ordered if c in res.columns])
 
     if missing_qids:
-        # show once in UI via session state
         st.session_state["missing_qids"] = sorted(set(missing_qids))
 
     return res
@@ -757,11 +779,11 @@ def main():
     st.markdown(
         """
         <div class="app-header-card">
-            <div class="pill">Thought Leadership • Meaning Scoring (Option B)</div>
+            <div class="pill">Thought Leadership • Meaning Scoring (Adaptive Option B)</div>
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
                 Scores each response by comparing the <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>,
-                using a <b>Top-K weighted vote</b>. No centroids. No review flags.
+                using <b>adaptive Top-K</b> and <b>adaptive temperature</b>. No centroids. No review flags. No best-match columns.
             </p>
         </div>
         """,
@@ -769,10 +791,10 @@ def main():
     )
 
     with st.sidebar:
-        st.subheader("Scoring controls")
-        knn_k = st.slider("Top-K exemplars", min_value=3, max_value=25, value=int(st.secrets.get("KNN_K", 7)), step=1)
-        knn_temp = st.slider("Softmax temperature", min_value=0.02, max_value=0.30, value=float(st.secrets.get("KNN_TEMP", 0.08)), step=0.01)
-        include_match_cols = st.checkbox("Include matched exemplar text + similarity columns", value=True)
+        st.subheader("Scoring (auto)")
+        st.caption(f"Top-K: auto (Kmin={KMIN}, Kmax={KMAX}, margin={TOP_MARGIN})")
+        st.caption(f"Temp: auto (neff {NEFF_MIN}–{NEFF_MAX}, spread_ref={SPREAD_REF})")
+        st.caption(f"Low similarity default: if top1 < {LOW_SIM_DEFAULT} → score {LOW_SIM_SCORE}")
 
     # Load mapping + exemplars
     try:
@@ -805,21 +827,16 @@ def main():
     st.dataframe(df, width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.spinner("Scoring (Top-K vote per question)…"):
-        scored = score_dataframe(
-            df=df,
-            mapping=mapping,
-            packs_by_qid=packs_by_qid,
-            knn_k=knn_k,
-            knn_temp=knn_temp,
-            include_match_cols=include_match_cols,
-        )
+    with st.spinner("Scoring (adaptive Top-K vote per question)…"):
+        scored = score_dataframe(df=df, mapping=mapping, packs_by_qid=packs_by_qid)
 
-    # Show mapping gaps (informational only)
     missing_qids = st.session_state.get("missing_qids", [])
     if missing_qids:
-        st.info(f"Some mapping question_id(s) could not be matched to Kobo columns: {', '.join(missing_qids[:12])}"
-                + (" …" if len(missing_qids) > 12 else ""))
+        st.info(
+            "Some mapping question_id(s) could not be matched to Kobo columns: "
+            + ", ".join(missing_qids[:12])
+            + (" …" if len(missing_qids) > 12 else "")
+        )
 
     st.success("✅ Scoring complete.")
 
