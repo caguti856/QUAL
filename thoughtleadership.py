@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -895,7 +896,17 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> Tuple[bool, str]:
 # =============================================================================
 def main():
     inject_css()
-    st.title("Thought Leadership • Fast Meaning Scoring")
+
+    st.markdown("""
+        <div class="app-header-card">
+            <div class="pill">Thought Leadership • Auto Scoring</div>
+            <h1>Thought Leadership</h1>
+            <p class="app-header-subtitle">
+                Importing Kobo submissions, scoring CARE thought leadership attributes (nearest exemplars),
+                flagging AI-like responses, and exporting results to Google Sheets.
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
 
     # 1) Fetch Kobo FIRST so users see data immediately.
     with st.spinner("Fetching Kobo submissions…"):
