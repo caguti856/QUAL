@@ -198,16 +198,13 @@ MIN_QA_OVERLAP  = 0.05
 DUP_SIM = float(st.secrets.get("DUP_SIM", 0.92))
 
 # exemplar-nearest scoring controls
-KNN_METHOD   = st.secrets.get("KNN_METHOD", "top1").lower().strip()  # "top1" or "softmax"
-KNN_K        = int(st.secrets.get("KNN_K", 7))
+KNN_METHOD   = st.secrets.get("KNN_METHOD", "softmax").lower().strip()  # "top1" or "softmax"
+KNN_K        = int(st.secrets.get("KNN_K", 15))
 KNN_TEMP     = float(st.secrets.get("KNN_TEMP", 0.08))
 CONF_CLAMP   = float(st.secrets.get("CONF_CLAMP", 0.0))  # 0 disables; e.g. 0.45 clamps high scores on low confidence
 
-# rubric override controls (post-score validator)
-RUBRIC_OVERRIDE = bool(st.secrets.get("RUBRIC_OVERRIDE", True))
-RUBRIC_UPGRADE_CONF = float(st.secrets.get("RUBRIC_UPGRADE_CONF", 0.75))
-RUBRIC_DOWNGRADE = bool(st.secrets.get("RUBRIC_DOWNGRADE", False))
-RUBRIC_SHOW_AUDIT = bool(st.secrets.get("RUBRIC_SHOW_AUDIT", False))
+# explainability: "off" | "basic"
+EXPLAIN_LEVEL = str(st.secrets.get("EXPLAIN_LEVEL", "basic")).lower().strip()
 
 PASSTHROUGH_HINTS = [
     "staff id","staff_id","staffid","_id","id","_uuid","uuid","instanceid","_submission_time",
@@ -332,428 +329,6 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
             score += 0.10
 
     return max(0.0, min(1.0, score))
-
-
-# ==============================
-# RUBRIC VALIDATOR (post-score)
-# ==============================
-# This layer checks whether an answer contains the *evidence* expected by the 0–3 anchors
-# for each question, and can upgrade (or optionally downgrade) the exemplar score.
-
-_WORD_RX = re.compile(r"\w+")
-def _has_any(text: str, patterns: list[str]) -> bool:
-    t = (text or "").lower()
-    for p in patterns:
-        if re.search(p, t):
-            return True
-    return False
-
-def _count_any(text: str, patterns: list[str]) -> int:
-    t = (text or "").lower()
-    return sum(1 for p in patterns if re.search(p, t))
-
-def rubric_validate(qid: str, ans: str) -> tuple[int, float, str]:
-    """Return (rubric_score 0..3, rubric_conf 0..1, reason)."""
-    a = clean(ans)
-    if not a:
-        return 0, 0.90, "empty"
-
-    # Counterproductive / derailing cues (keep conservative)
-    harmful = _has_any(a, [
-        r"\bignore (the )?community\b",
-        r"\bdrop (the )?gender\b",
-        r"\bremove women\b",
-        r"\bonly (work with )?big ngos?\b",
-        r"\bjust scale fast\b",
-        r"\bcentraliz(e|ing)\b.*\bcommunity\b",
-    ])
-    if harmful:
-        return 0, 0.90, "harmful/derailing"
-
-    # Very short answers: rarely deserve 2/3
-    if len(a) < 18 or len(_WORD_RX.findall(a)) < 4:
-        return 1, 0.75, "too_short"
-
-    qid = (qid or "").strip().upper()
-
-    # ---- Shared “execution evidence” signals (used across many questions) ----
-    has_time     = _has_any(a, [r"\b60 days\b", r"\b90 days\b", r"\bby friday\b", r"\bweekly\b", r"\bbi\-?weekly\b", r"\bquarterly\b", r"\b\d+\s*(days?|weeks?|months?)\b"])
-    has_owner    = _has_any(a, [r"\bowner\b", r"\baccountable\b", r"\bresponsible\b", r"\blead\b", r"\bby name\b", r"\bRACI\b", r"\bescalat"])
-    has_artifact = _has_any(a, [r"\bdashboard\b", r"\bdecision memo\b", r"\blearning log\b", r"\binsight brief\b", r"\bscorecard\b", r"\bbacklog\b", r"\bagenda\b", r"\boutputs\b", r"\bchecklist\b", r"\bplaybook\b"])
-    has_gate     = _has_any(a, [r"\bdecision gate\b", r"\bgate\b", r"\bthreshold\b", r"\btrigger\b", r"\bif .* then\b"])
-    has_tradeoff = _has_any(a, [r"\btrade\-?off\b", r"\bnon\-?negotiable\b", r"\bflex\b", r"\bguardrail\b", r"\bsafeguard\b", r"\bprotect\b"])
-    has_local    = _has_any(a, [r"\bgrassroots\b", r"\bcommunity voice\b", r"\blocal leadership\b", r"\bkujenga\b", r"\bparish\b", r"\bvsla(s)?\b", r"\bproducer groups?\b"])
-    has_gender   = _has_any(a, [r"\bwomen\b", r"\bgender\b", r"\bequity\b", r"\binclusion\b"])
-
-    # helpers for “transformative safeguards”
-    safeguards = _has_any(a, [
-        r"\btor(s)?\b|\bterms of reference\b",
-        r"\bbudget line\b|\bring\-?fence\b|\bprotected funding\b|\bpercentage\b.*\bbudget\b",
-        r"\bgovernance\b|\bsteering committee\b|\bdecision rights?\b|\bco\-?own(ed)?\b",
-        r"\bscorecard\b|\bgrievance\b|\baccountability\b|\bsigned changes\b",
-    ])
-
-    # =====================
-    # LAV (A1)
-    # =====================
-    if qid == "LAV_Q1":
-        core = _has_any(a, [r"women\-?led", r"producer groups?", r"local buying", r"buying days?", r"co\-?design", r"vsla(s)?", r"grassroots", r"community"])
-        flex = _has_any(a, [r"\bflex\b", r"which districts?", r"sequence", r"phased", r"onboard", r"aggregation", r"parish hubs?", r"mobile collection"])
-        if core and flex and safeguards:
-            return 3, 0.80, "core+flex+safeguards"
-        if core and flex:
-            return 2, 0.78, "core+flex"
-        if core or flex:
-            return 1, 0.65, "partial(core/flex)"
-        return 1, 0.55, "generic"
-
-    if qid == "LAV_Q2":
-        # Needs ToR + budget + local leadership
-        tor = _has_any(a, [r"\btor(s)?\b", r"terms of reference"])
-        bud = _has_any(a, [r"\bbudget\b", r"\bbudget line\b", r"ring\-?fence", r"protected funding"])
-        local = _has_any(a, [r"local leadership", r"community", r"women\-?led", r"kujenga", r"vsla"])
-        enforce = _has_any(a, [r"decision rights?", r"sign\-?off", r"accountability", r"scorecard", r"minimum percentage"])
-        if tor and bud and local and enforce:
-            return 3, 0.80, "tor+budget+local+enforcement"
-        if tor and bud and local:
-            return 2, 0.75, "tor+budget+local"
-        if local and (tor or bud):
-            return 1, 0.60, "mentions local + (tor or budget)"
-        return 1, 0.55, "generic"
-
-    if qid == "LAV_Q3":
-        # Needs risks of formal partners + safeguards to protect voice
-        risks = _has_any(a, [r"risk", r"sidelin(e|ed)", r"capture", r"elite", r"dilut", r"token"])
-        formal = _has_any(a, [r"formal partners?", r"big ngos?", r"large ngo", r"prime partner"])
-        voice = _has_any(a, [r"community voice", r"local leadership", r"women", r"grassroots"])
-        if (formal or risks) and voice and safeguards:
-            return 3, 0.78, "risks+voice+safeguards"
-        if (formal or risks) and voice:
-            return 2, 0.72, "risks+voice"
-        if formal or risks:
-            return 1, 0.60, "mentions risk/formal only"
-        return 1, 0.55, "generic"
-
-    if qid == "LAV_Q4":
-        # Trade ambition for protection, with reasoning
-        trade = _has_any(a, [r"trade\-?off", r"i would trade", r"drop", r"reduce", r"slow", r"phase"])
-        protect = _has_any(a, [r"protect", r"non\-?negotiable", r"safeguard", r"guardrail"])
-        why = _has_any(a, [r"because", r"so that", r"in order to"])
-        if trade and protect and why and (has_local or has_gender):
-            return 3, 0.75, "explicit trade-off + protection + reasoning"
-        if trade and protect and why:
-            return 2, 0.70, "trade-off + reasoning"
-        if trade or protect:
-            return 1, 0.60, "partial trade/protect"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # II (A2)
-    # =====================
-    if qid == "II_Q1":
-        # field-first learning loop: sources, cadence, artifacts, trigger
-        sources = _has_any(a, [r"women", r"vsla", r"farmers", r"traders?", r"district", r"extension", r"kujenga", r"community"])
-        cadence = has_time or _has_any(a, [r"cadence", r"weekly", r"bi\-?weekly", r"daily"])
-        artifacts = has_artifact or _has_any(a, [r"learning loop", r"log", r"brief", r"dashboard", r"report"])
-        trigger = has_gate or _has_any(a, [r"trigger", r"if", r"when .* then", r"design sprint", r"sprint"])
-        if sources and cadence and artifacts and trigger and safeguards:
-            return 3, 0.78, "loop+trigger+artifacts(+safeguards)"
-        if sources and cadence and artifacts and trigger:
-            return 2, 0.75, "loop+trigger+artifacts"
-        if sources and (cadence or artifacts):
-            return 1, 0.60, "partial learning loop"
-        return 1, 0.55, "generic"
-
-    if qid == "II_Q2":
-        insight = _has_any(a, [r"insight", r"we expect", r"contradict", r"assumption", r"hq"])
-        women_src = has_gender or _has_any(a, [r"women's groups?", r"women\-?led", r"vsla"])
-        act = _has_any(a, [r"act", r"decide", r"change", r"adjust", r"within", r"fast", r"quick"])
-        mechanism = has_artifact or has_gate or _has_any(a, [r"feedback", r"listening", r"session", r"review", r"stand\-?up"])
-        if insight and women_src and act and mechanism and (has_owner or has_time):
-            return 3, 0.75, "concrete insight + fast action loop"
-        if insight and women_src and (act or mechanism):
-            return 2, 0.68, "insight + action/mechanism"
-        if women_src and (insight or mechanism):
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "II_Q3":
-        policy = _has_any(a, [r"policy", r"ministry", r"agro\-?parks?", r"agro industrial", r"government"])
-        experiment = _has_any(a, [r"experiment", r"test", r"pilot", r"iterate", r"sprint"])
-        anti_theatre = _has_any(a, [r"pilot theatre", r"theatre", r"real decisions", r"decision gate", r"scale criteria", r"threshold"])
-        if policy and experiment and anti_theatre and (has_gate or has_owner):
-            return 3, 0.75, "policy+experimentation+decision gates"
-        if (policy or experiment) and anti_theatre:
-            return 2, 0.68, "anti-theatre + tension addressed"
-        if policy or experiment:
-            return 1, 0.60, "mentions one side"
-        return 1, 0.55, "generic"
-
-    if qid == "II_Q4":
-        frugal = _has_any(a, [r"frugal", r"low\-?cost", r"cheap", r"simple", r"one week", r"within a week", r"test"])
-        market = _has_any(a, [r"market access", r"buyers?", r"pricing", r"aggregation", r"transport", r"selling"])
-        judge = _has_any(a, [r"judge", r"measure", r"metric", r"success", r"indicator", r"compare"])
-        if (frugal or has_time) and market and judge and (has_gate or has_artifact):
-            return 3, 0.72, "test+metrics+decision"
-        if (frugal or has_time) and (market or has_gender) and judge:
-            return 2, 0.66, "test+metrics"
-        if frugal or judge:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # EP (A3)
-    # =====================
-    if qid == "EP_Q1":
-        spine = _has_any(a, [r"supply\-?chain", r"meal", r"community liaison", r"escalat", r"owner"])
-        owners = has_owner
-        milestones = _has_any(a, [r"milestone", r"by \w+", r"week", r"month", r"gate"])
-        if spine and owners and milestones and (has_gate or has_artifact):
-            return 3, 0.75, "execution spine + owners + milestones"
-        if spine and owners:
-            return 2, 0.70, "spine + owners"
-        if spine or owners:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "EP_Q2":
-        plan = _has_any(a, [r"90\-?day", r"outcome", r"milestone", r"decision gate", r"gate"])
-        owners = has_owner
-        slippage = _has_any(a, [r"slippage", r"expose", r"early warning", r"red flag", r"escalat"])
-        if plan and owners and slippage and has_gate:
-            return 3, 0.75, "90-day plan + gates + early warning"
-        if plan and owners:
-            return 2, 0.70, "plan + owners"
-        if plan or owners:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "EP_Q3":
-        handoff = _has_any(a, [r"handoff", r"handover", r"between partners", r"failure", r"gap"])
-        artifact = has_artifact or _has_any(a, [r"checklist", r"raci", r"sop", r"template", r"decision log"])
-        ritual = _has_any(a, [r"ritual", r"stand\-?up", r"weekly review", r"joint review", r"cadence"])
-        if handoff and artifact and ritual:
-            return 3, 0.72, "handoff + artifact + ritual"
-        if handoff and (artifact or ritual):
-            return 2, 0.66, "handoff + mitigation"
-        if handoff:
-            return 1, 0.60, "handoff mentioned only"
-        return 1, 0.55, "generic"
-
-    if qid == "EP_Q4":
-        drop = _has_any(a, [r"drop", r"stop", r"remove", r"de\-?prioritize"])
-        keep = _has_any(a, [r"keep", r"stays", r"non\-?negotiable", r"must remain"])
-        why = _has_any(a, [r"because", r"so that", r"in order to"])
-        if drop and keep and why and (has_local or has_gender):
-            return 3, 0.70, "clear prioritization + rationale (locally anchored)"
-        if drop and keep and why:
-            return 2, 0.65, "prioritization + rationale"
-        if drop or keep:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # CFC (A4)
-    # =====================
-    if qid == "CFC_Q1":
-        workshop = _has_any(a, [r"workshop", r"one\-?day", r"agenda", r"session", r"block"])
-        outputs = _has_any(a, [r"outputs?", r"deliverables?", r"decisions?", r"action plan", r"raci", r"alignment"])
-        if workshop and outputs and (has_artifact or has_owner):
-            return 3, 0.70, "agenda + outputs + ownership"
-        if workshop and outputs:
-            return 2, 0.65, "agenda + outputs"
-        if workshop:
-            return 1, 0.60, "workshop mentioned only"
-        return 1, 0.55, "generic"
-
-    if qid == "CFC_Q2":
-        tension = _has_any(a, [r"meal", r"gender", r"tension", r"trade\-?off"])
-        integrate = _has_any(a, [r"integrat", r"single system", r"shared", r"one framework"])
-        if tension and integrate and safeguards:
-            return 3, 0.72, "integrated system + safeguards"
-        if tension and integrate:
-            return 2, 0.66, "integrated approach"
-        if tension:
-            return 1, 0.60, "mentions tension only"
-        return 1, 0.55, "generic"
-
-    if qid == "CFC_Q3":
-        principles = _count_any(a, [r"principle", r"we will", r"must", r"always"]) >= 1
-        tests = _has_any(a, [r"test", r"adherence", r"audit", r"review", r"spot check", r"scorecard", r"indicator"])
-        if principles and tests and (has_owner or has_artifact):
-            return 3, 0.70, "principles + adherence tests"
-        if principles and tests:
-            return 2, 0.65, "principles + tests"
-        if principles:
-            return 1, 0.60, "principles only"
-        return 1, 0.55, "generic"
-
-    if qid == "CFC_Q4":
-        coown = _has_any(a, [r"co\-?own", r"joint decision", r"shared decision", r"not approved"])
-        structure = _has_any(a, [r"forum", r"committee", r"decision rights", r"sign\-?off", r"cadence"])
-        if coown and structure and safeguards:
-            return 3, 0.70, "co-owned + structure + safeguards"
-        if coown and structure:
-            return 2, 0.65, "co-owned + structure"
-        if coown or structure:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # FTD (A5)
-    # =====================
-    if qid == "FTD_Q1":
-        promise = _has_any(a, [r"promise", r"commit", r"publish", r"weekly"])
-        enforce = _has_any(a, [r"enforce", r"accountability", r"consequence", r"escalat", r"owner"])
-        if promise and enforce and (has_artifact or has_gate):
-            return 3, 0.70, "weekly promise + enforcement"
-        if promise and enforce:
-            return 2, 0.65, "promise + enforcement"
-        if promise:
-            return 1, 0.60, "promise only"
-        return 1, 0.55, "generic"
-
-    if qid == "FTD_Q2":
-        indicators = _has_any(a, [r"indicator", r"metric", r"leading", r"dashboard"])
-        owners = has_owner
-        escalation = _has_any(a, [r"escalat", r"if .* red", r"turns red", r"rule"])
-        if indicators and owners and escalation:
-            return 3, 0.70, "dashboard + owners + escalation"
-        if indicators and escalation:
-            return 2, 0.65, "indicators + escalation"
-        if indicators:
-            return 1, 0.60, "indicators only"
-        return 1, 0.55, "generic"
-
-    if qid == "FTD_Q3":
-        miss = _has_any(a, [r"miss", r"two milestones", r"late", r"slip"])
-        convo = _has_any(a, [r"conversation", r"reset", r"recovery", r"root cause", r"renegotiate"])
-        options = _has_any(a, [r"options?", r"terminate", r"pause", r"replace", r"support", r"penalty"])
-        if miss and convo and options and has_gate:
-            return 3, 0.70, "recovery conversation + decision options"
-        if miss and convo and options:
-            return 2, 0.65, "convo + options"
-        if miss and (convo or options):
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "FTD_Q4":
-        theatre = _has_any(a, [r"update theatre", r"no updates", r"decisional", r"decision log"])
-        practices = _has_any(a, [r"pre\-?read", r"action log", r"owner", r"due date", r"timebox"])
-        if theatre and practices:
-            return 3, 0.68, "decisional meeting system"
-        if theatre or practices:
-            return 2, 0.62, "anti-theatre practices"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # LDA (A6)
-    # =====================
-    if qid == "LDA_Q1":
-        pause = _has_any(a, [r"pause", r"reflect", r"quarterly", r"review"])
-        questions = _has_any(a, [r"questions?", r"we will ask", r"what worked", r"what didn't", r"why"])
-        signed = _has_any(a, [r"signed changes", r"change log", r"update", r"version", r"agre(e|ed)"])
-        if pause and questions and signed and safeguards:
-            return 3, 0.72, "pause+reflect -> signed changes"
-        if pause and questions and signed:
-            return 2, 0.66, "pause+signed changes"
-        if pause and questions:
-            return 1, 0.60, "reflect only"
-        return 1, 0.55, "generic"
-
-    if qid == "LDA_Q2":
-        hypo = _has_any(a, [r"hypothesis", r"i believe", r"we assume"])
-        evidence = _has_any(a, [r"evidence", r"data", r"would change my mind", r"if .* then"])
-        nextday = _has_any(a, [r"day after", r"immediately", r"then i would", r"we will pivot", r"adjust"])
-        if hypo and evidence and nextday and has_gate:
-            return 3, 0.72, "hypothesis + threshold + action"
-        if hypo and evidence and nextday:
-            return 2, 0.66, "hypothesis + evidence + action"
-        if hypo or evidence:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "LDA_Q3":
-        negative = _has_any(a, [r"negative finding", r"stall", r"not working", r"harm", r"risk"])
-        trust = _has_any(a, [r"trust", r"protect", r"transparent", r"communicat", r"no blame"])
-        action = _has_any(a, [r"adapt", r"change", r"mitigate", r"plan", r"support"])
-        if negative and trust and action and safeguards:
-            return 3, 0.70, "negative finding + trust + adaptation"
-        if negative and trust and action:
-            return 2, 0.64, "handle negative finding well"
-        if negative and (trust or action):
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "LDA_Q4":
-        stop = _has_any(a, [r"stop", r"drop", r"cut", r"pause"])
-        fund = _has_any(a, [r"fund", r"reallocate", r"budget", r"free up"])
-        adapt = _has_any(a, [r"adapt", r"adjust", r"change", r"iteration"])
-        if stop and fund and adapt and (has_tradeoff or has_gate):
-            return 3, 0.68, "stop + reallocate + adaptations"
-        if stop and fund:
-            return 2, 0.62, "stop + reallocate"
-        if stop:
-            return 1, 0.60, "stop only"
-        return 1, 0.55, "generic"
-
-    # =====================
-    # RDM (A7)
-    # =====================
-    if qid == "RDM_Q1":
-        compare = _has_any(a, [r"cost", r"benefit", r"risk", r"equity", r"implication", r"side\-by\-side", r"trade\-?off"])
-        call = _has_any(a, [r"my call", r"i would choose", r"decision", r"therefore", r"we will"])
-        if compare and call and (has_gate or has_time):
-            return 3, 0.72, "structured comparison + clear call"
-        if compare and call:
-            return 2, 0.66, "comparison + call"
-        if call or compare:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "RDM_Q2":
-        data_pts = _count_any(a, [r"data", r"evidence", r"from", r"need", r"two"]) >= 1
-        from_who = _has_any(a, [r"from \w+", r"ministry", r"partners?", r"women", r"district", r"kujenga"])
-        fallback = _has_any(a, [r"fallback", r"if .* don't", r"if .* not arrive", r"assume", r"proceed with"])
-        if (has_time or _has_any(a,[r"by friday"])) and data_pts and from_who and fallback:
-            return 3, 0.70, "data needs + source + fallback under deadline"
-        if data_pts and from_who and fallback:
-            return 2, 0.64, "data + source + fallback"
-        if data_pts or fallback:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "RDM_Q3":
-        socialize = _has_any(a, [r"socializ", r"communicat", r"explain", r"share rationale", r"transparen"])
-        respect = _has_any(a, [r"respect", r"listen", r"partners feel", r"even if", r"disagree"])
-        process = _has_any(a, [r"forum", r"meeting", r"brief", r"memo", r"consult"])
-        if socialize and respect and process and safeguards:
-            return 3, 0.70, "transparent socialization + respect + process"
-        if socialize and respect:
-            return 2, 0.64, "socialize trade-off well"
-        if socialize or respect:
-            return 1, 0.60, "partial"
-        return 1, 0.55, "generic"
-
-    if qid == "RDM_Q4":
-        rule = _has_any(a, [r"decision rule", r"rule", r"if regions", r"when regions", r"coherence", r"standard"])
-        localflex = _has_any(a, [r"local initiative", r"adapt", r"flex", r"context"])
-        if rule and localflex and safeguards:
-            return 3, 0.70, "rule + local flex + safeguards"
-        if rule and localflex:
-            return 2, 0.64, "rule + local flex"
-        if rule:
-            return 1, 0.60, "rule only"
-        return 1, 0.55, "generic"
-
-    # Fallback: if it has multiple strong evidence signals, treat as 2
-    evidence_hits = sum([has_time, has_owner, has_artifact, has_gate, has_tradeoff, has_local, has_gender])
-    if evidence_hits >= 4:
-        return 2, 0.60, "fallback(evidence-rich)"
-    if evidence_hits <= 1:
-        return 1, 0.55, "fallback(generic)"
-    return 1, 0.58, "fallback"
-
 
 
 # ==============================
@@ -988,6 +563,60 @@ def _build_pack(texts: list[str], scores: list[int]):
 
     return {"vecs": mat, "scores": np.array(keep_s, dtype=int), "texts": keep_t}
 
+def calibrate_pack_thresholds(pack: dict, sample: int = 60) -> dict:
+    """
+    Data-driven thresholds learned from exemplars for this question.
+    Returns {min_best_sim, min_margin} used to call a prediction "high confidence".
+    """
+    vecs = pack.get("vecs")
+    scores = pack.get("scores")
+    if vecs is None or scores is None or vecs.size == 0:
+        return {"min_best_sim": 0.55, "min_margin": 0.12}
+
+    n = vecs.shape[0]
+    if n < 8:
+        return {"min_best_sim": 0.55, "min_margin": 0.10}
+
+    rng = np.random.default_rng(42)
+    idxs = rng.choice(n, size=min(sample, n), replace=False)
+
+    best_sames = []
+    gaps = []
+
+    # precompute score masks for speed
+    for i in idxs:
+        v = vecs[i]
+        s = int(scores[i])
+
+        sims = vecs @ v  # cosine sim (normalized)
+        sims[i] = -1.0
+
+        same_mask = (scores == s)
+        same_mask[i] = False
+        diff_mask = ~same_mask
+
+        if not np.any(same_mask):
+            continue
+
+        best_same = float(np.max(sims[same_mask]))
+        best_diff = float(np.max(sims[diff_mask])) if np.any(diff_mask) else -1.0
+        best_sames.append(best_same)
+        gaps.append(best_same - best_diff)
+
+    if not best_sames:
+        return {"min_best_sim": 0.55, "min_margin": 0.12}
+
+    # Conservative: use lower quartiles so we don't over-claim confidence
+    min_best_sim = float(np.quantile(best_sames, 0.25))
+    min_margin = float(np.quantile(gaps, 0.25)) if gaps else 0.12
+
+    # floor values (avoid too-low thresholds)
+    min_best_sim = max(0.48, min_best_sim)
+    min_margin = max(0.06, min_margin)
+
+    return {"min_best_sim": min_best_sim, "min_margin": min_margin}
+
+
 def build_exemplar_packs(exemplars: list[dict]):
     by_qkey, by_attr, question_texts = {}, {}, []
     all_texts = []
@@ -1039,7 +668,10 @@ def build_exemplar_packs(exemplars: list[dict]):
     # de-dup question_texts
     seen=set(); question_texts=[x for x in question_texts if not (x in seen or seen.add(x))]
 
-    return q_packs, a_packs, g_pack, by_qkey, question_texts
+    # thresholds per question (data-driven)
+    q_thresholds = {qid: calibrate_pack_thresholds(pack) for qid, pack in q_packs.items()}
+
+    return q_packs, a_packs, g_pack, by_qkey, question_texts, q_thresholds
 
 def resolve_qkey(q_packs, by_qkey, question_texts, qid: str, prompt_hint: str):
     qid = (qid or "").strip()
@@ -1057,42 +689,54 @@ def resolve_qkey(q_packs, by_qkey, question_texts, qid: str, prompt_hint: str):
     return None
 
 def score_vec_against_pack(pack: dict, vec: np.ndarray):
+    """
+    Explainable kNN scorer.
+    Returns: (pred_score, conf, margin, matches)
+      - conf: winning class weight (0..1)
+      - margin: conf - runner_up (0..1)
+      - matches: list of (sim, score, text) for top-k
+    """
     if pack is None or pack["vecs"].size == 0 or vec is None:
-        return None, 0.0
+        return None, 0.0, 0.0, []
 
     sims = pack["vecs"] @ vec  # cosine similarity (normalized embeddings)
     if sims.size == 0:
-        return None, 0.0
+        return None, 0.0, 0.0, []
 
-    # top1: score of nearest exemplar
-    if KNN_METHOD == "top1":
-        i = int(np.argmax(sims))
-        return int(pack["scores"][i]), float(sims[i])
-
-    # softmax vote over top-k
     k = max(1, min(KNN_K, sims.size))
     idx = np.argpartition(-sims, k-1)[:k]
     idx = idx[np.argsort(-sims[idx])]
+
     top_sims = sims[idx]
     top_scores = pack["scores"][idx]
+    top_texts = [pack["texts"][int(i)] for i in idx]
+    matches = [(float(s), int(sc), t) for s, sc, t in zip(top_sims, top_scores, top_texts)]
 
+    if KNN_METHOD == "top1":
+        pred = int(matches[0][1])
+        conf = float(matches[0][0])
+        margin = float(matches[0][0] - matches[1][0]) if len(matches) > 1 else conf
+        return pred, conf, margin, matches
+
+    # softmax vote over top-k
     w = np.exp((top_sims - top_sims.max()) / float(KNN_TEMP))
     w = w / (w.sum() + 1e-9)
+
     class_w = np.zeros(4, dtype=float)
     for s, wi in zip(top_scores, w):
         if 0 <= int(s) <= 3:
             class_w[int(s)] += float(wi)
+
     pred = int(class_w.argmax())
-    conf = float(class_w.max())
-    return pred, conf
+    sorted_w = np.sort(class_w)[::-1]
+    conf = float(sorted_w[0])
+    margin = float(sorted_w[0] - sorted_w[1]) if len(sorted_w) > 1 else conf
 
+    return pred, conf, margin, matches
 
-# ==============================
-# SCORING (keeps your working table layout)
-# ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     q_packs, a_packs, g_pack,
-                    by_qkey, question_texts):
+                    by_qkey, question_texts, q_thresholds):
 
     df_cols = list(df.columns)
 
@@ -1195,9 +839,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
         any_ai = False
         qtext_cache = {}
 
-        override_count = 0
-        needs_review = False
-
         row_answers = {}
         for r in all_mapping:
             qid = r["question_id"]
@@ -1214,8 +855,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
             if not ans:
                 continue
             vec = emb_of(ans)
-            ex_conf = None
-            ex_score = None
 
             qkey = resolve_qkey(q_packs, by_qkey, question_texts, qid, qhint)
             if qkey and qkey not in qtext_cache:
@@ -1237,80 +876,74 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
                     sc = int(best_dup_sc)
                     reused = True
 
-            # NEW scoring: nearest exemplar (question -> attribute -> global)
-            if sc is None and vec is not None:
-                sc2, conf = None, 0.0
+            
+# NEW scoring: nearest exemplar (question -> attribute -> global) + confidence + evidence
+            ex_conf = None
+            ex_margin = None
+            ex_best_sim = None
+            ex_matches = []
 
+            if vec is not None:
+                sc2 = None
+                # Prefer question-specific exemplars
                 if qkey and qkey in q_packs:
-                    sc2, conf = score_vec_against_pack(q_packs[qkey], vec)
+                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(q_packs[qkey], vec)
 
+                # fallback: attribute exemplars
                 if sc2 is None and attr in a_packs:
-                    sc2, conf = score_vec_against_pack(a_packs[attr], vec)
+                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(a_packs[attr], vec)
 
+                # fallback: global exemplars
                 if sc2 is None:
-                    sc2, conf = score_vec_against_pack(g_pack, vec)
+                    sc2, ex_conf, ex_margin, ex_matches = score_vec_against_pack(g_pack, vec)
 
-                sc = sc2
-                ex_score = sc2
-                ex_conf = conf
+                # If score already cached, keep it, but still compute confidence/evidence for explainability.
+                if sc is None:
+                    sc = sc2
+
+                if ex_matches:
+                    ex_best_sim = float(ex_matches[0][0])
 
                 # optional low-confidence clamp (disabled by default)
-                if sc is not None and CONF_CLAMP > 0 and conf < CONF_CLAMP:
+                if sc is not None and CONF_CLAMP > 0 and ex_conf is not None and ex_conf < CONF_CLAMP:
                     sc = min(int(sc), 1)
 
                 # off-topic clamp (keep your old behavior)
                 if sc is not None and qa_overlap(ans, qhint_full or qhint) < MIN_QA_OVERLAP:
                     sc = min(int(sc), 1)
 
+            # confidence tier (data-driven per question when available)
+            conf_tier = ""
+            if qkey and qkey in q_thresholds and ex_conf is not None and ex_margin is not None and ex_best_sim is not None:
+                thr = q_thresholds[qkey]
+                min_sim = float(thr.get("min_best_sim", 0.55))
+                min_margin = float(thr.get("min_margin", 0.12))
 
-            # ------------------------------
-            # Rubric validator + override (post-score)
-            # ------------------------------
-            # This runs even if exemplar score came from cache/dup reuse.
-            # Policy (safe defaults):
-            # - upgrade 0/1 -> 2/3 when rubric is confident and evidence is present
-            # - downgrade only for empty/harmful (or if RUBRIC_DOWNGRADE=True)
-            rub_sc, rub_conf, rub_reason = rubric_validate(qid, ans)
-            final_sc = sc
+                if (ex_conf >= 0.70) and (ex_best_sim >= min_sim) and (ex_margin >= min_margin):
+                    conf_tier = "High"
+                elif (ex_conf >= 0.55) and (ex_best_sim >= (0.95 * min_sim)):
+                    conf_tier = "Medium"
+                else:
+                    conf_tier = "Low"
 
-            if RUBRIC_OVERRIDE:
-                # hard downgrades
-                if rub_reason in ("empty", "harmful/derailing") and rub_conf >= 0.85:
-                    if final_sc is None:
-                        final_sc = rub_sc
-                    else:
-                        final_sc = min(int(final_sc), int(rub_sc))
-                    needs_review = True
-
-                # upgrades: common failure mode where exemplars under-score concise but correct answers
-                if final_sc is not None:
-                    if int(final_sc) <= 1 and int(rub_sc) >= 2 and rub_conf >= RUBRIC_UPGRADE_CONF:
-                        # only upgrade when answer isn't extremely short
-                        if len(ans) >= 18:
-                            if int(rub_sc) != int(final_sc):
-                                override_count += 1
-                            final_sc = int(rub_sc)
-
-                    # optional soft downgrades for overly short/generic answers
-                    if RUBRIC_DOWNGRADE and int(rub_sc) <= 1 and rub_conf >= 0.85:
-                        if len(ans) < 25:
-                            if int(rub_sc) != int(final_sc):
-                                override_count += 1
-                            final_sc = int(rub_sc)
-
-            if final_sc is not None:
-                sc = max(0, min(3, int(final_sc)))
-
-            # Optional audit columns (useful while tuning)
-            if RUBRIC_SHOW_AUDIT:
-                row[f"{attr}_ExemplarScore_{qid}"] = "" if ex_score is None else int(ex_score)
-                row[f"{attr}_ExemplarConf_{qid}"]  = "" if ex_conf is None else round(float(ex_conf), 3)
-                row[f"{attr}_RubricScore_{qid}"]   = int(rub_sc)
-                row[f"{attr}_RubricConf_{qid}"]    = round(float(rub_conf), 2)
-                row[f"{attr}_RubricReason_{qid}"]  = rub_reason
-
+            # record explainability fields (basic)
+            if EXPLAIN_LEVEL != "off" and qn in (1,2,3,4):
+                row[f"{attr}_Conf_Qn{qn}"] = round(float(ex_conf), 3) if ex_conf is not None else ""
+                row[f"{attr}_Margin_Qn{qn}"] = round(float(ex_margin), 3) if ex_margin is not None else ""
+                row[f"{attr}_BestSim_Qn{qn}"] = round(float(ex_best_sim), 3) if ex_best_sim is not None else ""
+                row[f"{attr}_ConfidenceTier_Qn{qn}"] = conf_tier
+                if ex_matches:
+                    # top-3: sim:score:snippet
+                    tops = []
+                    for sim, scx, txt in ex_matches[:3]:
+                        snippet = clean(txt)[:120]
+                        tops.append(f"{sim:.2f}|{scx}|{snippet}")
+                    row[f"{attr}_TopMatches_Qn{qn}"] = " || ".join(tops)
+                else:
+                    row[f"{attr}_TopMatches_Qn{qn}"] = ""
 
             if sc is not None and not was_cached:
+
                 exact_sc_cache[(qid, ans)] = int(sc)
                 if vec is not None and not reused:
                     bank = dup_bank.setdefault(qid, [])
@@ -1357,8 +990,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
 
         row["Overall Total (0–21)"] = overall_total
         row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        row["Overrides_Applied"] = int(override_count)
-        row["Needs_Review"] = bool(needs_review)
         row["AI_suspected"] = bool(any_ai)
         out_rows.append(row)
 
@@ -1374,6 +1005,14 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     for attr in ORDERED_ATTRS:
         for qn in (1,2,3,4):
             mid_q += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
+            if EXPLAIN_LEVEL != "off":
+                mid_q += [
+                    f"{attr}_Conf_Qn{qn}",
+                    f"{attr}_Margin_Qn{qn}",
+                    f"{attr}_BestSim_Qn{qn}",
+                    f"{attr}_ConfidenceTier_Qn{qn}",
+                    f"{attr}_TopMatches_Qn{qn}",
+                ]
     ordered += [c for c in mid_q if c in res.columns]
 
     mid_a = []
@@ -1382,10 +1021,6 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame,
     ordered += [c for c in mid_a if c in res.columns]
 
     ordered += [c for c in ["Overall Total (0–21)","Overall Rank"] if c in res.columns]
-    # quality controls
-    for c in ["Overrides_Applied","Needs_Review"]:
-        if c in res.columns:
-            ordered += [c]
     if "AI_suspected" in res.columns:
         ordered += ["AI_suspected"]
 
@@ -1517,7 +1152,7 @@ def main():
         return
 
     with st.spinner("Building exemplar packs (nearest-neighbour scorer)..."):
-        q_packs, a_packs, g_pack, by_q, qtexts = build_exemplar_packs(exemplars)
+        q_packs, a_packs, g_pack, by_q, qtexts, q_thresholds = build_exemplar_packs(exemplars)
 
     with st.spinner("Fetching Kobo submissions..."):
         df = fetch_kobo_dataframe()
@@ -1532,7 +1167,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     with st.spinner("Scoring (+ AI detection)..."):
-        scored = score_dataframe(df, mapping, q_packs, a_packs, g_pack, by_q, qtexts)
+        scored = score_dataframe(df, mapping, q_packs, a_packs, g_pack, by_q, qtexts, q_thresholds)
 
     st.success("✅ Scoring complete.")
 
