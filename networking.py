@@ -1,19 +1,9 @@
-# networking.py
-# ------------------------------------------------------------
-# Kobo → Exemplar-vote scoring (Option B++) + AI detection → Excel / Google Sheets
-# Networking & Advocacy (A1..H1). Exact layout preserved.
-# Batched embeddings + caching. AI-Suspect flag at end.
-# Auto-run + auto-push options, stable widgets.
-# ------------------------------------------------------------
-
 from __future__ import annotations
-
 import json, re, unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from io import BytesIO
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import requests
@@ -24,9 +14,8 @@ from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer
 
 
-# ==============================
+
 # CSS (Networking & Advocacy theme)
-# ==============================
 def inject_css():
     st.markdown("""
         <style>
@@ -142,9 +131,9 @@ def inject_css():
     """, unsafe_allow_html=True)
 
 
-# ==============================
+
 # CONSTANTS / PATHS
-# ==============================
+
 KOBO_BASE      = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID3 = st.secrets.get("KOBO_ASSET_ID3", "")
 KOBO_TOKEN     = st.secrets.get("KOBO_TOKEN", "")
@@ -205,9 +194,7 @@ MIN_QA_OVERLAP  = 0.05
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 
-# ==============================
-# OPTION B++ KNOBS
-# ==============================
+
 TOPK_MAX    = int(st.secrets.get("TOPK_MAX", 30))
 CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
@@ -215,9 +202,9 @@ MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))
 TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
 
 
-# ==============================
-# AI DETECTION (aggressive)
-# ==============================
+
+# AI DETECTION 
+
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
 TRANSITION_OPEN_RX = re.compile(
@@ -251,9 +238,8 @@ SLASH_PAIR_RX       = re.compile(r"\b\w+/\w+\b")
 
 
 
-# ==============================
+
 # HELPERS
-# ==============================
 def clean(s):
     if s is None:
         return ""
@@ -303,9 +289,8 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     return max(0.0, min(1.0, score))
 
 
-# ==============================
+
 # KOBO
-# ==============================
 def kobo_url(asset_uid: str, kind: str = "submissions"):
     return f"{KOBO_BASE.rstrip('/')}/api/v2/assets/{asset_uid}/{kind}/?format=json"
 
@@ -339,9 +324,8 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# ==============================
+
 # MAPPING + EXEMPLARS
-# ==============================
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"mapping file not found: {path}")
@@ -371,7 +355,7 @@ def read_jsonl_path(path: Path) -> list[dict]:
     return rows
 
 
-# --------- Column resolver (keep your robust behavior) ---------
+# --------- Column resolver 
 def build_bases_from_qid(question_id: str) -> list[str]:
     out = []
     if not question_id:
@@ -474,9 +458,9 @@ def resolve_kobo_column_for_mapping(df_cols: list[str], question_id: str, prompt
     return None
 
 
-# ==============================
+
 # EMBEDDINGS + EXEMPLAR PACKS (Option B++)
-# ==============================
+
 @st.cache_resource(show_spinner=False)
 def get_embedder():
     return SentenceTransformer(st.secrets.get("EMBED_MODEL", "all-MiniLM-L6-v2"))
@@ -637,9 +621,8 @@ def score_answer_auto(pack: ExemplarPack | None, ans_vec: np.ndarray | None) -> 
     return int(best[2]) if best else 1
 
 
-# ==============================
+
 # SCORING (layout preserved, Q1..Q4)
-# ==============================
 def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[str, ExemplarPack]) -> pd.DataFrame:
     df_cols = list(df.columns)
 
@@ -909,11 +892,8 @@ def main():
 
     st.markdown("""
         <div class="app-header-card">
-            <div class="pill">Networking & Advocacy • Option B++</div>
+            <div class="pill">Networking & Advocacy Scoring and  AI Detection</div>
             <h1>Networking & Advocacy</h1>
-            <p class="app-header-subtitle">
-                Kobo → exemplar-vote scoring (per question_id) + AI detection → Excel / Google Sheets.
-            </p>
         </div>
     """, unsafe_allow_html=True)
 
