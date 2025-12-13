@@ -1,128 +1,132 @@
-# dashboard_powerbi.py
+# dashboard.py
 # ------------------------------------------------------------
-# PowerBI-like dashboard with 5 in-page tabs
-# Auto-pulls data from 5 worksheets and AUTO-DETECTS:
-#   - section headers (from *_Avg (0–3) and *_Qn# columns)
-#   - question numbers available per section
-# Works even when each worksheet has different sections / Q counts.
-#
-# Excludes: Date, Duration, AI_MaxScore
+# PowerBI-like Dashboard (5 pages) reading scored data directly
+# from Google Sheets worksheets using service account secrets.
 # ------------------------------------------------------------
 
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-import altair as alt
-
+import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
 
-
 # ==============================
-# Page setup
-# ==============================
-st.set_page_config(page_title="Scored Dashboard", layout="wide")
-
-
-# ==============================
-# Styling (PowerBI-ish)
-# ==============================
-def inject_css():
-    st.markdown(
-        """
-        <style>
-        :root{
-            --primary:#F26A21;
-            --bg:#0b1220;
-            --panel:#0f172a;
-            --text:#e5e7eb;
-            --muted:#9ca3af;
-            --border:rgba(148,163,184,0.22);
-        }
-        [data-testid="stAppViewContainer"]{
-            background: radial-gradient(circle at top left, #0b1220 0%, #0b1220 35%, #070b14 100%);
-            color: var(--text);
-        }
-        [data-testid="stSidebar"]{
-            background:#070b14;
-            border-right: 1px solid rgba(255,255,255,0.06);
-        }
-        [data-testid="stSidebar"] *{ color: var(--text) !important; }
-        .block-container{ max-width: 1500px; padding-top: 1rem; padding-bottom: 2.4rem; }
-
-        .hdr{
-            background: linear-gradient(135deg, rgba(242,106,33,0.20), rgba(250,204,21,0.06), rgba(17,24,39,0.0));
-            border: 1px solid var(--border);
-            border-radius: 18px;
-            padding: 16px 18px;
-            box-shadow: 0 18px 45px rgba(0,0,0,0.35);
-            margin-bottom: 12px;
-        }
-        .hdr h1{ margin:0; font-size: 26px; color: var(--text); }
-        .hdr p{ margin:6px 0 0; color: var(--muted); }
-
-        .card{
-            background: linear-gradient(180deg, rgba(17,24,39,0.96), rgba(15,23,42,0.90));
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 14px 14px;
-            box-shadow: 0 12px 30px rgba(0,0,0,0.28);
-            margin-bottom: 12px;
-        }
-
-        .kpis{
-            display:grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        .kpi{
-            background: linear-gradient(180deg, rgba(17,24,39,0.96), rgba(15,23,42,0.88));
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 12px 12px;
-        }
-        .kpi .label{ color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-        .kpi .value{ color: var(--text); font-size: 20px; font-weight: 800; }
-        .kpi .sub{ color: var(--muted); font-size: 12px; margin-top: 2px; }
-
-        button[role="tab"]{
-            border-radius: 999px !important;
-            padding: 8px 14px !important;
-            margin-right: 6px !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def kpi_card(label: str, value: str, sub: str = ""):
-    st.markdown(
-        f"""
-        <div class="kpi">
-          <div class="label">{label}</div>
-          <div class="value">{value}</div>
-          <div class="sub">{sub}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ==============================
-# Google Sheets loader
+# CONFIG / SHEETS
 # ==============================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
+GSHEETS_SPREADSHEET_KEY = st.secrets.get("GSHEETS_SPREADSHEET_KEY", "")
 
+GSHEETS_WORKSHEET_NAME  = "Advisory"
+GSHEETS_WORKSHEET_NAME1 = "Thought Leadership"
+GSHEETS_WORKSHEET_NAME2 = "Growth Mindset"
+GSHEETS_WORKSHEET_NAME3 = "Networking"
+GSHEETS_WORKSHEET_NAME4 = "Influencingrelationship"
+
+PAGES = {
+    "Thought Leadership": GSHEETS_WORKSHEET_NAME1,
+    "Growth Mindset": GSHEETS_WORKSHEET_NAME2,
+    "Networking & Advocacy": GSHEETS_WORKSHEET_NAME3,
+    "Advisory Skills": GSHEETS_WORKSHEET_NAME,
+    "Influencing Relationship": GSHEETS_WORKSHEET_NAME4,
+}
+
+# Short titles only (NO QUESTIONS)
+THOUGHT_LEADERSHIP_TITLES = {
+    ("Locally Anchored Visioning", 1): "Vision with Roots",
+    ("Locally Anchored Visioning", 2): "Hard-wire Local Leadership",
+    ("Locally Anchored Visioning", 3): "Safeguard Community Voice",
+    ("Locally Anchored Visioning", 4): "Trade-off for Locally Led Scale",
+
+    ("Innovation and Insight", 1): "Field-First Learning Loop",
+    ("Innovation and Insight", 2): "Contradict HQ Assumptions",
+    ("Innovation and Insight", 3): "Avoid Pilot Theatre",
+    ("Innovation and Insight", 4): "Frugal Innovation Test",
+
+    ("Execution Planning", 1): "Execution Spine Ownership",
+    ("Execution Planning", 2): "90-Day Plan on a Page",
+    ("Execution Planning", 3): "Prevent Handoff Failure",
+    ("Execution Planning", 4): "Drop to Regain Clarity",
+
+    ("Cross-Functional Collaboration", 1): "One-Day Alignment Workshop",
+    ("Cross-Functional Collaboration", 2): "Resolve MEAL vs Gender Tension",
+    ("Cross-Functional Collaboration", 3): "Shared Principles & Adherence",
+    ("Cross-Functional Collaboration", 4): "Co-Owned Decision Design",
+
+    ("Follow-Through Discipline", 1): "Executable Promise",
+    ("Follow-Through Discipline", 2): "Light Dashboard & Escalation",
+    ("Follow-Through Discipline", 3): "Milestone Recovery Options",
+    ("Follow-Through Discipline", 4): "Stop Update Theatre",
+
+    ("Learning-Driven Adjustment", 1): "Quarterly Pause-and-Reflect",
+    ("Learning-Driven Adjustment", 2): "Hypothesis & Evidence Shift",
+    ("Learning-Driven Adjustment", 3): "Handle Negative Findings",
+    ("Learning-Driven Adjustment", 4): "Stop to Fund Adaptation",
+
+    ("Result-Oriented Decision-Making", 1): "Ministry Alignment Trade-off",
+    ("Result-Oriented Decision-Making", 2): "Decide-by-Friday Data",
+    ("Result-Oriented Decision-Making", 3): "Socialize Hard Trade-off",
+    ("Result-Oriented Decision-Making", 4): "Coherence Decision Rule",
+}
+
+# ==============================
+# CSS (PowerBI-like feel)
+# ==============================
+def inject_css():
+    st.markdown("""
+    <style>
+      :root{
+        --primary:#F26A21;
+        --bg:#0b1220;
+        --card:#0f172a;
+        --card2:#111b33;
+        --text:#e5e7eb;
+        --muted:#94a3b8;
+        --border:rgba(148,163,184,0.18);
+      }
+      [data-testid="stAppViewContainer"]{
+        background: radial-gradient(circle at top left, rgba(242,106,33,0.15) 0, rgba(15,23,42,1) 45%, rgba(2,6,23,1) 100%);
+        color: var(--text);
+      }
+      [data-testid="stSidebar"]{
+        background:#050a14;
+        border-right:1px solid rgba(148,163,184,0.12);
+      }
+      [data-testid="stSidebar"] *{ color: var(--text) !important; }
+      .block-container{ max-width: 1500px; padding-top: 1.1rem; padding-bottom: 3rem; }
+      .pb-card{
+        background: linear-gradient(180deg, rgba(17,27,51,0.95), rgba(15,23,42,0.95));
+        border:1px solid var(--border);
+        border-radius: 18px;
+        padding: 14px 16px;
+        box-shadow: 0 18px 45px rgba(0,0,0,0.28);
+      }
+      .pb-title{ font-size: 1.6rem; font-weight: 800; margin: 0; }
+      .pb-sub{ color: var(--muted); margin-top: 6px; font-size: 0.9rem; }
+      .kpi{
+        background: linear-gradient(135deg, rgba(242,106,33,0.22), rgba(17,27,51,0.95));
+        border:1px solid var(--border);
+        border-radius: 16px;
+        padding: 12px 14px;
+      }
+      .kpi .label{ color: var(--muted); font-size: 0.8rem; }
+      .kpi .value{ color: var(--text); font-size: 1.35rem; font-weight: 800; margin-top: 2px; }
+      .kpi .hint{ color: var(--muted); font-size: 0.75rem; margin-top: 4px; }
+      .divider{ height: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# ==============================
+# GOOGLE SHEETS
+# ==============================
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
-        raise ValueError("gcp_service_account missing in secrets.")
+        raise ValueError("Missing st.secrets['gcp_service_account']")
     sa = dict(raw)
     if "token_ur" in sa and "token_uri" not in sa:
         sa["token_uri"] = sa.pop("token_ur")
@@ -134,9 +138,8 @@ def _normalize_sa_dict(raw: dict) -> dict:
     required = ["type","project_id","private_key_id","private_key","client_email","client_id","token_uri"]
     missing = [k for k in required if not sa.get(k)]
     if missing:
-        raise ValueError(f"gcp_service_account missing fields: {', '.join(missing)}")
+        raise ValueError(f"Service account missing fields: {', '.join(missing)}")
     return sa
-
 
 @st.cache_resource(show_spinner=False)
 def gs_client():
@@ -144,375 +147,340 @@ def gs_client():
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
 
-
 @st.cache_data(ttl=120, show_spinner=False)
-def load_ws_df(spreadsheet_key: str, worksheet_name: str) -> pd.DataFrame:
+def read_worksheet_df(spreadsheet_key: str, worksheet_name: str) -> pd.DataFrame:
+    if not spreadsheet_key:
+        return pd.DataFrame()
     gc = gs_client()
     sh = gc.open_by_key(spreadsheet_key)
     ws = sh.worksheet(worksheet_name)
     values = ws.get_all_values()
     if not values or len(values) < 2:
         return pd.DataFrame()
-    header = [str(h).strip() for h in values[0]]
+    header = values[0]
     rows = values[1:]
-    return pd.DataFrame(rows, columns=header)
-
+    df = pd.DataFrame(rows, columns=header)
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^\s*$")]
+    return df
 
 # ==============================
-# Data helpers
+# HELPERS
 # ==============================
-AVG_SUFFIX = "_Avg (0–3)"
-QCOL_RX = re.compile(r"^(?P<header>.+)_Qn(?P<qn>\d+)$")
-AVG_RX  = re.compile(r"^(?P<header>.+)_Avg\s*\(0[–-]3\)$")
-RANK_RX = re.compile(r"^(?P<header>.+)_RANK$")
+def clean_colname(c: str) -> str:
+    return re.sub(r"\s+", " ", str(c or "")).strip()
 
+def to_bool(x) -> bool:
+    if isinstance(x, bool):
+        return x
+    s = str(x).strip().lower()
+    return s in ("true","1","yes","y","t")
 
-def to_num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
+def to_num_series(s: pd.Series):
+    return pd.to_numeric(s.astype(str).str.strip().replace({"": np.nan, "None": np.nan}), errors="coerce")
 
+QCOL_RX = re.compile(r"^(?P<section>.+)_Qn(?P<qn>[1-9]\d*)$", re.I)
+RCOL_RX = re.compile(r"^(?P<section>.+)_Rubric_Qn(?P<qn>[1-9]\d*)$", re.I)
+AVG_RX  = re.compile(r"^(?P<section>.+)_Avg\s*\(0[–-]3\)$", re.I)
+RANK_RX = re.compile(r"^(?P<section>.+)_RANK$", re.I)
 
-def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out.columns = [re.sub(r"\s+", " ", str(c).strip()) for c in out.columns]
-    return out
-
-
-def remove_unwanted(df: pd.DataFrame, hide_ai_cols: bool = True) -> pd.DataFrame:
-    drop = set()
-    for c in df.columns:
-        cl = c.strip().lower()
-        if cl.startswith("date"):
-            drop.add(c)
-        if "duration" in cl:
-            drop.add(c)
-        if cl == "ai_maxscore":
-            drop.add(c)
-        if hide_ai_cols and cl in ("ai-suspected", "ai_suspected"):
-            drop.add(c)
-    return df.drop(columns=[c for c in drop if c in df.columns], errors="ignore")
-
-
-def infer_structure(df: pd.DataFrame):
+def discover_sections(df: pd.DataFrame):
     """
-    Infers:
-      headers: list[str]
-      header_to_qns: dict[str, sorted list[int]]
-      has_avg/has_rank per header
+    Finds sections based on columns:
+      Section_Qn1, Section_Rubric_Qn1, Section_Avg (0–3), Section_RANK
     """
-    headers = set()
-    header_to_qns = {}
+    sections = {}
+    cols = [clean_colname(c) for c in df.columns]
 
-    for c in df.columns:
-        c = str(c).strip()
-
+    for c in cols:
         m = QCOL_RX.match(c)
         if m:
-            h = m.group("header").strip()
-            qn = int(m.group("qn"))
-            headers.add(h)
-            header_to_qns.setdefault(h, set()).add(qn)
-            continue
+            sec = m.group("section").strip()
+            qn  = int(m.group("qn"))
+            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
+            sections[sec]["qcols"][qn] = c
 
-        m = AVG_RX.match(c)
-        if m:
-            h = m.group("header").strip()
-            headers.add(h)
-            header_to_qns.setdefault(h, set())
-            continue
+        m2 = RCOL_RX.match(c)
+        if m2:
+            sec = m2.group("section").strip()
+            qn  = int(m2.group("qn"))
+            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
+            sections[sec]["rcols"][qn] = c
 
-        m = RANK_RX.match(c)
-        if m:
-            h = m.group("header").strip()
-            headers.add(h)
-            header_to_qns.setdefault(h, set())
-            continue
+        m3 = AVG_RX.match(c)
+        if m3:
+            sec = m3.group("section").strip()
+            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
+            sections[sec]["avg_col"] = c
 
-    headers = sorted(headers, key=lambda x: x.lower())
-    header_to_qns = {h: sorted(list(qs)) for h, qs in header_to_qns.items()}
-    return headers, header_to_qns
+        m4 = RANK_RX.match(c)
+        if m4:
+            sec = m4.group("section").strip()
+            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
+            sections[sec]["rank_col"] = c
 
+    sections = {k:v for k,v in sections.items() if v.get("qcols")}
+    for sec in sections:
+        sections[sec]["qcols"] = dict(sorted(sections[sec]["qcols"].items()))
+        sections[sec]["rcols"] = dict(sorted(sections[sec]["rcols"].items()))
+    return dict(sorted(sections.items(), key=lambda kv: kv[0].lower()))
 
-def build_heatmap_long(df: pd.DataFrame, headers: list[str], header_to_qns: dict) -> pd.DataFrame:
-    rows = []
-    for h in headers:
-        qns = header_to_qns.get(h, [])
-        for qn in qns:
-            col = f"{h}_Qn{qn}"
-            if col in df.columns:
-                v = to_num(df[col]).mean(skipna=True)
-                rows.append({"Header": h, "Q": f"Q{qn}", "Mean": float(v) if pd.notna(v) else np.nan})
-    return pd.DataFrame(rows)
+def find_overall_cols(df: pd.DataFrame):
+    cols = {clean_colname(c).lower(): clean_colname(c) for c in df.columns}
+    overall_total = None
+    overall_rank  = None
+    ai_flag       = None
+    care_staff    = None
 
+    for low, orig in cols.items():
+        if care_staff is None and low in ("care_staff","care staff","staff id","staff_id"):
+            care_staff = orig
+        if overall_total is None and "overall total" in low:
+            overall_total = orig
+        if overall_rank is None and low == "overall rank":
+            overall_rank = orig
+        if ai_flag is None and ("ai_suspected" in low or "ai-suspected" in low or low == "ai suspected"):
+            ai_flag = orig
 
-def avg_by_header(df: pd.DataFrame, headers: list[str]) -> pd.DataFrame:
-    rows = []
-    for h in headers:
-        c = f"{h}{AVG_SUFFIX}"
-        if c in df.columns:
-            rows.append({"Header": h, "Avg": float(to_num(df[c]).mean(skipna=True))})
-    out = pd.DataFrame(rows)
-    if not out.empty:
-        out = out.sort_values("Avg", ascending=False)
+    return care_staff, overall_total, overall_rank, ai_flag
+
+def question_title(page_name: str, section: str, qn: int) -> str:
+    if page_name == "Thought Leadership":
+        t = THOUGHT_LEADERSHIP_TITLES.get((section, qn))
+        if t:
+            return t
+    return f"Qn{qn}"
+
+def score_pct_df(df: pd.DataFrame, score_col: str) -> pd.DataFrame:
+    s = to_num_series(df[score_col])
+    counts = s.value_counts(dropna=True).reindex([0,1,2,3], fill_value=0)
+    total = int(counts.sum()) if int(counts.sum()) > 0 else 1
+    pct = (counts / total * 100).round(1)
+    return pd.DataFrame({"Score": [0,1,2,3], "Percent": pct.values, "Count": counts.values})
+
+def rubric_freq_df(df: pd.DataFrame, rubric_col: str) -> pd.DataFrame:
+    s = df[rubric_col].astype(str).str.strip().replace({"": np.nan, "None": np.nan})
+    vc = s.value_counts(dropna=True)
+    out = vc.reset_index()
+    out.columns = ["Rubric", "Count"]
     return out
 
-
-def rank_dist(df: pd.DataFrame) -> pd.DataFrame:
-    if "Overall Rank" not in df.columns:
+def heatmap_matrix(df: pd.DataFrame, qcols: dict, page_name: str, section: str) -> pd.DataFrame:
+    rows = []
+    for qn, col in qcols.items():
+        title = question_title(page_name, section, qn)
+        dist = score_pct_df(df, col).set_index("Score")["Percent"]
+        rows.append({
+            "Question": title,
+            0: float(dist.loc[0]),
+            1: float(dist.loc[1]),
+            2: float(dist.loc[2]),
+            3: float(dist.loc[3]),
+        })
+    if not rows:
         return pd.DataFrame()
-    return (
-        df["Overall Rank"].fillna("Unknown").astype(str)
-        .value_counts()
-        .reset_index()
-        .rename(columns={"index": "Overall Rank", "Overall Rank": "Count"})
-    )
-
-
-def top_bottom(df: pd.DataFrame, n: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if "Overall Total (0–24)" not in df.columns:
-        return pd.DataFrame(), pd.DataFrame()
-
-    staff = "Staff ID" if "Staff ID" in df.columns else None
-    cols = ["Overall Total (0–24)"] + ([staff] if staff else [])
-    dd = df[cols].copy()
-    dd["Overall Total (0–24)"] = to_num(dd["Overall Total (0–24)"])
-    dd = dd.dropna(subset=["Overall Total (0–24)"]).sort_values("Overall Total (0–24)", ascending=False)
-    top = dd.head(n).reset_index(drop=True)
-    bot = dd.tail(n).sort_values("Overall Total (0–24)", ascending=True).reset_index(drop=True)
-    return top, bot
-
+    return pd.DataFrame(rows).set_index("Question")
 
 # ==============================
-# One tab renderer
+# PAGE RENDER
 # ==============================
-def render_tab(title: str, worksheet_name: str, hide_ai_cols: bool):
-    ss_key = st.secrets.get("GSHEETS_SPREADSHEET_KEY", "")
-    if not ss_key:
-        st.error("GSHEETS_SPREADSHEET_KEY is missing in secrets.")
-        return
-
-    with st.spinner(f"Loading '{worksheet_name}' from Google Sheets..."):
-        try:
-            df_raw = load_ws_df(ss_key, worksheet_name)
-        except Exception as e:
-            st.error(f"Failed to load worksheet '{worksheet_name}': {type(e).__name__}: {e}")
-            return
+def render_page(page_label: str, worksheet_name: str):
+    with st.spinner(f"Loading: {worksheet_name} ..."):
+        df_raw = read_worksheet_df(GSHEETS_SPREADSHEET_KEY, worksheet_name)
 
     if df_raw.empty:
-        st.warning(f"Worksheet '{worksheet_name}' is empty or has no data.")
-        return
+        st.error(f"No data found in worksheet '{worksheet_name}'.")
+        st.stop()
 
-    df = clean_cols(df_raw)
-    df = remove_unwanted(df, hide_ai_cols=hide_ai_cols)
+    df = df_raw.copy()
+    df.columns = [clean_colname(c) for c in df.columns]
 
-    # Infer structure for THIS worksheet (so pages can be different)
-    headers, header_to_qns = infer_structure(df)
+    sections = discover_sections(df)
+    care_staff_col, overall_total_col, overall_rank_col, ai_col = find_overall_cols(df)
 
-    # Filters (apply per worksheet)
-    with st.sidebar:
-        st.markdown("### Filters")
-        if "Overall Rank" in df.columns:
-            ranks = sorted(df["Overall Rank"].fillna("Unknown").astype(str).unique().tolist())
-            pick = st.multiselect(f"{title}: Overall Rank", ranks, default=ranks)
-            df = df[df["Overall Rank"].fillna("Unknown").astype(str).isin(pick)]
+    st.markdown(f"""
+      <div class="pb-card">
+        <div class="pb-title">{page_label}</div>
+        <div class="pb-sub">Source worksheet: <b>{worksheet_name}</b> • Choose a section to view charts and heatmaps.</div>
+      </div>
+      <div class="divider"></div>
+    """, unsafe_allow_html=True)
 
-        if "Staff ID" in df.columns:
-            s = st.text_input(f"{title}: Search Staff ID", value="")
-            if s.strip():
-                df = df[df["Staff ID"].astype(str).str.contains(s.strip(), case=False, na=False)]
-
-        if headers:
-            selected_headers = st.multiselect(
-                f"{title}: Section headers",
-                headers,
-                default=headers,
-            )
-        else:
-            selected_headers = []
-
-    st.markdown(
-        f"""
-        <div class="hdr">
-            <h1>{title}</h1>
-            <p>Source: worksheet <b>{worksheet_name}</b>. Dashboard auto-detects the headers & Qn columns in this sheet.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # KPIs
+    # KPI row
     n = len(df)
-    mean_total = float(to_num(df["Overall Total (0–24)"]).mean()) if "Overall Total (0–24)" in df.columns else np.nan
-    med_total  = float(to_num(df["Overall Total (0–24)"]).median()) if "Overall Total (0–24)" in df.columns else np.nan
+    ai_rate = None
+    if ai_col and ai_col in df.columns:
+        ai_rate = round(df[ai_col].apply(to_bool).mean() * 100, 1)
 
-    st.markdown('<div class="kpis">', unsafe_allow_html=True)
-    kpi_card("Responses", f"{n:,}", "After filters")
-    kpi_card("Overall Mean (0–24)", f"{mean_total:.2f}" if np.isfinite(mean_total) else "—", "")
-    kpi_card("Overall Median (0–24)", f"{med_total:.2f}" if np.isfinite(med_total) else "—", "")
-    kpi_card("Detected headers", f"{len(headers):,}", "In this worksheet")
-    st.markdown("</div>", unsafe_allow_html=True)
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(f"""
+          <div class="kpi"><div class="label">Respondents</div><div class="value">{n:,}</div>
+          <div class="hint">Rows in worksheet</div></div>
+        """, unsafe_allow_html=True)
 
-    if not headers:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("I can’t detect section headers in this worksheet yet")
-        st.write("Expected patterns like:")
-        st.code("Some Header_Qn1, Some Header_Qn2, ... and/or Some Header_Avg (0–3), Some Header_RANK")
-        st.write("Columns found (sample):")
-        st.write(list(df.columns)[:80])
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    # Apply header selection (limit visuals to chosen headers)
-    headers_viz = [h for h in headers if h in selected_headers]
-
-    # Heatmap + Average bars
-    left, right = st.columns([1.2, 0.8])
-
-    with left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Heatmap: Mean score by Header × Question")
-        hm = build_heatmap_long(df, headers_viz, header_to_qns)
-        if hm.empty:
-            st.info("No per-question columns found in this sheet (no *_Qn# columns).")
+    with k2:
+        if overall_total_col:
+            ot = to_num_series(df[overall_total_col])
+            st.markdown(f"""
+              <div class="kpi"><div class="label">Avg Overall Total</div><div class="value">{np.nanmean(ot):.1f}</div>
+              <div class="hint">{overall_total_col}</div></div>
+            """, unsafe_allow_html=True)
         else:
-            # sort headers in the heatmap by current avg (if possible)
-            av = avg_by_header(df, headers_viz)
-            if not av.empty:
-                order = av["Header"].tolist()
-            else:
-                order = headers_viz
+            st.markdown(f"<div class='kpi'><div class='label'>Avg Overall Total</div><div class='value'>—</div></div>", unsafe_allow_html=True)
 
-            chart = (
-                alt.Chart(hm)
-                .mark_rect()
-                .encode(
-                    x=alt.X("Q:N", title="Question"),
-                    y=alt.Y("Header:N", title="Header", sort=order),
-                    color=alt.Color("Mean:Q", title="Mean (0–3)", scale=alt.Scale(domain=[0, 3])),
-                    tooltip=["Header", "Q", alt.Tooltip("Mean:Q", format=".2f")],
+    with k3:
+        if overall_rank_col:
+            top = df[overall_rank_col].astype(str).str.strip().replace({"": np.nan}).value_counts().head(1)
+            top_label = top.index[0] if len(top) else "—"
+            st.markdown(f"""
+              <div class="kpi"><div class="label">Most common rank</div><div class="value">{top_label}</div>
+              <div class="hint">{int(top.iloc[0]) if len(top) else 0} respondents</div></div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='kpi'><div class='label'>Most common rank</div><div class='value'>—</div></div>", unsafe_allow_html=True)
+
+    with k4:
+        if ai_rate is not None:
+            st.markdown(f"""
+              <div class="kpi"><div class="label">AI suspected</div><div class="value">{ai_rate:.1f}%</div>
+              <div class="hint">{ai_col}</div></div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='kpi'><div class='label'>AI suspected</div><div class='value'>—</div></div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    if not sections:
+        st.warning("No section question columns found (expected columns like 'Section_Qn1').")
+        st.dataframe(df.head(30), use_container_width=True)
+        st.stop()
+
+    sec_names = list(sections.keys())
+    section = st.selectbox("Section", sec_names, index=0, key=f"sec_{worksheet_name}")
+
+    qcols = sections[section]["qcols"]
+    rcols = sections[section]["rcols"]
+    avg_col  = sections[section].get("avg_col")
+    rank_col = sections[section].get("rank_col")
+
+    # Section-level summary row (Avg + Rank)
+    if avg_col or rank_col:
+        c1, c2 = st.columns(2)
+        with c1:
+            if avg_col and avg_col in df.columns:
+                av = to_num_series(df[avg_col])
+                fig = px.histogram(av.dropna(), nbins=10, title=f"{section} — Avg (0–3) distribution")
+                fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+                st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            if rank_col and rank_col in df.columns:
+                rk = df[rank_col].astype(str).str.strip().replace({"": np.nan}).value_counts(dropna=True).reset_index()
+                rk.columns = ["Rank", "Count"]
+                fig = px.bar(rk, x="Count", y="Rank", orientation="h", title=f"{section} — Rank frequency")
+                fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+                st.plotly_chart(fig, use_container_width=True)
+
+    # Heatmap
+    mat = heatmap_matrix(df, qcols, page_label, section)
+    if not mat.empty:
+        fig_h = px.imshow(
+            mat.values,
+            x=[0,1,2,3],
+            y=mat.index.tolist(),
+            aspect="auto",
+            labels=dict(x="Score", y="Question", color="%"),
+        )
+        fig_h.update_layout(
+            title=f"{section} — Score distribution heatmap (%)",
+            margin=dict(l=10, r=10, t=55, b=10),
+            height=320 + 18*len(mat.index),
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # Per-question tiles (2 per row)
+    st.markdown(f"<div class='pb-card'><b>{section}</b> — Question breakdown</div>", unsafe_allow_html=True)
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    qnums = list(qcols.keys())
+    for j in range(0, len(qnums), 2):
+        row = st.columns(2)
+        for k, qn in enumerate(qnums[j:j+2]):
+            with row[k]:
+                score_col = qcols[qn]
+                rubric_col = rcols.get(qn)
+
+                title = question_title(page_label, section, qn)
+
+                # % distribution of scores 0..3 (column chart)
+                dist = score_pct_df(df, score_col)
+                fig1 = px.bar(
+                    dist, x="Score", y="Percent", text="Percent",
+                    title=f"{title} — Scores (0–3) %",
                 )
-                .properties(height=min(42 * len(order), 560))
-            )
-            st.altair_chart(chart, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                fig1.update_traces(texttemplate="%{text}%", textposition="outside", cliponaxis=False)
+                fig1.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+                st.plotly_chart(fig1, use_container_width=True)
 
-    with right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Column chart: Average by Header")
-        av = avg_by_header(df, headers_viz)
-        if av.empty:
-            st.info("No *_Avg (0–3) columns found in this sheet.")
-        else:
-            b = (
-                alt.Chart(av)
-                .mark_bar()
-                .encode(
-                    y=alt.Y("Header:N", sort="-x", title="Header"),
-                    x=alt.X("Avg:Q", title="Mean (0–3)", scale=alt.Scale(domain=[0, 3])),
-                    tooltip=["Header", alt.Tooltip("Avg:Q", format=".2f")],
-                )
-                .properties(height=min(42 * len(headers_viz), 560))
-            )
-            st.altair_chart(b, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                # rubric frequency (bar chart)
+                if rubric_col and rubric_col in df.columns:
+                    rf = rubric_freq_df(df, rubric_col)
+                    fig2 = px.bar(rf, x="Count", y="Rubric", orientation="h", title=f"{title} — Rubric frequency")
+                    fig2.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("Rubric column not found for this question.")
 
-    # Rank + Top/Bottom
-    a, b = st.columns([0.6, 1.4])
-    with a:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Overall Rank distribution")
-        rd = rank_dist(df)
-        if rd.empty:
-            st.info("No 'Overall Rank' column found in this sheet.")
-        else:
-            pie = (
-                alt.Chart(rd)
-                .mark_arc(innerRadius=40)
-                .encode(
-                    theta="Count:Q",
-                    color="Overall Rank:N",
-                    tooltip=["Overall Rank", "Count"],
-                )
-                .properties(height=320)
-            )
-            st.altair_chart(pie, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    with b:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Top & Bottom performers (Overall Total)")
-        top, bot = top_bottom(df, n=10)
-        if top.empty and bot.empty:
-            st.info("No 'Overall Total (0–24)' column found in this sheet.")
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.caption("Top 10")
-                st.dataframe(top, use_container_width=True, height=320)
-            with c2:
-                st.caption("Bottom 10")
-                st.dataframe(bot, use_container_width=True, height=320)
-        st.markdown("</div>", unsafe_allow_html=True)
+    # Overall (no dates/duration/AI_MaxScore)
+    st.markdown("<div class='pb-card'><b>Overall</b></div>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
 
-    # Table view (headers only)
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("Table view (headers only)")
-    keep = []
-    if "Staff ID" in df.columns: keep.append("Staff ID")
-    if "Overall Total (0–24)" in df.columns: keep.append("Overall Total (0–24)")
-    if "Overall Rank" in df.columns: keep.append("Overall Rank")
+    with c1:
+        if overall_rank_col and overall_rank_col in df.columns:
+            rk = df[overall_rank_col].astype(str).str.strip().replace({"": np.nan}).value_counts(dropna=True).reset_index()
+            rk.columns = ["Overall Rank", "Count"]
+            fig = px.bar(rk, x="Count", y="Overall Rank", orientation="h", title="Overall Rank — frequency")
+            fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=360)
+            st.plotly_chart(fig, use_container_width=True)
 
-    for h in headers_viz:
-        for suf in [AVG_SUFFIX, "_RANK"]:
-            c = f"{h}{suf}"
-            if c in df.columns:
-                keep.append(c)
+    with c2:
+        if overall_total_col and overall_total_col in df.columns:
+            ot = to_num_series(df[overall_total_col])
+            fig = px.histogram(ot.dropna(), nbins=12, title=f"{overall_total_col} — distribution")
+            fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=360)
+            st.plotly_chart(fig, use_container_width=True)
 
-    show = df[keep].copy() if keep else df.copy()
-    for c in show.columns:
-        if c.endswith(AVG_SUFFIX) or c == "Overall Total (0–24)":
-            show[c] = to_num(show[c])
-    st.dataframe(show, use_container_width=True, height=460)
-    st.markdown("</div>", unsafe_allow_html=True)
+    if ai_col and ai_col in df.columns:
+        ai = df[ai_col].apply(to_bool)
+        pie = pd.DataFrame({"AI_Suspected": ["TRUE","FALSE"], "Count": [int(ai.sum()), int((~ai).sum())]})
+        fig = px.pie(pie, values="Count", names="AI_Suspected", title="AI_Suspected — share")
+        fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+        st.plotly_chart(fig, use_container_width=True)
 
+    # Optional preview (keeps it clean)
+    with st.expander("Preview data (first 20 rows)"):
+        hide = {"date","duration_min","ai_maxscore","ai_score_max"}
+        cols_show = [c for c in df.columns if c.lower() not in hide]
+        st.dataframe(df[cols_show].head(20), use_container_width=True)
 
 # ==============================
-# App main: 5 tabs (PowerBI-like)
+# MAIN
 # ==============================
 def main():
+    st.set_page_config(page_title="Scoring Dashboard", layout="wide")
     inject_css()
 
-    sheet_advisory = st.secrets.get("GSHEETS_WORKSHEET_NAME", "Advisory")
-    sheet_tl       = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Thought Leadership")
-    sheet_gm       = st.secrets.get("GSHEETS_WORKSHEET_NAME2", "Growth Mindset")
-    sheet_net      = st.secrets.get("GSHEETS_WORKSHEET_NAME3", "Networking")
-    sheet_infl     = st.secrets.get("GSHEETS_WORKSHEET_NAME4", "Influencingrelationship")
+    st.sidebar.markdown("## Dashboard Pages")
+    page = st.sidebar.radio("Select page", list(PAGES.keys()), index=0)
 
-    st.sidebar.markdown("## Dashboard Controls")
-    hide_ai_cols = st.sidebar.checkbox("Hide AI columns", value=True)
+    if not GSHEETS_SPREADSHEET_KEY:
+        st.error("Missing GSHEETS_SPREADSHEET_KEY in st.secrets.")
+        st.stop()
 
-    tabs = st.tabs([
-        "Thought Leadership",
-        "Growth Mindset",
-        "Networking & Advocacy",
-        "Advisory Skills",
-        "Influencing Relationships",
-    ])
-
-    with tabs[0]:
-        render_tab("Thought Leadership", sheet_tl, hide_ai_cols)
-
-    with tabs[1]:
-        render_tab("Growth Mindset", sheet_gm, hide_ai_cols)
-
-    with tabs[2]:
-        render_tab("Networking & Advocacy", sheet_net, hide_ai_cols)
-
-    with tabs[3]:
-        render_tab("Advisory Skills", sheet_advisory, hide_ai_cols)
-
-    with tabs[4]:
-        render_tab("Influencing Relationships", sheet_infl, hide_ai_cols)
-
+    render_page(page, PAGES[page])
 
 if __name__ == "__main__":
     main()
