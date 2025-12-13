@@ -4,8 +4,8 @@
 #  - Thematic subset selection (cluster/filter)
 #  - Per-answer temperature selection (auto-picks best temp)
 #  - Scores ANSWER TEXT against exemplar TEXT per question_id (no centroids)
-#  - AI detection (rule-based PATTERNS ONLY) -> AI_Suspected column
-#  - Shading rows where AI_Suspected=True
+#  - AI detection (COPIED from your working code) -> AI_Suspected column
+#  - Row shading if AI suspected
 #  - No review flags, no best-match columns
 
 from __future__ import annotations
@@ -46,9 +46,6 @@ def inject_css():
             --text-main: #111827;
             --text-muted: #6b7280;
             --border-subtle: #e5e7eb;
-
-            --ai-bg: rgba(250, 204, 21, 0.20);   /* soft amber */
-            --ai-border: rgba(250, 204, 21, 0.55);
         }
         [data-testid="stAppViewContainer"] {
             background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
@@ -175,15 +172,12 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # Scoring defaults (automatic)
-TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))
-CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))
-CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
-MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))              # maximum top-K retrieved per question
+CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))    # keep within best_sim - CLOSE_DELTA
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))    # exemplar-to-exemplar coherence threshold
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))         # minimum items for thematic subset
 
 TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
-
-# IMPORTANT: lowered default so it actually triggers; still overrideable via secrets
-AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.45))
 
 
 # =============================================================================
@@ -204,128 +198,100 @@ def clean(s) -> str:
 
 
 # =============================================================================
-# AI DETECTION (PATTERNS ONLY + shading support)
+# AI DETECTION (COPIED FROM YOUR WORKING FILE)
 # =============================================================================
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+
 TRANSITION_OPEN_RX = re.compile(
-    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion|to summarize)\b",
-    re.I,
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
+    re.I
 )
-LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally|overall|in summary)\b", re.I)
-BULLET_RX = re.compile(r"^[-*•]\s", re.M)
-LONG_DASH_RX = re.compile(r"[—–]")
+LIST_CUES_RX       = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX          = re.compile(r"^[-*•]\s", re.M)
+LONG_DASH_HARD_RX  = re.compile(r"[—–]")
 SYMBOL_RX = re.compile(
     r"[—–\-_]{2,}"
     r"|[≥≤≧≦≈±×÷%]"
     r"|[→←⇒↔↑↓]"
     r"|[•●◆▶✓✔✗❌§†‡]",
-    re.U,
+    re.U
 )
 TIMEBOX_RX = re.compile(
     r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b"
     r"|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
-    re.I,
+    re.I
 )
-AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b|as a language model\b)", re.I)
-DAY_RANGE_RX = re.compile(r"\bday\s*\d+\s*[-–]\s*\d+\b", re.I)
-PIPE_LIST_RX = re.compile(r"\s\|\s")
-PARENS_ACRONYMS_RX = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+).*?\)")
-NUMBERED_BULLETS_RX = re.compile(r"(?m)^\s*\d+\s*[\.\)]\s+")
-SLASH_PAIR_RX = re.compile(r"\b\w+/\w+\b")
-
-# “template-ish headings”
-HEADING_COLON_RX = re.compile(r"(?m)^(?:[A-Z][A-Za-z ]{2,25}|Key actions|Risks|Mitigation|Timeline|Success metrics)\s*:\s")
+AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+DAY_RANGE_RX        = re.compile(r"\bday\s*\d+\s*[-–]\s*\d+\b", re.I)
+PIPE_LIST_RX        = re.compile(r"\s\|\s")
+PARENS_ACRONYMS_RX  = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+).*?\)")
+NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
+SLASH_PAIR_RX       = re.compile(r"\b\w+/\w+\b")
 
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
-    "stakeholder alignment", "quick win", "low-lift", "scalable",
-    "best practice", "timeboxed", "north star", "operating model",
-    "value proposition", "go-to-market", "alignment", "synergies",
+    "stakeholder alignment", "learners' agency", "learners’ agency",
+    "norm shifts", "quick win", "low-lift", "scalable",
+    "best practice", "pilot theatre", "timeboxed"
 }
 
-def _sentence_stats(t: str) -> Tuple[int, float]:
-    # returns (#sentences, avg sentence length in tokens)
-    sents = re.split(r"[.!?]+\s+", t.strip())
-    sents = [s for s in sents if len(s.strip()) >= 6]
-    if not sents:
-        return 0, 0.0
-    lens = [len(re.findall(r"\w+", s)) for s in sents]
-    return len(sents), float(np.mean(lens)) if lens else 0.0
+def qa_overlap(ans, qtext) -> float:
+    def _t(x) -> str:
+        if x is None:
+            return ""
+        try:
+            if isinstance(x, float) and x != x:
+                return ""
+        except Exception:
+            pass
+        return str(x)
 
-def ai_signal_score(text: str) -> float:
-    """
-    Pattern-only heuristic. Designed to produce a score in [0,1].
-    """
+    ans_s = _t(ans).lower()
+    q_s   = _t(qtext).lower()
+
+    at = set(re.findall(r"\w+", ans_s))
+    qt = set(re.findall(r"\w+", q_s))
+    return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
+
+def ai_signal_score(text: str, question_hint: str = "") -> float:
     t = clean(text)
     if not t:
         return 0.0
+    if LONG_DASH_HARD_RX.search(t):
+        return 1.0
 
     score = 0.0
+    if SYMBOL_RX.search(t):               score += 0.35
+    if TIMEBOX_RX.search(t):              score += 0.15
+    if AI_RX.search(t):                   score += 0.35
+    if TRANSITION_OPEN_RX.search(t):      score += 0.12
+    if LIST_CUES_RX.search(t):            score += 0.12
+    if BULLET_RX.search(t):               score += 0.08
 
-    # direct self-identification
-    if AI_RX.search(t):
-        score += 0.85
+    if DAY_RANGE_RX.search(t):            score += 0.15
+    if PIPE_LIST_RX.search(t):            score += 0.10
+    if PARENS_ACRONYMS_RX.search(t):      score += 0.10
+    if NUMBERED_BULLETS_RX.search(t):     score += 0.12
+    if SLASH_PAIR_RX.search(t):           score += 0.08
 
-    # “over-structured” formatting cues
-    if BULLET_RX.search(t):          score += 0.12
-    if NUMBERED_BULLETS_RX.search(t):score += 0.18
-    if PIPE_LIST_RX.search(t):       score += 0.14
-    if HEADING_COLON_RX.search(t):   score += 0.18
+    hits = 0
+    for rx in (TIMEBOX_RX, DAY_RANGE_RX, PIPE_LIST_RX, NUMBERED_BULLETS_RX):
+        if rx.search(t):
+            hits += 1
+    if hits >= 2: score += 0.25
+    if hits >= 3: score += 0.15
 
-    # symbols / em-dashes / special glyphs
-    if SYMBOL_RX.search(t):          score += 0.25
-    if LONG_DASH_RX.search(t):       score += 0.10
-
-    # timeboxing patterns (often AI-ish, but not always)
-    if TIMEBOX_RX.search(t):         score += 0.16
-    if DAY_RANGE_RX.search(t):       score += 0.12
-
-    # transitions + list cues
-    if TRANSITION_OPEN_RX.search(t): score += 0.10
-    if LIST_CUES_RX.search(t):       score += 0.10
-    if SLASH_PAIR_RX.search(t):      score += 0.06
-    if PARENS_ACRONYMS_RX.search(t): score += 0.08
-
-    # buzzwords (small contributions)
     tl = t.lower()
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in tl)
     if buzz_hits:
-        score += min(0.22, 0.06 * buzz_hits)
+        score += min(0.24, 0.08 * buzz_hits)
 
-    # “template density” bonus: multiple structure cues co-occur
-    hits = 0
-    for rx in (NUMBERED_BULLETS_RX, HEADING_COLON_RX, PIPE_LIST_RX, TIMEBOX_RX):
-        if rx.search(t):
-            hits += 1
-    if hits >= 2: score += 0.18
-    if hits >= 3: score += 0.12
+    if question_hint:
+        overlap = qa_overlap(t, question_hint)
+        if overlap < 0.06:
+            score += 0.10
 
-    # short but highly formatted responses
-    tokens = re.findall(r"\w+", t)
-    n_tok = len(tokens)
-    if n_tok and n_tok < 40 and (NUMBERED_BULLETS_RX.search(t) or HEADING_COLON_RX.search(t) or PIPE_LIST_RX.search(t)):
-        score += 0.10
-
-    # long, very uniform multi-sentence responses (slight)
-    n_sent, avg_len = _sentence_stats(t)
-    if n_sent >= 4 and 10 <= avg_len <= 22 and TRANSITION_OPEN_RX.search(t):
-        score += 0.06
-
-    return float(max(0.0, min(1.0, score)))
-
-
-def style_ai_rows(df: pd.DataFrame, col: str = "AI_Suspected") -> "pd.io.formats.style.Styler":
-    df2 = df.copy()
-
-    def _row_style(r):
-        try:
-            flagged = bool(r.get(col, False))
-        except Exception:
-            flagged = False
-        if flagged:
-            return ["background-color: var(--ai-bg); border-left: 4px solid var(--ai-border);"] * len(r)
-        return [""] * len(r)
-
-    return df2.style.apply(_row_style, axis=1)
+    return max(0.0, min(1.0, score))
 
 
 # =============================================================================
@@ -470,13 +436,13 @@ def read_jsonl_path(path: Path) -> List[dict]:
 
 @dataclass
 class ExemplarPack:
-    vecs: np.ndarray
-    scores: np.ndarray
-    texts: List[str]
+    vecs: np.ndarray       # (n, d) normalized
+    scores: np.ndarray     # (n,) int 0..3
+    texts: List[str]       # exemplar text
 
 
 # =============================================================================
-# EMBEDDINGS
+# EMBEDDINGS (fast + cached)
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
@@ -551,7 +517,7 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
             packs[qid] = ExemplarPack(
                 vecs=np.zeros((0, 384), dtype=np.float32),
                 scores=np.array([], dtype=np.int32),
-                texts=[],
+                texts=[]
             )
         else:
             packs[qid] = ExemplarPack(
@@ -563,7 +529,7 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
 
 # =============================================================================
-# MEANING SELECTION + PER-ANSWER TEMP SELECTION
+# MEANING SELECTION + PER-ANSWER TEMP SELECTION (Option B++)
 # =============================================================================
 def _softmax_temp(x: np.ndarray, temp: float) -> np.ndarray:
     t = float(max(1e-6, temp))
@@ -648,18 +614,21 @@ def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
 
 
 # =============================================================================
-# DATAFRAME SCORING
+# DATAFRAME SCORING + SHADING
 # =============================================================================
-def _ensure_ai_last(df: pd.DataFrame, name: str = "AI_Suspected") -> pd.DataFrame:
+def _ensure_ai_last(df: pd.DataFrame, export_name: str = "AI_Suspected", source_name: str = "AI_suspected") -> pd.DataFrame:
     out = df.copy()
-    if name not in out.columns:
-        out[name] = ""
-    cols = [c for c in out.columns if c != name] + [name]
+    if export_name not in out.columns:
+        if source_name in out.columns:
+            out = out.rename(columns={source_name: export_name})
+        else:
+            out[export_name] = ""
+    cols = [c for c in out.columns if c != export_name] + [export_name]
     return out[cols]
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    df_out = _ensure_ai_last(df, "AI_Suspected")
+    df_out = _ensure_ai_last(df)
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
         df_out.to_excel(w, index=False)
@@ -761,6 +730,7 @@ def score_dataframe(
         for r in rows:
             qid = clean(r.get("question_id", ""))
             attr = clean(r.get("attribute", ""))
+            qhint = clean(r.get("prompt_hint", ""))
 
             col = resolved_for_qid.get(qid)
             if not col or col not in df.columns:
@@ -779,8 +749,8 @@ def score_dataframe(
             if not ans:
                 continue
 
-            # AI detection (PATTERN ONLY)
-            if ai_signal_score(ans) >= AI_SUSPECT_THRESHOLD:
+            # AI detection (WORKING LOGIC)
+            if ai_signal_score(ans, qhint) >= AI_SUSPECT_THRESHOLD:
                 any_ai = True
 
             cache_key = (qid, ans)
@@ -819,7 +789,7 @@ def score_dataframe(
 
         row["Overall Total (0–21)"] = overall_total
         row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
-        row["AI_Suspected"] = bool(any_ai)
+        row["AI_suspected"] = bool(any_ai)
 
         out_rows.append(row)
 
@@ -842,14 +812,29 @@ def score_dataframe(
     ordered += [c for c in a_cols if c in res.columns]
 
     ordered += [c for c in ["Overall Total (0–21)", "Overall Rank"] if c in res.columns]
-    res = res.reindex(columns=[c for c in ordered if c in res.columns])
+    if "AI_suspected" in res.columns:
+        ordered += ["AI_suspected"]
 
-    res = _ensure_ai_last(res, "AI_Suspected")
+    res = res.reindex(columns=[c for c in ordered if c in res.columns])
 
     if missing_qids:
         st.session_state["missing_qids"] = sorted(set(missing_qids))
 
     return res
+
+
+def style_ai_rows(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    # Keep the same shading idea from your working code
+    def _row_style(r):
+        try:
+            flagged = ("AI_suspected" in r and bool(r["AI_suspected"]))
+        except Exception:
+            flagged = False
+        if flagged:
+            return ["background-color: #241E4E"] * len(r)
+        return [""] * len(r)
+
+    return df.style.apply(_row_style, axis=1)
 
 
 # =============================================================================
@@ -895,7 +880,7 @@ def _open_ws_by_key() -> gspread.Worksheet:
 def upload_df_to_gsheets(df: pd.DataFrame) -> Tuple[bool, str]:
     try:
         ws = _open_ws_by_key()
-        df_out = _ensure_ai_last(df, "AI_Suspected")
+        df_out = _ensure_ai_last(df, export_name="AI_Suspected", source_name="AI_suspected")
         header = df_out.columns.astype(str).tolist()
         values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
         ws.clear()
@@ -916,11 +901,11 @@ def main():
     st.markdown(
         """
         <div class="app-header-card">
-            <div class="pill">Thought Leadership • Meaning Scoring (Auto + AI Detection)</div>
+            <div class="pill">Thought Leadership • Meaning Scoring (Option B++ + Working AI Detector)</div>
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
                 Automatic scoring: <b>Top-K ≤ 40</b> → <b>thematic subset</b> → <b>per-answer temperature selection</b>.
-                AI detection is <b>pattern-only</b> and shown as <b>AI_Suspected</b> with row shading.
+                AI detection uses your <b>working</b> rule-based logic (with row shading).
             </p>
         </div>
         """,
@@ -969,13 +954,12 @@ def main():
             + (" …" if len(missing_qids) > 12 else "")
         )
 
-    # AI summary
-    ai_ct = int(scored["AI_Suspected"].fillna(False).astype(bool).sum()) if "AI_Suspected" in scored.columns else 0
-    st.success(f"✅ Scoring complete. AI_Suspected flagged: {ai_ct:,} row(s).")
+    ai_ct = int(scored["AI_suspected"].fillna(False).astype(bool).sum()) if "AI_suspected" in scored.columns else 0
+    st.success(f"✅ Scoring complete. AI flagged: {ai_ct:,} row(s).")
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("📊 Scored table (AI rows shaded)")
-    st.dataframe(style_ai_rows(scored, "AI_Suspected"), use_container_width=True)
+    st.dataframe(style_ai_rows(scored), use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -992,7 +976,7 @@ def main():
     with c2:
         st.download_button(
             "Download CSV",
-            data=_ensure_ai_last(scored, "AI_Suspected").to_csv(index=False).encode("utf-8"),
+            data=_ensure_ai_last(scored, export_name="AI_Suspected", source_name="AI_suspected").to_csv(index=False).encode("utf-8"),
             file_name="ThoughtLeadership_Scored.csv",
             mime="text/csv",
             use_container_width=True,
