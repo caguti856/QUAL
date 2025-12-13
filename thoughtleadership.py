@@ -7,9 +7,6 @@
 #  - AI detection (COPIED from your working code) -> AI_Suspected column
 #  - Row shading if AI suspected
 #  - No review flags, no best-match columns
-#
-# IMPORTANT PATCH:
-#  - If Kobo response is NULL/blank/"Non"/"none"/etc => force score = 0 (Counterproductive)
 
 from __future__ import annotations
 
@@ -169,13 +166,25 @@ PASSTHROUGH_HINTS = [
     "username", "enumerator", "submitted_via_web", "_xform_id_string", "formid", "assetid"
 ]
 
+
 _EXCLUDE_SOURCE_COLS_LOWER = {
-    "_id", "formhub/uuid", "start", "end", "today", "staff_id", "meta/instanceid",
-    "_xform_id_string", "_uuid", "meta/rootuuid", "_submission_time", "_validation_status", "meta/deprecatedID"
+    "_id",
+    "formhub/uuid",
+    "start",
+    "end",
+    "today",
+    "staff_id",
+    "meta/instanceid",
+    "_xform_id_string",
+    "_uuid",
+    "meta/rootuuid",
+    "_submission_time",
+    "_validation_status",
+    "meta/deprecatedid",   
 }
 
 # Scoring defaults (automatic)
-TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))              # maximum top-K retrieved per question
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 30))              # maximum top-K retrieved per question
 CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))    # keep within best_sim - CLOSE_DELTA
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))    # exemplar-to-exemplar coherence threshold
 MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))         # minimum items for thematic subset
@@ -198,45 +207,6 @@ def clean(s) -> str:
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-
-# =============================================================================
-# NULLISH ANSWERS => SCORE 0
-# =============================================================================
-NULLISH_RX = re.compile(
-    r"^(?:"
-    r"non|none|null|nil|na|n/?a|"
-    r"not\s*applicable|not\s*available|"
-    r"no\s*response|no\s*answer|"
-    r"blank"
-    r")\.?$",
-    re.I,
-)
-
-def is_nullish_answer(raw) -> bool:
-    """
-    Treat as 'no meaningful answer' if:
-      - None / NaN / empty / whitespace
-      - exactly: Non / none / null / n/a / na / etc (case-insensitive)
-      - punctuation placeholders like '-', '--', '—'
-    """
-    if raw is None:
-        return True
-    try:
-        if isinstance(raw, float) and raw != raw:  # NaN
-            return True
-    except Exception:
-        pass
-
-    t = clean(raw)
-    if not t:
-        return True
-
-    t_low = t.lower().strip()
-    if t_low in {"-", "--", "—", "–", ".", ",", "..."}:
-        return True
-
-    return bool(NULLISH_RX.match(t_low))
 
 
 # =============================================================================
@@ -271,6 +241,7 @@ NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
 SLASH_PAIR_RX       = re.compile(r"\b\w+/\w+\b")
 
 
+
 def qa_overlap(ans, qtext) -> float:
     def _t(x) -> str:
         if x is None:
@@ -288,7 +259,6 @@ def qa_overlap(ans, qtext) -> float:
     at = set(re.findall(r"\w+", ans_s))
     qt = set(re.findall(r"\w+", q_s))
     return (len(at & qt) / (len(qt) + 1.0)) if qt else 1.0
-
 
 def ai_signal_score(text: str, question_hint: str = "") -> float:
     t = clean(text)
@@ -317,6 +287,7 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
             hits += 1
     if hits >= 2: score += 0.25
     if hits >= 3: score += 0.15
+
 
     if question_hint:
         overlap = qa_overlap(t, question_hint)
@@ -723,17 +694,14 @@ def score_dataframe(
         else:
             missing_qids.append(qid)
 
-    # Batch-embed ALL unique NON-NULLISH answers
+    # Batch-embed ALL unique answers
     all_answers = []
     for _, rec in df.iterrows():
         for r in rows:
             qid = clean(r.get("question_id", ""))
             col = resolved_for_qid.get(qid)
             if col and col in df.columns:
-                a_raw = rec.get(col, "")
-                if is_nullish_answer(a_raw):
-                    continue
-                a = clean(a_raw)
+                a = clean(rec.get(col, ""))
                 if a:
                     all_answers.append(a)
 
@@ -780,35 +748,30 @@ def score_dataframe(
             if qn not in (1, 2, 3, 4):
                 continue
 
-            ans_raw = rec.get(col, "")
+            ans = clean(rec.get(col, ""))
+            if not ans:
+                continue
 
-            # ✅ Force score 0 for nullish answers (Non/none/null/blank/NaN etc)
-            if is_nullish_answer(ans_raw):
-                sc = 0
+            # AI detection (WORKING LOGIC)
+            if ai_signal_score(ans, qhint) >= AI_SUSPECT_THRESHOLD:
+                any_ai = True
+
+            cache_key = (qid, ans)
+            if cache_key in exact_cache:
+                sc = exact_cache[cache_key]
             else:
-                ans = clean(ans_raw)
-
-                # AI detection (only meaningful answers)
-                if ai_signal_score(ans, qhint) >= AI_SUSPECT_THRESHOLD:
-                    any_ai = True
-
-                cache_key = (qid, ans)
-                if cache_key in exact_cache:
-                    sc = exact_cache[cache_key]
-                else:
-                    vec = ans_emb.get(ans)
-                    pack = packs_by_qid.get(qid)
-                    sc2 = score_answer_auto(pack, vec)
-                    if sc2 is None:
-                        sc2 = 1
-                    sc = int(sc2)
-                    exact_cache[cache_key] = sc
+                vec = ans_emb.get(ans)
+                pack = packs_by_qid.get(qid)
+                sc2 = score_answer_auto(pack, vec)
+                if sc2 is None:
+                    sc2 = 1
+                sc = int(sc2)
+                exact_cache[cache_key] = sc
 
             row[f"{attr}_Qn{qn}"] = sc
             row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
             per_attr.setdefault(attr, []).append(int(sc))
 
-        # Ensure all Q slots exist
         for attr in ORDERED_ATTRS:
             for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
@@ -883,7 +846,6 @@ def style_ai_rows(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Thought Leadership")
 
-
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
         raise ValueError("gcp_service_account missing in secrets.")
@@ -901,13 +863,11 @@ def _normalize_sa_dict(raw: dict) -> dict:
         raise ValueError(f"gcp_service_account missing fields: {', '.join(missing)}")
     return sa
 
-
 @st.cache_resource(show_spinner=False)
 def gs_client():
     sa = _normalize_sa_dict(st.secrets.get("gcp_service_account"))
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
-
 
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
@@ -919,7 +879,6 @@ def _open_ws_by_key() -> gspread.Worksheet:
         return sh.worksheet(DEFAULT_WS_NAME)
     except gspread.WorksheetNotFound:
         return sh.add_worksheet(title=DEFAULT_WS_NAME, rows="20000", cols="200")
-
 
 def upload_df_to_gsheets(df: pd.DataFrame) -> Tuple[bool, str]:
     try:
@@ -945,7 +904,7 @@ def main():
     st.markdown(
         """
         <div class="app-header-card">
-            <div class="pill">Thought Leadership • Scoring and AI Detection</div>
+            <div class="pill">Thought Leadership  Scoring and AI Detection </div>
             <h1>Thought Leadership</h1>
         </div>
         """,
