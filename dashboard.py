@@ -1,10 +1,21 @@
-# dashboard_tabs.py
+# dashboard.py
 # ------------------------------------------------------------
-# Thought Leadership Dashboard (PowerBI-style tabs)
-# Pulls scored data DIRECTLY from Google Sheets worksheet:
-#   GSHEETS_WORKSHEET_NAME1 = "Thought Leadership"
-# Uses: column charts, bar charts, donut/pie, histogram, heatmap
-# EXCLUDES: dates, duration, AI_MaxScore (not used)
+# ONE Streamlit "PowerBI-style" dashboard with 5 PAGE-TABS:
+# 1) Thought Leadership
+# 2) Growth Mindset
+# 3) Networking & Advocacy
+# 4) Advisory Skills
+# 5) Influencing Relationships
+#
+# Each page pulls its OWN worksheet from the SAME Google Sheet,
+# then shows: section tabs (inside the page) + an Overall tab.
+#
+# Rules respected:
+# - Pull from Google Sheets using gcp_service_account + GSHEETS_SPREADSHEET_KEY
+# - DO NOT show questions (only short titles you define)
+# - NO Date / Duration fields
+# - Uses AI_Suspected (and shows AI analysis in Overall tab)
+# - Heatmaps + donut/pie + bar/column + histogram
 # ------------------------------------------------------------
 
 import pandas as pd
@@ -15,32 +26,187 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==============================
-# PAGE CONFIG
+# CONFIG
 # ==============================
-st.set_page_config(page_title="Thought Leadership Dashboard", layout="wide")
+st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 
-# ==============================
-# SHEET NAMES (as you stated)
-# ==============================
-GSHEETS_WORKSHEET_NAME  = "Advisory"
-GSHEETS_WORKSHEET_NAME1 = "Thought Leadership"
-GSHEETS_WORKSHEET_NAME2 = "Growth Mindset"
-GSHEETS_WORKSHEET_NAME3 = "Networking"
-GSHEETS_WORKSHEET_NAME4 = "Influencingrelationship"
+# Your worksheet names (exact)
+WS_THOUGHT   = "Thought Leadership"
+WS_GROWTH    = "Growth Mindset"
+WS_NETWORK   = "Networking"
+WS_ADVISORY  = "Advisory"
+WS_INFLUENCE = "Influencingrelationship"
 
-# We are building THIS page from Thought Leadership:
-TARGET_WORKSHEET = GSHEETS_WORKSHEET_NAME1
-
-# ==============================
-# GOOGLE SHEETS CONFIG
-# ==============================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 SPREADSHEET_KEY = st.secrets["GSHEETS_SPREADSHEET_KEY"]
 
+# ==============================
+# SECTION DEFINITIONS (edit titles anytime)
+# ==============================
+PAGES = {
+    "Thought Leadership": {
+        "worksheet": WS_THOUGHT,
+        "sections": [
+            "Locally Anchored Visioning",
+            "Innovation and Insight",
+            "Execution Planning",
+            "Cross-Functional Collaboration",
+            "Follow-Through Discipline",
+            "Learning-Driven Adjustment",
+            "Result-Oriented Decision-Making",
+        ],
+        "overall_total_col": "Overall Total (0–21)",
+        "overall_rank_col": "Overall Rank",
+        "ai_col": "AI_Suspected",
+        "question_titles": {
+            "Locally Anchored Visioning": [
+                "Vision with Roots",
+                "Local Leadership in ToRs/Budgets",
+                "Safeguard Community Voice",
+                "Trade Ambition vs Protection",
+            ],
+            "Innovation and Insight": [
+                "Field-First Learning Loop",
+                "Surface Contradicting Insights",
+                "Avoid Pilot Theatre",
+                "Frugal Innovation Test",
+            ],
+            "Execution Planning": [
+                "Execution Spine Ownership",
+                "90-Day Plan & Decision Gates",
+                "Close Handoff Failure",
+                "Drop to Regain Clarity",
+            ],
+            "Cross-Functional Collaboration": [
+                "One-Day Alignment Workshop",
+                "Resolve MEAL vs Gender Tension",
+                "Shared Principles & Tests",
+                "Co-Owned Decision Design",
+            ],
+            "Follow-Through Discipline": [
+                "Executable Promise",
+                "Light Dashboard & Escalation",
+                "Recovery Conversation",
+                "Stop Update Theatre",
+            ],
+            "Learning-Driven Adjustment": [
+                "Quarterly Pause & Reflect",
+                "Strategic Hypothesis & Evidence",
+                "Handle Negative Findings",
+                "Stop to Fund Adaptations",
+            ],
+            "Result-Oriented Decision-Making": [
+                "Agro-Parks vs Grassroots Call",
+                "Decision by Friday",
+                "Socialize Hard Trade-Off",
+                "Decision Rule for Divergence",
+            ],
+        },
+    },
+
+    "Growth Mindset": {
+        "worksheet": WS_GROWTH,
+        "sections": [
+            "Learning Agility",
+            "Digital Savvy",
+            "Innovation",
+            "Contextual Intelligence",
+        ],
+        "overall_total_col": "Overall Total (0–12)",
+        "overall_rank_col": "Overall Rank",
+        "ai_col": "AI_Suspected",
+        "question_titles": {
+            "Learning Agility": [
+                "Correct & Improve Quickly",
+                "Test Ideas & Change Mind",
+                "Listen to Rumours as Signals",
+                "Co-Design in Market Cycle",
+            ],
+            "Digital Savvy": [
+                "USSD vs Offline vs Smartphone",
+                "Consent for Low Literacy",
+                "Offline Transaction Workflow",
+                "Correct Mistakes Transparently",
+            ],
+            "Innovation": [
+                "Prototype A vs B Test Design",
+                "Low-Cost Inclusion Idea",
+                "Co-Design Session Outputs",
+                "Public ‘We Heard You’ Message",
+            ],
+            "Contextual Intelligence": [
+                "Actor Map & Red Lines",
+                "Handle ‘Facilitation’ Pressure",
+                "Safeguards for Fee Link",
+                "Radio Trust Rebuild Plan",
+            ],
+        },
+    },
+
+    # These 3 pages will work immediately IF their sheets follow the same pattern:
+    #   {Section}_Qn1..Qn4, {Section}_Rubric_Qn1..Qn4, {Section}_Avg (0–3), {Section}_RANK
+    # and include Overall columns + AI_Suspected.
+    "Networking & Advocacy": {
+        "worksheet": WS_NETWORK,
+        "sections": [
+            "Strategic Positioning & Donor Fluency",
+            "Power-Aware Stakeholder Mapping",
+            "Equitable Allyship & Local Fronting",
+            "Coalition Governance & Convening",
+            "Community-Centered Messaging",
+            "Evidence-Led Learning (Local Knowledge)",
+            "Influence Without Authority",
+            "Risk Management & Adaptive Communication",
+        ],
+        "overall_total_col": "Overall Total (0–24)",
+        "overall_rank_col": "Overall Rank",
+        "ai_col": "AI_Suspected",
+        "question_titles": {},  # optional: add your own titles later
+    },
+
+    "Advisory Skills": {
+        "worksheet": WS_ADVISORY,
+        "sections": [
+            "Strategic & analytical thinking",
+            "Credibility & trustworthiness",
+            "Effective communication & influence",
+            "Client & stakeholder focus",
+            "Fostering collaboration & partnership",
+            "Ensuring relevance & impact",
+            "Solution orientation & adaptability",
+            "Capacity strengthening & empowerment support",
+        ],
+        "overall_total_col": "Overall Total (0–24)",
+        "overall_rank_col": "Overall Rank",
+        "ai_col": "AI_Suspected",
+        "question_titles": {},  # optional
+    },
+
+    "Influencing Relationships": {
+        "worksheet": WS_INFLUENCE,
+        "sections": [
+            "Strategic Positioning & Political Acumen",
+            "Stakeholder Mapping & Engagement",
+            "Evidence-Informed Advocacy",
+            "Communication, Framing & Messaging",
+            "Risk Awareness & Mitigation",
+            "Coalition Building & Collaborative Action",
+            "Adaptive Tactics & Channel Selection",
+            "Integrity & Values-Based Influencing",
+        ],
+        "overall_total_col": "Overall Total (0–24)",
+        "overall_rank_col": "Overall Rank",
+        "ai_col": "AI_Suspected",
+        "question_titles": {},  # optional
+    },
+}
+
+# ==============================
+# GOOGLE SHEETS
+# ==============================
 def _normalize_sa_dict(raw: dict) -> dict:
     sa = dict(raw)
     if sa.get("private_key") and "\\n" in sa["private_key"]:
@@ -59,255 +225,187 @@ def load_sheet_df(sheet_name: str) -> pd.DataFrame:
     gc = gs_client()
     ws = gc.open_by_key(SPREADSHEET_KEY).worksheet(sheet_name)
     df = pd.DataFrame(ws.get_all_records())
-    # Clean column names (keep as-is but strip spaces)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 # ==============================
-# DASHBOARD SECTIONS (7 + Overall tab)
+# VIS HELPERS
 # ==============================
-SECTIONS = [
-    "Locally Anchored Visioning",
-    "Innovation and Insight",
-    "Execution Planning",
-    "Cross-Functional Collaboration",
-    "Follow-Through Discipline",
-    "Learning-Driven Adjustment",
-    "Result-Oriented Decision-Making",
-]
+def _clean_series(s: pd.Series) -> pd.Series:
+    return s.astype(str).replace({"": np.nan, "nan": np.nan, "None": np.nan}).dropna()
 
-# Titles for the 4 questions per section (NO question text shown)
-QUESTION_TITLES = {
-    "Locally Anchored Visioning": [
-        "Vision with Roots",
-        "Hard-wire Local Leadership",
-        "Safeguard Community Voice",
-        "Trade-off for Locally Led Scale",
-    ],
-    "Innovation and Insight": [
-        "Field-First Learning Loop",
-        "Surface Contradicting Insights",
-        "Balance Policy vs Experimentation",
-        "Frugal Innovation Test",
-    ],
-    "Execution Planning": [
-        "Execution Spine Ownership",
-        "90-Day Plan on a Page",
-        "Close Handoff Failure",
-        "Drop Activities to Regain Clarity",
-    ],
-    "Cross-Functional Collaboration": [
-        "Alignment Workshop Design",
-        "Resolve MEAL vs Gender Tension",
-        "Shared Principles & Adherence",
-        "Co-owned Decision Structure",
-    ],
-    "Follow-Through Discipline": [
-        "Executable Promise",
-        "Light Dashboard & Escalation",
-        "Partner Recovery Options",
-        "Stop Update Theatre",
-    ],
-    "Learning-Driven Adjustment": [
-        "Quarterly Pause & Reflect",
-        "Hypothesis + Evidence Shift",
-        "Handle Negative Findings",
-        "Stop to Fund Adaptations",
-    ],
-    "Result-Oriented Decision-Making": [
-        "Cost/Benefit Trade-off Call",
-        "Decide-by-Friday Data Needs",
-        "Socialize Hard Trade-off",
-        "Coherence Rule for Divergence",
-    ],
-}
-
-# ==============================
-# HELPERS
-# ==============================
-def score_distribution_percent(df: pd.DataFrame, score_col: str) -> pd.DataFrame:
-    s = pd.to_numeric(df[score_col], errors="coerce")
+def score_dist(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    s = pd.to_numeric(df[col], errors="coerce")
     counts = s.value_counts().reindex([0, 1, 2, 3], fill_value=0)
     total = counts.sum()
     pct = (counts / total * 100).round(1) if total else counts.astype(float)
-    out = pd.DataFrame({"Score": [0, 1, 2, 3], "Percent": pct.values, "Count": counts.values})
-    return out
+    return pd.DataFrame({"Score": [0, 1, 2, 3], "Percent": pct.values, "Count": counts.values})
 
-def rubric_frequency(df: pd.DataFrame, rubric_col: str) -> pd.DataFrame:
-    x = (
-        df[rubric_col]
-        .astype(str)
-        .replace({"": np.nan, "nan": np.nan, "None": np.nan})
-        .dropna()
-    )
+def rubric_freq(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    x = _clean_series(df[col])
     out = x.value_counts().reset_index()
     out.columns = ["Rubric", "Count"]
     return out
 
-def section_heatmap_percent(df: pd.DataFrame, section: str) -> pd.DataFrame:
+def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.DataFrame:
     rows = []
     for qn in range(1, 5):
-        score_col = f"{section}_Qn{qn}"
-        title = QUESTION_TITLES[section][qn - 1]
-        dist = score_distribution_percent(df, score_col)
+        col = f"{section}_Qn{qn}"
+        title = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
+        d = score_dist(df, col)
         rows.append({
             "Question": title,
-            "0": dist.loc[dist["Score"] == 0, "Percent"].values[0],
-            "1": dist.loc[dist["Score"] == 1, "Percent"].values[0],
-            "2": dist.loc[dist["Score"] == 2, "Percent"].values[0],
-            "3": dist.loc[dist["Score"] == 3, "Percent"].values[0],
+            "0": float(d.loc[d["Score"] == 0, "Percent"].values[0]),
+            "1": float(d.loc[d["Score"] == 1, "Percent"].values[0]),
+            "2": float(d.loc[d["Score"] == 2, "Percent"].values[0]),
+            "3": float(d.loc[d["Score"] == 3, "Percent"].values[0]),
         })
-    h = pd.DataFrame(rows).set_index("Question")
-    return h
+    return pd.DataFrame(rows).set_index("Question")
 
-def safe_col_exists(df: pd.DataFrame, col: str) -> bool:
+def has(df: pd.DataFrame, col: str) -> bool:
     return col in df.columns
 
 # ==============================
-# RENDER ONE SECTION TAB
+# RENDER ONE PAGE (worksheet)
 # ==============================
-def render_section_tab(df: pd.DataFrame, section: str):
-    st.subheader(section)
+def render_page(page_name: str):
+    cfg = PAGES[page_name]
+    ws_name = cfg["worksheet"]
 
-    # --- Section summary visuals (Avg histogram + Rank donut) ---
-    avg_col  = f"{section}_Avg (0–3)"
-    rank_col = f"{section}_RANK"
+    with st.spinner(f"Loading: {ws_name} ..."):
+        df = load_sheet_df(ws_name)
 
-    c1, c2 = st.columns(2)
+    st.caption(f"Worksheet: {ws_name} • Rows: {len(df):,} • Columns: {len(df.columns):,}")
 
-    with c1:
-        if safe_col_exists(df, avg_col):
-            fig = px.histogram(
-                df, x=avg_col, nbins=10,
-                title="Section Average Distribution"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info(f"Missing column: {avg_col}")
+    # build tabs: one per section + Overall
+    section_tabs = cfg["sections"] + ["Overall"]
+    tabs = st.tabs(section_tabs)
 
-    with c2:
-        if safe_col_exists(df, rank_col):
-            rank_df = df[rank_col].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
-            rank_df = rank_df.value_counts().reset_index()
-            rank_df.columns = ["Rank", "Count"]
-            fig = px.pie(rank_df, names="Rank", values="Count", hole=0.55, title="Section Rank (Donut)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info(f"Missing column: {rank_col}")
+    # per-section tabs
+    for i, section in enumerate(cfg["sections"]):
+        with tabs[i]:
+            st.subheader(section)
 
-    st.divider()
+            avg_col = f"{section}_Avg (0–3)"
+            rnk_col = f"{section}_RANK"
 
-    # --- For each question: Score % (column chart) + Rubric frequency (bar) ---
-    for qn in range(1, 5):
-        score_col  = f"{section}_Qn{qn}"
-        rubric_col = f"{section}_Rubric_Qn{qn}"
-        q_title    = QUESTION_TITLES[section][qn - 1]
+            c1, c2 = st.columns(2)
+            with c1:
+                if has(df, avg_col):
+                    fig = px.histogram(df, x=avg_col, nbins=10, title="Section Average Distribution")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info(f"Missing: {avg_col}")
 
-        st.markdown(f"### {q_title}")
+            with c2:
+                if has(df, rnk_col):
+                    r = _clean_series(df[rnk_col])
+                    r_df = r.value_counts().reset_index()
+                    r_df.columns = ["Rank", "Count"]
+                    fig = px.pie(r_df, names="Rank", values="Count", hole=0.55, title="Section Rank (Donut)")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info(f"Missing: {rnk_col}")
 
-        colA, colB = st.columns(2)
+            st.divider()
 
-        with colA:
-            if safe_col_exists(df, score_col):
-                dist = score_distribution_percent(df, score_col)
-                fig = px.bar(
-                    dist, x="Score", y="Percent",
-                    text="Percent",
-                    title="Score Distribution (%)"
-                )
-                fig.update_traces(texttemplate="%{text}%", textposition="outside")
-                fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
+            q_titles = cfg.get("question_titles", {}).get(section, [])
+            for qn in range(1, 5):
+                score_col  = f"{section}_Qn{qn}"
+                rubric_col = f"{section}_Rubric_Qn{qn}"
+                title = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
+
+                st.markdown(f"### {title}")
+
+                a, b = st.columns(2)
+                with a:
+                    if has(df, score_col):
+                        d = score_dist(df, score_col)
+                        fig = px.bar(d, x="Score", y="Percent", text="Percent", title="Score Distribution (%)")
+                        fig.update_traces(texttemplate="%{text}%", textposition="outside")
+                        fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning(f"Missing: {score_col}")
+
+                with b:
+                    if has(df, rubric_col):
+                        rf = rubric_freq(df, rubric_col)
+                        fig = px.bar(rf, x="Count", y="Rubric", orientation="h", title="Rubric Frequency")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning(f"Missing: {rubric_col}")
+
+                st.divider()
+
+            st.markdown("### Heatmap (Score % by Question)")
+            try:
+                if all(has(df, f"{section}_Qn{k}") for k in (1, 2, 3, 4)):
+                    h = section_heatmap(df, section, q_titles)
+                    fig = px.imshow(h, labels=dict(x="Score", y="Question", color="%"), title=f"{section} Heatmap")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Heatmap skipped (missing one or more Qn columns).")
+            except Exception as e:
+                st.error(f"Heatmap failed: {e}")
+
+    # Overall tab
+    with tabs[-1]:
+        st.subheader("Overall")
+
+        overall_total = cfg["overall_total_col"]
+        overall_rank  = cfg["overall_rank_col"]
+        ai_col        = cfg["ai_col"]
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if has(df, overall_total):
+                fig = px.histogram(df, x=overall_total, title="Overall Total Distribution")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning(f"Missing score column: {score_col}")
+                st.warning(f"Missing: {overall_total}")
 
-        with colB:
-            if safe_col_exists(df, rubric_col):
-                rf = rubric_frequency(df, rubric_col)
-                fig = px.bar(
-                    rf, x="Count", y="Rubric",
-                    orientation="h",
-                    title="Rubric Frequency"
-                )
+        with c2:
+            if has(df, overall_rank):
+                r = _clean_series(df[overall_rank])
+                r_df = r.value_counts().reset_index()
+                r_df.columns = ["Rank", "Count"]
+                fig = px.pie(r_df, names="Rank", values="Count", hole=0.55, title="Overall Rank (Donut)")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning(f"Missing rubric column: {rubric_col}")
+                st.warning(f"Missing: {overall_rank}")
 
         st.divider()
 
-    # --- Heatmap for this section (Question x Score% 0–3) ---
-    st.markdown("### Section Heatmap (Score % by Question)")
-    try:
-        h = section_heatmap_percent(df, section)
-        fig = px.imshow(
-            h,
-            labels=dict(x="Score", y="Question", color="%"),
-            title=f"{section} Heatmap"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Heatmap failed: {e}")
+        if has(df, ai_col):
+            ai = _clean_series(df[ai_col])
+            ai_df = ai.value_counts().reset_index()
+            ai_df.columns = ["AI_Suspected", "Count"]
+
+            c3, c4 = st.columns(2)
+            with c3:
+                fig = px.pie(ai_df, names="AI_Suspected", values="Count", hole=0.55, title="AI Suspected (Donut)")
+                st.plotly_chart(fig, use_container_width=True)
+            with c4:
+                fig = px.bar(ai_df, x="AI_Suspected", y="Count", title="AI Suspected (Counts)")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning(f"Missing: {ai_col}")
 
 # ==============================
-# OVERALL TAB
-# ==============================
-def render_overall_tab(df: pd.DataFrame):
-    st.subheader("Overall Analysis")
-
-    # Overall Total histogram
-    if safe_col_exists(df, "Overall Total (0–21)"):
-        fig = px.histogram(df, x="Overall Total (0–21)", nbins=15, title="Overall Total Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("Missing: Overall Total (0–21)")
-
-    # Overall Rank donut + bar
-    if safe_col_exists(df, "Overall Rank"):
-        rank_df = df["Overall Rank"].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
-        rank_df = rank_df.value_counts().reset_index()
-        rank_df.columns = ["Rank", "Count"]
-
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = px.pie(rank_df, names="Rank", values="Count", hole=0.55, title="Overall Rank (Donut)")
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            fig = px.bar(rank_df, x="Count", y="Rank", orientation="h", title="Overall Rank (Bar)")
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("Missing: Overall Rank")
-
-    # AI Suspected (donut)
-    if safe_col_exists(df, "AI_Suspected"):
-        ai_df = df["AI_Suspected"].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
-        ai_df = ai_df.value_counts().reset_index()
-        ai_df.columns = ["AI_Suspected", "Count"]
-        fig = px.pie(ai_df, names="AI_Suspected", values="Count", hole=0.55, title="AI Suspected (Donut)")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("Missing: AI_Suspected")
-
-# ==============================
-# MAIN APP
+# MAIN
 # ==============================
 def main():
-    st.title("Thought Leadership Dashboard")
+    st.title("PowerBI-style Scoring Dashboard")
 
-    with st.spinner(f"Loading Google Sheet: {TARGET_WORKSHEET} ..."):
-        df = load_sheet_df(TARGET_WORKSHEET)
+    page = st.sidebar.radio(
+        "Dashboard Pages",
+        list(PAGES.keys()),
+        index=0
+    )
 
-    # We keep Care_Staff if present; we DO NOT use Date/Duration/AI_MaxScore anyway.
-    # (No need to drop columns; visuals only reference what we need.)
-
-    # Tabs: 7 sections + Overall
-    tabs = st.tabs(SECTIONS + ["Overall"])
-
-    for i, section in enumerate(SECTIONS):
-        with tabs[i]:
-            render_section_tab(df, section)
-
-    with tabs[-1]:
-        render_overall_tab(df)
+    render_page(page)
 
 if __name__ == "__main__":
     main()
