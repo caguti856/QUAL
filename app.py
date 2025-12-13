@@ -1,62 +1,99 @@
- 
 import streamlit as st
 import streamlit.components.v1 as components
+st.set_page_config(
+    page_title="Thematic Analytics",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Thematic Analytics",  layout="wide")
-
-# === PAGES (make sure advisory.py exists in the same folder or is importable)
-import advisory  # must define advisory.main()
+# === PAGES (make sure each file defines .main() or appropriate entry)
+import advisory
 import thoughtleadership
 import growthmindset
 import networking
 import influencingrelationship
 import login
 import dashboard
-# ----- optional cover -----
-# Full-bleed, true viewport cover (no scroll, no padding)
-st.markdown("""
+
+# ----------------------------
+# PAGE CONFIG
+# ----------------------------
+
+# ----------------------------
+# CSS: two modes
+#   1) COVER mode: true full-bleed, no scroll, hide chrome
+#   2) APP mode: keep sidebar toggle available always
+# ----------------------------
+COVER_CSS = """
 <style>
 html, body, [data-testid="stAppViewContainer"]{
   height:100vh !important; width:100vw !important;
-  padding:0 !important; margin:0 !important; overflow:hidden !important;
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
+  padding:0 !important; margin:0 !important;
   overflow:hidden !important;
 }
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
+.block-container, section.main{
+  padding:0 !important; margin:0 !important;
+}
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{
+  display:none !important;
+}
 </style>
-""", unsafe_allow_html=True)
+"""
 
-# --- No-scroll COVER (white/grey background, CARE orange accents) ---
+APP_CSS = """
+<style>
+/* Keep app comfortable (allow normal scroll) */
+html, body, [data-testid="stAppViewContainer"]{
+  height:auto !important; width:100vw !important;
+  margin:0 !important; padding:0 !important;
+  overflow:auto !important;
+}
+
+/* Optional: tighten default padding a bit */
+.block-container{
+  padding-top: 1rem !important;
+}
+
+/* Hide Streamlit chrome if you want, BUT keep sidebar toggle available */
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{
+  display:none !important;
+}
+
+/* ALWAYS keep the sidebar toggle visible so users can return to sidebar after expand */
+[data-testid="collapsedControl"]{
+  display: block !important;
+  position: fixed !important;
+  top: 12px;
+  left: 12px;
+  z-index: 999999;
+}
+
+/* Make it more tappable/visible */
+[data-testid="collapsedControl"] button{
+  border-radius: 12px !important;
+}
+</style>
+"""
+
+# ----------------------------
+# COVER HTML (same as yours, unchanged)
+# ----------------------------
 COVER_HTML = """
 <div style="
   --care-orange:#EB7100;
-  --bg:#F7F7F9;     /* light page */
-  --panel:#FFFFFF;  /* header/footer panels */
+  --bg:#F7F7F9;
+  --panel:#FFFFFF;
   --text:#0F1222;
   --muted:#667085;
   --ring:rgba(235,113,0,.45);
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 
-  /* full viewport, absolutely no scroll */
   height:100vh; width:100vw; overflow:hidden;
   display:grid; grid-template-rows: auto 1fr auto;
   background:var(--bg);
   color:var(--text);
 ">
 
-  <!-- Header (sticky look but we don't scroll anyway) -->
   <header style="
     display:flex; align-items:center; justify-content:space-between;
     padding: 14px clamp(16px,4vw,40px);
@@ -65,12 +102,10 @@ COVER_HTML = """
     <div style="display:flex; align-items:center; gap:.75rem;">
       <img src="https://brand.care.org/wp-content/uploads/2017/08/Orange-Horizontal-300x97.png"
            alt="CARE" style="height:28px; display:block"/>
-     
     </div>
     <div style="opacity:.85; font-size:.95rem; color:#6B7280;">Thematic Analytics</div>
   </header>
 
-  <!-- Hero (centered; uses clamp to ALWAYS fit) -->
   <main style="display:grid; place-items:center; padding: clamp(8px, 2vw, 24px);">
     <section style="text-align:center; max-width:1050px; width:100%;">
       <h1 style="
@@ -87,7 +122,6 @@ COVER_HTML = """
         Turn qualitative feedback into defensible, program-ready evidence.
       </p>
 
-      <!-- CTA -->
       <div style="display:flex; justify-content:center; gap:12px; flex-wrap:wrap; margin-top:10px;">
         <a role="button" href="?start=1" style="
           display:inline-flex; align-items:center; gap:.55rem;
@@ -99,7 +133,6 @@ COVER_HTML = """
     </section>
   </main>
 
-  <!-- Footer (thin, within viewport) -->
   <footer style="
     padding: 12px clamp(16px,4vw,40px); text-align:center;
     background:var(--panel); border-top:1px solid #E6E7EB; color:#5B616E; font-size:12px;
@@ -109,29 +142,66 @@ COVER_HTML = """
 
   <style>
     a:focus-visible{ outline:3px solid var(--ring); outline-offset:3px; border-radius:999px; }
-    @media (max-width:900px){
-      /* one column tiles on small screens, still fits */
-      main section div[style*='grid-template-columns:repeat(3']{ grid-template-columns:1fr !important; }
-    }
   </style>
 </div>
 """
 
+# ----------------------------
+# OPTIONAL: Floating "Menu" button (extra safety)
+# If collapsedControl ever changes, this still helps you open the sidebar quickly.
+# ----------------------------
+def inject_floating_menu_button():
+    components.html(
+        """
+        <script>
+        (function () {
+          // avoid duplicates on rerun
+          if (parent.document.getElementById("openSidebarBtn")) return;
 
+          const btn = parent.document.createElement("button");
+          btn.id = "openSidebarBtn";
+          btn.innerHTML = "☰ Menu";
+          btn.style.position = "fixed";
+          btn.style.top = "12px";
+          btn.style.left = "64px";   // leave space for default toggle at 12px
+          btn.style.zIndex = "999999";
+          btn.style.padding = "8px 12px";
+          btn.style.borderRadius = "999px";
+          btn.style.border = "1px solid #E6E7EB";
+          btn.style.background = "white";
+          btn.style.fontWeight = "700";
+          btn.style.cursor = "pointer";
 
+          btn.onclick = function () {
+            const ctl = parent.document.querySelector('[data-testid="collapsedControl"]');
+            if (ctl) ctl.click();
+          };
 
-# --- GLOBAL SESSION SETUP ---
-# ✅ Only defined ONCE, here in main.py
+          parent.document.body.appendChild(btn);
+        })();
+        </script>
+        """,
+        height=0
+    )
+
+# ----------------------------
+# SESSION STATE INIT (only once)
+# ----------------------------
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 if "show_cover" not in st.session_state:
     st.session_state["show_cover"] = True
 if "auth_mode" not in st.session_state:
     st.session_state["auth_mode"] = "login"
-# --- Cover page content (HTML + CSS) ---
 
 
+# ----------------------------
+# COVER PAGE
+# ----------------------------
 def show_cover_page():
+    # Apply COVER-only CSS
+    st.markdown(COVER_CSS, unsafe_allow_html=True)
+
     qp = st.query_params
     if qp.get("start") == "1":
         st.session_state.show_cover = False
@@ -142,51 +212,68 @@ def show_cover_page():
             st.experimental_set_query_params()
         st.rerun()
 
-    # exactly one viewport tall, no internal scroll
-    components.html(COVER_HTML, height=700, scrolling=False)
+    # One viewport, no scroll
+    components.html(COVER_HTML, height=720, scrolling=False)
 
 
+# ----------------------------
+# APP (after cover)
+# ----------------------------
+def show_app():
+    # Apply APP CSS (keeps sidebar toggle reachable)
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+    # Optional extra safety button (comment out if you don’t want it)
+    inject_floating_menu_button()
+
+    # ---- Auth routing ----
+    if not st.session_state["user_email"]:
+        login.show_auth_page()
+        return
+
+    # ---- Sidebar navigation ----
+    with st.sidebar:
+        selected = st.selectbox(
+            "Navigation",
+            [
+                "Advisory",
+                "Thought Leadership",
+                "Growth Mindset",
+                "Networking",
+                "Influencing Relationship",
+                "Dashboard",
+                "Logout",
+            ],
+        )
+
+    # ---- Page routing ----
+    if selected == "Advisory":
+        advisory.main()
+    elif selected == "Thought Leadership":
+        thoughtleadership.main()
+    elif selected == "Growth Mindset":
+        growthmindset.main()
+    elif selected == "Networking":
+        networking.main()
+    elif selected == "Influencing Relationship":
+        influencingrelationship.main()
+    elif selected == "Dashboard":
+        dashboard.main()
+    elif selected == "Logout":
+        st.session_state["user_email"] = None
+        st.session_state["show_cover"] = True
+        st.rerun()
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
 def main():
-    if 'show_cover' not in st.session_state:
-        st.session_state['show_cover'] = True
-    if 'user_email' not in st.session_state:
-        st.session_state['user_email'] = None
-    if 'auth_mode' not in st.session_state:
-        st.session_state['auth_mode'] = "login"
-
-    # Routing logic
-    if st.session_state['show_cover']:
+    if st.session_state["show_cover"]:
         show_cover_page()
     else:
-        if not st.session_state['user_email']:
-            login.show_auth_page()
-        else:
-            # Your sidebar navigation as before
-          with st.sidebar:
-                selected = st.selectbox(
-                "Navigation",
-                ["Advisory", "Thought Leadership","Growth Mindset","Networking","Influencing Relationship","Dashboard","Logout"]
-            )
-          if selected == "Advisory":
-              advisory.main()
-          elif selected == "Thought Leadership":
-              thoughtleadership.main()
-          elif selected == "Growth Mindset":
-              growthmindset.main() 
-          elif selected == "Networking":
-              networking.main() 
-          elif selected == "Influencing Relationship":
-             influencingrelationship.main() 
-          elif selected == "Dashboard":
-             dashboard.main()  
-          elif selected == "Logout":
-             st.session_state.user_email = None
-             st.session_state['show_cover'] = True
+        show_app()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
