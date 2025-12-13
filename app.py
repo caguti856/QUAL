@@ -2,7 +2,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Thematic Analytics", layout="wide", initial_sidebar_state="wide")
+st.set_page_config(page_title="Thematic Analytics", layout="wide")
 
 
 # === PAGES (make sure advisory.py exists in the same folder or is importable)
