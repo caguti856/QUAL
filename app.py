@@ -152,10 +152,11 @@ def main():
           elif selected == "Dashboard":
              dashboard.main()  
           elif selected == "Logout":
-             st.session_state.user_email = None
+             st.session_state["user_email"] = None
              st.session_state['show_cover'] = True
              st.rerun() # Added rerun for immediate state change
 
 
 if __name__ == "__main__":
     main()
+
