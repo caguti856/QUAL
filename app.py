@@ -21,22 +21,22 @@ html, body, [data-testid="stAppViewContainer"]{
   padding:0 !important; margin:0 !important; overflow:hidden !important;
 }
 .block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
-</style>
-""", unsafe_allow_html=True)
 
-
-# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
-  overflow:hidden !important;
+/* ✅ keep header in DOM (so sidebar toggle exists), but hide it visually */
+header, [data-testid="stHeader"]{
+  visibility:hidden !important;
+  height:0 !important;
+  margin:0 !important;
+  padding:0 !important;
 }
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
+
+/* you can still hide toolbar/footer */
+[data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
+
+
+
 # ✅ KEEP SIDEBAR TOGGLE ALWAYS VISIBLE (works across Streamlit versions)
 st.markdown("""
 <style>
