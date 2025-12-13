@@ -172,7 +172,7 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # Scoring defaults (automatic)
-TOPK_MAX = int(st.secrets.get("TOPK_MAX", 30))              # maximum top-K retrieved per question
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))              # maximum top-K retrieved per question
 CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))    # keep within best_sim - CLOSE_DELTA
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))    # exemplar-to-exemplar coherence threshold
 MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))         # minimum items for thematic subset
@@ -978,3 +978,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
