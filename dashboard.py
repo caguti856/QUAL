@@ -1,44 +1,48 @@
 # dashboard.py
 # ------------------------------------------------------------
-# Grey app background
-# Blue charts
-# Chart "card" backgrounds are NOT white (soft grey/blue)
-# Uses tables in key places (rank tables + score tables + rubric tables)
+# Updates per your feedback:
+# - ONLY the SECTION distributions (Avg + Rank) are TABLES (no charts there)
+# - All text forced BLACK and readable (bigger fonts)
+# - Cleaner, client-friendly theme:
+#   * Grey app background
+#   * White chart cards
+#   * Blue charts (high-contrast)
+#   * Plot background very light (not dull), text always black
+# - Keeps: heatmaps, donut/pie (only where valid), bar/column, histograms, tables (rubric + score tables)
+# - Fixes StreamlitDuplicateElementId via unique keys for every chart
 # ------------------------------------------------------------
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 
 # ==============================
-# THEME / COLORS (Grey + Blues + Black text)
+# CLEAN PROFESSIONAL THEME (readable)
 # ==============================
-APP_BG_TOP   = "#F2F4F7"
-APP_BG_BOT   = "#E7EAF0"
+APP_BG = "#737576"       # grey background
+CARD_BG = "#EB7100"      # white cards (clean for clients)
+BORDER = "rgba(0,0,0,0.12)"
 
-# chart container + plot backgrounds (not white)
-CHART_PAPER  = "#EEF2F7"   # outside plot area
-CHART_PLOT   = "#E8EEF8"   # inside plot area
+TEXT = "#F4EEEE"         
+MUTED = "rgba(0,0,0,0.70)"
 
-CARD_BG      = "#EEF1F6"
-BORDER       = "rgba(0,0,0,0.10)"
-TEXT         = "#0B0F19"
-MUTED        = "rgba(11,15,25,0.65)"
+# Chart backgrounds (very light, but readable)
+CHART_PAPER = "#11101D"
+CHART_PLOT = "#A7B2C9"
 
-# Blue palette
-BLUES = ["#0B5FFF", "#1D7AFC", "#3B8EF5", "#5AA2F2", "#7BB6F3", "#A6CEFF", "#0A2E6B"]
+# High-contrast blues
+BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#A9C9FF"]
 HEAT_SCALE = [
-    [0.00, "#F7FAFF"],
-    [0.20, "#EAF2FF"],
-    [0.45, "#BBD7FF"],
-    [0.70, "#4E9BFF"],
-    [1.00, "#0B5FFF"],
+    [0.00, "#F2F7FF"],
+    [0.25, "#D6E8FF"],
+    [0.55, "#1D7AFC"],
+    [0.80, "#0B47A8"],
+    [1.00, "#031432"],
 ]
 
 def inject_css():
@@ -46,22 +50,45 @@ def inject_css():
         f"""
         <style>
         .stApp {{
-            background: linear-gradient(180deg, {APP_BG_TOP} 0%, {APP_BG_BOT} 100%);
+            background: {APP_BG};
             color: {TEXT};
         }}
         .block-container {{
-            padding-top: 1.2rem;
+            padding-top: 1.1rem;
         }}
 
-        /* Headings */
-        h1, h2, h3, h4, h5, h6 {{
+        /* Force text black + bigger */
+        html, body, [class*="css"] {{
             color: {TEXT} !important;
+            font-size: 16px !important;
+        }}
+
+        /* Headings: bigger + bold */
+        h1 {{
+            font-size: 38px !important;
             font-weight: 900 !important;
+            color: {TEXT} !important;
+            letter-spacing: .2px;
+        }}
+        h2 {{
+            font-size: 28px !important;
+            font-weight: 900 !important;
+            color: {TEXT} !important;
+        }}
+        h3 {{
+            font-size: 22px !important;
+            font-weight: 900 !important;
+            color: {TEXT} !important;
+        }}
+        h4 {{
+            font-size: 18px !important;
+            font-weight: 900 !important;
+            color: {TEXT} !important;
         }}
 
         /* Sidebar */
         section[data-testid="stSidebar"] {{
-            background: linear-gradient(180deg, #FFFFFF 0%, {APP_BG_TOP} 100%);
+            background: #FFFFFF;
             border-right: 1px solid {BORDER};
         }}
 
@@ -71,41 +98,44 @@ def inject_css():
             border: 1px solid {BORDER};
             border-radius: 18px;
             padding: 16px 18px;
-            box-shadow: 0 10px 24px rgba(0,0,0,0.06);
+            box-shadow: 0 10px 22px rgba(0,0,0,0.06);
         }}
         .card-title {{
-            font-size: 12px;
-            letter-spacing: .4px;
+            font-size: 12px !important;
+            letter-spacing: .45px;
             text-transform: uppercase;
             font-weight: 900;
-            color: {MUTED};
+            color: {MUTED} !important;
             margin-bottom: 6px;
         }}
         .card-value {{
-            font-size: 30px;
+            font-size: 32px !important;
             font-weight: 900;
-            color: {TEXT};
+            color: {TEXT} !important;
             line-height: 1.05;
         }}
         .card-sub {{
-            font-size: 12px;
-            color: {MUTED};
+            font-size: 13px !important;
+            color: {MUTED} !important;
             margin-top: 6px;
         }}
 
-        /* Tabs */
+        /* Tabs: readable */
         button[data-baseweb="tab"] {{
-            font-weight: 850 !important;
+            font-weight: 900 !important;
             color: {TEXT} !important;
+            font-size: 15px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom: 3px solid {BLUES[0]} !important;
+            border-bottom: 4px solid {BLUES[0]} !important;
         }}
 
         /* Dataframes */
         .stDataFrame {{
             border-radius: 14px;
             overflow: hidden;
+            border: 1px solid {BORDER};
+            background: {CARD_BG};
         }}
         </style>
         """,
@@ -347,22 +377,20 @@ def first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def safe_plot(fig, key: str):
-    # Non-white chart backgrounds
     fig.update_layout(
-        template="plotly_white",
         paper_bgcolor=CHART_PAPER,
         plot_bgcolor=CHART_PLOT,
-        font=dict(color=TEXT),
-        title_font=dict(size=18, family="Arial", color=TEXT),
-        legend_font=dict(color=TEXT),
-        margin=dict(l=10, r=10, t=60, b=10),
+        font=dict(color=TEXT, size=16),
+        title_font=dict(size=20, color=TEXT, family="Arial Black"),
+        legend_font=dict(color=TEXT, size=14),
+        margin=dict(l=10, r=10, t=70, b=15),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", zeroline=False)
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)", zeroline=False, tickfont=dict(color=TEXT, size=14))
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)", zeroline=False, tickfont=dict(color=TEXT, size=14))
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 # ==============================
-# METRICS + TABLE HELPERS
+# TABLE + METRICS
 # ==============================
 def top_value(series: pd.Series) -> tuple[str, int]:
     s = _clean_series(series)
@@ -378,7 +406,8 @@ def score_dist(df: pd.DataFrame, col: str) -> pd.DataFrame:
     counts = s.value_counts().reindex([0, 1, 2, 3], fill_value=0)
     total = counts.sum()
     pct = (counts / total * 100).round(1) if total else counts.astype(float)
-    return pd.DataFrame({"Score": [0, 1, 2, 3], "Percent": pct.values, "Count": counts.values})
+    out = pd.DataFrame({"Score": [0, 1, 2, 3], "Count": counts.values, "Percent": pct.values})
+    return out
 
 def rubric_freq(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if not has(df, col):
@@ -407,13 +436,6 @@ def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.D
         return pd.DataFrame()
     return pd.DataFrame(rows).set_index("Question")
 
-def maybe_table(df: pd.DataFrame, title: str):
-    if df is None or df.empty:
-        st.info("No data to show.")
-        return
-    st.markdown(f"**{title}**")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
 # ==============================
 # RENDER ONE PAGE
 # ==============================
@@ -423,7 +445,6 @@ def render_page(page_name: str):
 
     with st.spinner(f"Loading: {ws_name} ..."):
         df = load_sheet_df(ws_name)
-
     df = drop_date_duration_cols(df)
 
     cA, cB, cC = st.columns([1.2, 1.2, 1.6])
@@ -447,59 +468,48 @@ def render_page(page_name: str):
             avg_col = f"{section}_Avg (0–3)"
             rnk_col = f"{section}_RANK"
 
-            m1, m2, m3, m4 = st.columns(4)
-            if has(df, avg_col):
-                avg_vals = pd.to_numeric(df[avg_col], errors="coerce")
-                m1.metric("Mean Avg", f"{avg_vals.mean():.2f}" if avg_vals.notna().any() else "-")
-                m2.metric("Median Avg", f"{avg_vals.median():.2f}" if avg_vals.notna().any() else "-")
-            else:
-                m1.metric("Mean Avg", "-")
-                m2.metric("Median Avg", "-")
+            # ---- ONLY SECTION DISTRIBUTIONS AS TABLES (per your instruction)
+            t1, t2 = st.columns(2)
 
-            if has(df, rnk_col):
-                top_rank, top_count = top_value(df[rnk_col])
-                m3.metric("Top Rank", top_rank)
-                m4.metric("Top Rank Count", f"{top_count:,}")
-            else:
-                m3.metric("Top Rank", "-")
-                m4.metric("Top Rank Count", "-")
+            with t1:
+                st.markdown("#### Section Average Distribution (Table)")
+                if has(df, avg_col):
+                    s = pd.to_numeric(df[avg_col], errors="coerce").dropna()
+                    if len(s):
+                        avg_tbl = (
+                            s.round(2)
+                             .value_counts()
+                             .sort_index()
+                             .reset_index()
+                        )
+                        avg_tbl.columns = ["Avg (0–3)", "Count"]
+                        st.dataframe(avg_tbl, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No average values.")
+                else:
+                    st.info("Average column missing.")
 
-            st.divider()
-
-            # Use BOTH chart + table for ranks
-            if has(df, rnk_col):
-                r = _clean_series(df[rnk_col])
-                if len(r):
-                    r_df = r.value_counts().reset_index()
-                    r_df.columns = ["Rank", "Count"]
-                    fig = px.bar(
-                        r_df, x="Rank", y="Count",
-                        title="Section Rank Distribution",
-                        color="Rank",
-                        color_discrete_sequence=BLUES
-                    )
-                    fig.update_layout(xaxis_title="", yaxis_title="Count")
-                    safe_plot(fig, key=f"{page_name}-{section}-rankbar")
-                    maybe_table(r_df, "Rank Table")
-
-            # Avg distribution
-            if has(df, avg_col):
-                fig = px.histogram(
-                    df, x=avg_col, nbins=10,
-                    title="Section Average Distribution",
-                    color_discrete_sequence=[BLUES[0]]
-                )
-                fig.update_layout(xaxis_title="Average (0–3)", yaxis_title="Count")
-                safe_plot(fig, key=f"{page_name}-{section}-avgdist")
+            with t2:
+                st.markdown("#### Section Rank Distribution (Table)")
+                if has(df, rnk_col):
+                    r = _clean_series(df[rnk_col])
+                    if len(r):
+                        r_tbl = r.value_counts().reset_index()
+                        r_tbl.columns = ["Rank", "Count"]
+                        st.dataframe(r_tbl, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No rank values.")
+                else:
+                    st.info("Rank column missing.")
 
             st.divider()
 
+            # ---- Qn blocks (Charts + Tables)
             q_titles = cfg.get("question_titles", {}).get(section, [])
 
             for qn in range(1, 5):
                 score_col  = f"{section}_Qn{qn}"
                 rubric_col = f"{section}_Rubric_Qn{qn}"
-
                 if (not has(df, score_col)) and (not has(df, rubric_col)):
                     continue
 
@@ -511,7 +521,7 @@ def render_page(page_name: str):
                 with left:
                     if has(df, score_col):
                         d = score_dist(df, score_col)
-                        # chart
+
                         fig = px.bar(
                             d, x="Score", y="Percent", text="Percent",
                             title="Score Distribution (%)",
@@ -521,8 +531,11 @@ def render_page(page_name: str):
                         fig.update_traces(texttemplate="%{text}%", textposition="outside")
                         fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
                         safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
-                        # table (always useful for clients)
-                        maybe_table(d[["Score", "Count", "Percent"]], "Score Table")
+
+                        st.markdown("**Score Table**")
+                        st.dataframe(d[["Score", "Count", "Percent"]], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Score column missing.")
 
                 with right:
                     if has(df, rubric_col):
@@ -532,15 +545,20 @@ def render_page(page_name: str):
                                 rf.head(12),
                                 x="Count", y="Rubric", orientation="h",
                                 title="Rubric Frequency (Top 12)",
-                                color_discrete_sequence=[BLUES[2]]
+                                color_discrete_sequence=[BLUES[1]]
                             )
                             safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
+
                             with st.expander("Full rubric table"):
                                 st.dataframe(rf, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Rubric has no values.")
+                    else:
+                        st.info("Rubric column missing.")
 
                 st.divider()
 
-            # Heatmap
+            # Heatmap (chart ok)
             st.markdown("### Heatmap (Score % by Question)")
             try:
                 h = section_heatmap(df, section, q_titles)
@@ -551,8 +569,10 @@ def render_page(page_name: str):
                         color_continuous_scale=HEAT_SCALE
                     )
                     safe_plot(fig, key=f"{page_name}-{section}-heatmap")
+                else:
+                    st.info("Heatmap skipped (missing Qn columns or values).")
             except Exception:
-                st.info("Heatmap skipped (missing columns or values).")
+                st.info("Heatmap skipped.")
 
     # --------------------------
     # OVERALL TAB
@@ -562,12 +582,11 @@ def render_page(page_name: str):
 
         overall_total = cfg["overall_total_col"]
         overall_rank  = cfg["overall_rank_col"]
-
-        ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected", "AI_Suspected "])
+        ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected"])
         ai_maxscore_col = first_existing(df, [cfg.get("ai_maxscore_col"), "AI_MaxScore"])
 
+        # Cards
         c1, c2, c3, c4 = st.columns(4)
-
         if has(df, overall_total):
             tot = pd.to_numeric(df[overall_total], errors="coerce")
             c1.metric("Mean Total", f"{tot.mean():.1f}" if tot.notna().any() else "-")
@@ -586,7 +605,7 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # Overall total distribution + table
+        # Overall Total chart + table
         if has(df, overall_total):
             fig = px.histogram(
                 df, x=overall_total,
@@ -596,17 +615,19 @@ def render_page(page_name: str):
             fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-totaldist")
 
-            t = pd.to_numeric(df[overall_total], errors="coerce")
-            summary = pd.DataFrame([{
-                "Min": float(t.min()) if t.notna().any() else np.nan,
-                "Max": float(t.max()) if t.notna().any() else np.nan,
-                "Mean": float(t.mean()) if t.notna().any() else np.nan,
-                "Median": float(t.median()) if t.notna().any() else np.nan,
-                "N": int(t.notna().sum()),
-            }])
-            maybe_table(summary, "Overall Total Summary")
+            t = pd.to_numeric(df[overall_total], errors="coerce").dropna()
+            if len(t):
+                summary = pd.DataFrame([{
+                    "Min": float(t.min()),
+                    "Max": float(t.max()),
+                    "Mean": float(t.mean()),
+                    "Median": float(t.median()),
+                    "N": int(len(t)),
+                }])
+                st.markdown("**Overall Total Summary**")
+                st.dataframe(summary, use_container_width=True, hide_index=True)
 
-        # Overall rank distribution + table
+        # Overall Rank: bar + table
         if has(df, overall_rank):
             r = _clean_series(df[overall_rank])
             if len(r):
@@ -619,11 +640,13 @@ def render_page(page_name: str):
                 )
                 fig.update_layout(xaxis_title="", yaxis_title="Count")
                 safe_plot(fig, key=f"{page_name}-overall-rankbar")
-                maybe_table(r_df, "Overall Rank Table")
+
+                st.markdown("**Overall Rank Table**")
+                st.dataframe(r_df, use_container_width=True, hide_index=True)
 
         st.divider()
 
-        # AI: donut only if 2 categories, else bar + table
+        # AI: donut only if exactly 2 categories; else bar + table
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
@@ -640,7 +663,8 @@ def render_page(page_name: str):
                         )
                         safe_plot(fig, key=f"{page_name}-overall-ai-donut")
                     with right:
-                        maybe_table(ai_df, "AI Flag Table")
+                        st.markdown("**AI Flag Table**")
+                        st.dataframe(ai_df, use_container_width=True, hide_index=True)
                 else:
                     fig = px.bar(
                         ai_df, x="AI_Flag", y="Count",
@@ -649,14 +673,16 @@ def render_page(page_name: str):
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
                     safe_plot(fig, key=f"{page_name}-overall-ai-bar")
-                    maybe_table(ai_df, "AI Flag Table")
 
-        # AI_MaxScore
+                    st.markdown("**AI Flag Table**")
+                    st.dataframe(ai_df, use_container_width=True, hide_index=True)
+
+        # AI_MaxScore distribution
         if ai_maxscore_col and has(df, ai_maxscore_col):
             fig = px.histogram(
                 df, x=ai_maxscore_col,
                 title="AI_MaxScore Distribution",
-                color_discrete_sequence=[BLUES[2]]
+                color_discrete_sequence=[BLUES[1]]
             )
             fig.update_layout(xaxis_title="AI_MaxScore", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
