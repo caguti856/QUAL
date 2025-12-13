@@ -1,6 +1,6 @@
 # dashboard.py
 # ------------------------------------------------------------
-# ONE Streamlit "PowerBI-style" dashboard with 5 PAGE-TABS:
+# Streamlit "PowerBI-style" dashboard with 5 PAGE-TABS:
 # 1) Thought Leadership
 # 2) Growth Mindset
 # 3) Networking & Advocacy
@@ -12,11 +12,12 @@
 #
 # Rules respected:
 # - Pull from Google Sheets using gcp_service_account + GSHEETS_SPREADSHEET_KEY
-# - DO NOT show questions (only short titles you define)
+# - DO NOT show original questions (only titles you define)
 # - NO Date / Duration fields
-# - Uses AI_Suspected (and shows AI analysis in Overall tab)
-# - Heatmaps + donut/pie + bar/column + histogram
-# - If data/columns missing: skip silently (no crashing)
+# - AI_Suspected / AI-Suspected supported + AI_MaxScore supported
+# - Heatmaps + donut (2-cat only) + bar/column + (separate) distributions
+# - Missing data/columns: skip safely (no app crash)
+# - Unique keys for all Streamlit chart elements (prevents DuplicateElementId)
 # ------------------------------------------------------------
 
 import pandas as pd
@@ -27,11 +28,94 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==============================
+# THEME / COLORS
+# ==============================
+BRAND_ORANGE = "#EB7100"
+BRAND_PURPLE = "#241E4E"
+BRAND_CREAM  = "#FFF8EE"
+BRAND_SOFT   = "#F9F6F4"
+
+DISCRETE_SEQ = [BRAND_ORANGE, BRAND_PURPLE, "#9A8CFF", "#6A5ACD", "#C9B8FF"]
+HEAT_SCALE   = [
+    [0.00, BRAND_SOFT],
+    [0.30, BRAND_CREAM],
+    [0.60, BRAND_ORANGE],
+    [1.00, BRAND_PURPLE],
+]
+
+def inject_css():
+    st.markdown(
+        f"""
+        <style>
+        /* App background */
+        .stApp {{
+            background: linear-gradient(180deg, {BRAND_SOFT} 0%, {BRAND_CREAM} 100%);
+        }}
+
+        /* Headings */
+        h1, h2, h3, h4 {{
+            color: {BRAND_PURPLE} !important;
+        }}
+
+        /* Cards */
+        .card {{
+            background: white;
+            border: 1px solid rgba(36, 30, 78, 0.12);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: 0 10px 25px rgba(36,30,78,0.08);
+        }}
+        .card-title {{
+            font-size: 13px;
+            letter-spacing: .3px;
+            text-transform: uppercase;
+            color: rgba(36,30,78,.70);
+            margin-bottom: 6px;
+        }}
+        .card-value {{
+            font-size: 28px;
+            font-weight: 800;
+            color: {BRAND_PURPLE};
+            line-height: 1.1;
+        }}
+        .card-sub {{
+            font-size: 12px;
+            color: rgba(36,30,78,.60);
+            margin-top: 6px;
+        }}
+
+        /* Tabs */
+        button[data-baseweb="tab"] {{
+            font-weight: 600 !important;
+        }}
+
+        /* Dataframes */
+        .stDataFrame {{
+            border-radius: 14px;
+            overflow: hidden;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def card(title: str, value: str, sub: str = ""):
+    st.markdown(
+        f"""
+        <div class="card">
+          <div class="card-title">{title}</div>
+          <div class="card-value">{value}</div>
+          <div class="card-sub">{sub}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ==============================
 # CONFIG
 # ==============================
 st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 
-# Your worksheet names (exact)
 WS_THOUGHT   = "Thought Leadership"
 WS_GROWTH    = "Growth Mindset"
 WS_NETWORK   = "Networking"
@@ -45,7 +129,7 @@ SCOPES = [
 SPREADSHEET_KEY = st.secrets["GSHEETS_SPREADSHEET_KEY"]
 
 # ==============================
-# SECTION DEFINITIONS (edit titles anytime)
+# SECTION DEFINITIONS
 # ==============================
 PAGES = {
     "Thought Leadership": {
@@ -62,7 +146,7 @@ PAGES = {
         "overall_total_col": "Overall Total (0–21)",
         "overall_rank_col": "Overall Rank",
         "ai_col": "AI_Suspected",
-        "ai_maxscore_col": "AI_MaxScore",  # optional if present
+        "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {
             "Locally Anchored Visioning": [
                 "Vision with Roots",
@@ -111,16 +195,11 @@ PAGES = {
 
     "Growth Mindset": {
         "worksheet": WS_GROWTH,
-        "sections": [
-            "Learning Agility",
-            "Digital Savvy",
-            "Innovation",
-            "Contextual Intelligence",
-        ],
+        "sections": ["Learning Agility", "Digital Savvy", "Innovation", "Contextual Intelligence"],
         "overall_total_col": "Overall Total (0–12)",
         "overall_rank_col": "Overall Rank",
         "ai_col": "AI_Suspected",
-        "ai_maxscore_col": "AI_MaxScore",  # optional
+        "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {
             "Learning Agility": [
                 "Correct & Improve Quickly",
@@ -163,9 +242,9 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",          # sometimes sheet has AI-Suspected
-        "ai_maxscore_col": "AI_MaxScore",  # often present here
-        "question_titles": {},  # optional
+        "ai_col": "AI_Suspected",
+        "ai_maxscore_col": "AI_MaxScore",
+        "question_titles": {},
     },
 
     "Advisory Skills": {
@@ -183,8 +262,8 @@ PAGES = {
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
         "ai_col": "AI_Suspected",
-        "ai_maxscore_col": "AI_MaxScore",  # optional
-        "question_titles": {},  # optional
+        "ai_maxscore_col": "AI_MaxScore",
+        "question_titles": {},
     },
 
     "Influencing Relationships": {
@@ -201,9 +280,9 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",          # sometimes sheet has AI-Suspected
-        "ai_maxscore_col": "AI_MaxScore",  # often present here
-        "question_titles": {},  # optional
+        "ai_col": "AI_Suspected",
+        "ai_maxscore_col": "AI_MaxScore",
+        "question_titles": {},
     },
 }
 
@@ -232,10 +311,9 @@ def load_sheet_df(sheet_name: str) -> pd.DataFrame:
     return df
 
 # ==============================
-# CLEANING / SAFETY
+# UTIL / CLEANING
 # ==============================
 def drop_date_duration_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop any column that smells like duration/date/time; keep everything else."""
     if df.empty:
         return df
     bad = []
@@ -257,9 +335,20 @@ def first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
             return c
     return None
 
+def safe_plot(fig, key: str):
+    """Always pass a unique key to avoid StreamlitDuplicateElementId."""
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
 # ==============================
-# VIS HELPERS
+# METRICS + TABLE HELPERS
 # ==============================
+def top_value(series: pd.Series) -> tuple[str, int]:
+    s = _clean_series(series)
+    if not len(s):
+        return ("-", 0)
+    vc = s.value_counts()
+    return (str(vc.index[0]), int(vc.iloc[0]))
+
 def score_dist(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if not has(df, col):
         return pd.DataFrame({"Score": [0, 1, 2, 3], "Percent": [0, 0, 0, 0], "Count": [0, 0, 0, 0]})
@@ -297,7 +386,7 @@ def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.D
     return pd.DataFrame(rows).set_index("Question")
 
 # ==============================
-# RENDER ONE PAGE (worksheet)
+# RENDER ONE PAGE
 # ==============================
 def render_page(page_name: str):
     cfg = PAGES[page_name]
@@ -306,16 +395,25 @@ def render_page(page_name: str):
     with st.spinner(f"Loading: {ws_name} ..."):
         df = load_sheet_df(ws_name)
 
-    # Drop Date/Duration columns (rule)
     df = drop_date_duration_cols(df)
 
-    st.caption(f"Worksheet: {ws_name} • Rows: {len(df):,} • Columns: {len(df.columns):,}")
+    # Header cards
+    cA, cB, cC = st.columns([1.2, 1.2, 1.6])
+    with cA:
+        card("Worksheet", ws_name, "Source: Google Sheets")
+    with cB:
+        card("Rows", f"{len(df):,}", "Total responses")
+    with cC:
+        card("Columns", f"{len(df.columns):,}", "Fields available (dates/duration removed)")
 
-    # Build tabs: one per section + Overall
+    st.write("")  # spacing
+
     section_tabs = cfg["sections"] + ["Overall"]
     tabs = st.tabs(section_tabs)
 
-    # Per-section tabs
+    # ======================
+    # SECTION TABS
+    # ======================
     for i, section in enumerate(cfg["sections"]):
         with tabs[i]:
             st.subheader(section)
@@ -323,62 +421,99 @@ def render_page(page_name: str):
             avg_col = f"{section}_Avg (0–3)"
             rnk_col = f"{section}_RANK"
 
-            c1, c2 = st.columns(2)
-            with c1:
-                if has(df, avg_col):
-                    fig = px.histogram(df, x=avg_col, nbins=10, title="Section Average Distribution")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Section average not available (skipped).")
+            # Section summary cards
+            m1, m2, m3, m4 = st.columns(4)
+            if has(df, avg_col):
+                avg_vals = pd.to_numeric(df[avg_col], errors="coerce")
+                m1.metric("Mean Avg", f"{avg_vals.mean():.2f}" if avg_vals.notna().any() else "-")
+                m2.metric("Median Avg", f"{avg_vals.median():.2f}" if avg_vals.notna().any() else "-")
+            else:
+                m1.metric("Mean Avg", "-")
+                m2.metric("Median Avg", "-")
 
-            with c2:
-                if has(df, rnk_col):
-                    r = _clean_series(df[rnk_col])
-                    if len(r):
-                        r_df = r.value_counts().reset_index()
-                        r_df.columns = ["Rank", "Count"]
-                        fig = px.pie(r_df, names="Rank", values="Count", hole=0.55, title="Section Rank (Donut)")
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("Section rank has no values (skipped).")
-                else:
-                    st.info("Section rank not available (skipped).")
+            if has(df, rnk_col):
+                top_rank, top_count = top_value(df[rnk_col])
+                m3.metric("Top Rank", top_rank)
+                m4.metric("Top Rank Count", f"{top_count:,}")
+            else:
+                m3.metric("Top Rank", "-")
+                m4.metric("Top Rank Count", "-")
 
             st.divider()
 
-            # NOTE: We DO NOT show the original questions (rule).
-            # We only show your short titles.
+            # Rank distribution: BAR (not pie) because multi-category
+            if has(df, rnk_col):
+                r = _clean_series(df[rnk_col])
+                if len(r):
+                    r_df = r.value_counts().reset_index()
+                    r_df.columns = ["Rank", "Count"]
+                    fig = px.bar(
+                        r_df, x="Rank", y="Count", title="Section Rank Distribution",
+                        color="Rank", color_discrete_sequence=DISCRETE_SEQ
+                    )
+                    fig.update_layout(xaxis_title="", yaxis_title="Count")
+                    safe_plot(fig, key=f"{page_name}-{section}-rankbar")
+                else:
+                    st.info("Section rank has no values (skipped).")
+            else:
+                st.info("Section rank not available (skipped).")
+
+            # Avg distribution: separate chart (no combining)
+            if has(df, avg_col):
+                fig = px.histogram(
+                    df, x=avg_col, nbins=10, title="Section Average Distribution",
+                    color_discrete_sequence=[BRAND_ORANGE]
+                )
+                fig.update_layout(xaxis_title="Average (0–3)", yaxis_title="Count")
+                safe_plot(fig, key=f"{page_name}-{section}-avgdist")
+
+            st.divider()
+
             q_titles = cfg.get("question_titles", {}).get(section, [])
 
+            # Qn blocks (title-only, no questions)
             for qn in range(1, 5):
                 score_col  = f"{section}_Qn{qn}"
                 rubric_col = f"{section}_Rubric_Qn{qn}"
 
-                # If both missing -> skip quietly
                 if (not has(df, score_col)) and (not has(df, rubric_col)):
                     continue
 
                 title = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
                 st.markdown(f"### {title}")
 
-                a, b = st.columns(2)
+                left, right = st.columns(2)
 
-                with a:
+                # Score distribution (Column chart)
+                with left:
                     if has(df, score_col):
                         d = score_dist(df, score_col)
-                        fig = px.bar(d, x="Score", y="Percent", text="Percent", title="Score Distribution (%)")
+                        fig = px.bar(
+                            d, x="Score", y="Percent", text="Percent",
+                            title="Score Distribution (%)",
+                            color="Score",
+                            color_discrete_sequence=DISCRETE_SEQ
+                        )
                         fig.update_traces(texttemplate="%{text}%", textposition="outside")
                         fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
-                        st.plotly_chart(fig, use_container_width=True)
+                        safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
                     else:
                         st.info("Score column missing (skipped).")
 
-                with b:
+                # Rubric frequency (Bar + table)
+                with right:
                     if has(df, rubric_col):
                         rf = rubric_freq(df, rubric_col)
                         if len(rf):
-                            fig = px.bar(rf, x="Count", y="Rubric", orientation="h", title="Rubric Frequency")
-                            st.plotly_chart(fig, use_container_width=True)
+                            fig = px.bar(
+                                rf.head(12), x="Count", y="Rubric", orientation="h",
+                                title="Rubric Frequency (Top 12)",
+                                color_discrete_sequence=[BRAND_PURPLE]
+                            )
+                            safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
+
+                            with st.expander("See full rubric table"):
+                                st.dataframe(rf, use_container_width=True)
                         else:
                             st.info("Rubric has no values (skipped).")
                     else:
@@ -386,82 +521,132 @@ def render_page(page_name: str):
 
                 st.divider()
 
+            # Heatmap
             st.markdown("### Heatmap (Score % by Question)")
             try:
                 h = section_heatmap(df, section, q_titles)
                 if not h.empty:
-                    fig = px.imshow(h, labels=dict(x="Score", y="Question", color="%"), title=f"{section} Heatmap")
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig = px.imshow(
+                        h, labels=dict(x="Score", y="Question", color="%"),
+                        title=f"{section} Heatmap",
+                        color_continuous_scale=HEAT_SCALE
+                    )
+                    safe_plot(fig, key=f"{page_name}-{section}-heatmap")
                 else:
                     st.info("Heatmap skipped (missing Qn columns or no values).")
             except Exception:
-                # rule: no scary errors; just skip
                 st.info("Heatmap skipped.")
 
-    # Overall tab
+    # ======================
+    # OVERALL TAB
+    # ======================
     with tabs[-1]:
         st.subheader("Overall")
 
         overall_total = cfg["overall_total_col"]
         overall_rank  = cfg["overall_rank_col"]
 
-        # AI columns can vary across your sheets:
         ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected"])
         ai_maxscore_col = first_existing(df, [cfg.get("ai_maxscore_col"), "AI_MaxScore"])
 
-        c1, c2 = st.columns(2)
+        # Overall summary cards
+        c1, c2, c3, c4 = st.columns(4)
 
-        with c1:
-            if has(df, overall_total):
-                fig = px.histogram(df, x=overall_total, title="Overall Total Distribution")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Overall Total not available (skipped).")
+        if has(df, overall_total):
+            tot = pd.to_numeric(df[overall_total], errors="coerce")
+            c1.metric("Mean Total", f"{tot.mean():.1f}" if tot.notna().any() else "-")
+            c2.metric("Median Total", f"{tot.median():.1f}" if tot.notna().any() else "-")
+        else:
+            c1.metric("Mean Total", "-")
+            c2.metric("Median Total", "-")
 
-        with c2:
-            if has(df, overall_rank):
-                r = _clean_series(df[overall_rank])
-                if len(r):
-                    r_df = r.value_counts().reset_index()
-                    r_df.columns = ["Rank", "Count"]
-                    fig = px.pie(r_df, names="Rank", values="Count", hole=0.55, title="Overall Rank (Donut)")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Overall Rank has no values (skipped).")
-            else:
-                st.info("Overall Rank not available (skipped).")
+        if has(df, overall_rank):
+            top_r, top_n = top_value(df[overall_rank])
+            c3.metric("Top Overall Rank", top_r)
+            c4.metric("Top Rank Count", f"{top_n:,}")
+        else:
+            c3.metric("Top Overall Rank", "-")
+            c4.metric("Top Rank Count", "-")
 
         st.divider()
 
-        # AI analysis (Donut + Bar)
+        # Overall total distribution (separate chart)
+        if has(df, overall_total):
+            fig = px.histogram(
+                df, x=overall_total, title="Overall Total Distribution",
+                color_discrete_sequence=[BRAND_ORANGE]
+            )
+            fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
+            safe_plot(fig, key=f"{page_name}-overall-totaldist")
+        else:
+            st.info("Overall Total not available (skipped).")
+
+        # Overall rank distribution: BAR (multi-category)
+        if has(df, overall_rank):
+            r = _clean_series(df[overall_rank])
+            if len(r):
+                r_df = r.value_counts().reset_index()
+                r_df.columns = ["Rank", "Count"]
+                fig = px.bar(
+                    r_df, x="Rank", y="Count", title="Overall Rank Distribution",
+                    color="Rank", color_discrete_sequence=DISCRETE_SEQ
+                )
+                fig.update_layout(xaxis_title="", yaxis_title="Count")
+                safe_plot(fig, key=f"{page_name}-overall-rankbar")
+
+                with st.expander("See Overall Rank table"):
+                    st.dataframe(r_df, use_container_width=True)
+            else:
+                st.info("Overall Rank has no values (skipped).")
+        else:
+            st.info("Overall Rank not available (skipped).")
+
+        st.divider()
+
+        # AI flag: PIE/DONUT only if it is TWO categories
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
                 ai_df = ai.value_counts().reset_index()
-                ai_df.columns = ["AI", "Count"]
+                ai_df.columns = ["AI_Flag", "Count"]
 
-                c3, c4 = st.columns(2)
-                with c3:
-                    fig = px.pie(ai_df, names="AI", values="Count", hole=0.55, title="AI Flag (Donut)")
-                    st.plotly_chart(fig, use_container_width=True)
-                with c4:
-                    fig = px.bar(ai_df, x="AI", y="Count", title="AI Flag (Counts)")
-                    st.plotly_chart(fig, use_container_width=True)
+                if len(ai_df) == 2:
+                    left, right = st.columns(2)
+                    with left:
+                        fig = px.pie(
+                            ai_df, names="AI_Flag", values="Count", hole=0.55,
+                            title="AI Flag (Donut)",
+                            color_discrete_sequence=[BRAND_ORANGE, BRAND_PURPLE]
+                        )
+                        safe_plot(fig, key=f"{page_name}-overall-ai-donut")
+                    with right:
+                        st.dataframe(ai_df, use_container_width=True)
+                else:
+                    # If more than 2 categories, use bar (not pie)
+                    fig = px.bar(
+                        ai_df, x="AI_Flag", y="Count", title="AI Flag Distribution",
+                        color="AI_Flag", color_discrete_sequence=DISCRETE_SEQ
+                    )
+                    safe_plot(fig, key=f"{page_name}-overall-ai-bar")
             else:
-                st.info("AI column exists but no values (skipped).")
+                st.info("AI flag exists but no values (skipped).")
         else:
             st.info("AI flag column not available (skipped).")
 
-        # AI_MaxScore (if present) — histogram
+        # AI_MaxScore: separate chart (not combined)
         if ai_maxscore_col and has(df, ai_maxscore_col):
-            st.divider()
-            fig = px.histogram(df, x=ai_maxscore_col, title="AI_MaxScore Distribution")
-            st.plotly_chart(fig, use_container_width=True)
+            fig = px.histogram(
+                df, x=ai_maxscore_col, title="AI_MaxScore Distribution",
+                color_discrete_sequence=[BRAND_PURPLE]
+            )
+            fig.update_layout(xaxis_title="AI_MaxScore", yaxis_title="Count")
+            safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
 
 # ==============================
 # MAIN
 # ==============================
 def main():
+    inject_css()
     st.title("PowerBI-style Scoring Dashboard")
 
     page = st.sidebar.radio(
