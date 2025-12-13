@@ -1,12 +1,12 @@
 
-st.set_page_config(page_title="Scoring Dashboard", layout="wide")
+
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
-
+st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 # ==============================
 # THEME / COLORS
 # ==============================
