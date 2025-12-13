@@ -1,12 +1,16 @@
 # dashboard.py
 # ------------------------------------------------------------
-# Grey background, charts in shades of blue, words in black
+# Grey app background
+# Blue charts
+# Chart "card" backgrounds are NOT white (soft grey/blue)
+# Uses tables in key places (rank tables + score tables + rubric tables)
 # ------------------------------------------------------------
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -15,17 +19,22 @@ st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 # ==============================
 # THEME / COLORS (Grey + Blues + Black text)
 # ==============================
-BG_GREY_1 = "#F2F4F7"
-BG_GREY_2 = "#E6E9EF"
-CARD_BG   = "#EEF1F6"
-BORDER    = "rgba(0,0,0,0.10)"
-TEXT      = "#0B0F19"      # near-black
-MUTED     = "rgba(11,15,25,0.65)"
+APP_BG_TOP   = "#F2F4F7"
+APP_BG_BOT   = "#E7EAF0"
 
-# Blue palette (used for all charts)
+# chart container + plot backgrounds (not white)
+CHART_PAPER  = "#EEF2F7"   # outside plot area
+CHART_PLOT   = "#E8EEF8"   # inside plot area
+
+CARD_BG      = "#EEF1F6"
+BORDER       = "rgba(0,0,0,0.10)"
+TEXT         = "#0B0F19"
+MUTED        = "rgba(11,15,25,0.65)"
+
+# Blue palette
 BLUES = ["#0B5FFF", "#1D7AFC", "#3B8EF5", "#5AA2F2", "#7BB6F3", "#A6CEFF", "#0A2E6B"]
 HEAT_SCALE = [
-    [0.00, "#FFFFFF"],
+    [0.00, "#F7FAFF"],
     [0.20, "#EAF2FF"],
     [0.45, "#BBD7FF"],
     [0.70, "#4E9BFF"],
@@ -37,27 +46,26 @@ def inject_css():
         f"""
         <style>
         .stApp {{
-            background: linear-gradient(180deg, {BG_GREY_1} 0%, {BG_GREY_2} 100%);
+            background: linear-gradient(180deg, {APP_BG_TOP} 0%, {APP_BG_BOT} 100%);
             color: {TEXT};
         }}
         .block-container {{
             padding-top: 1.2rem;
         }}
 
-        /* Titles / headings in black */
+        /* Headings */
         h1, h2, h3, h4, h5, h6 {{
             color: {TEXT} !important;
             font-weight: 900 !important;
         }}
-        p, li, span, label, div {{
-            color: {TEXT};
-        }}
 
+        /* Sidebar */
         section[data-testid="stSidebar"] {{
-            background: linear-gradient(180deg, #FFFFFF 0%, {BG_GREY_1} 100%);
+            background: linear-gradient(180deg, #FFFFFF 0%, {APP_BG_TOP} 100%);
             border-right: 1px solid {BORDER};
         }}
 
+        /* Cards */
         .card {{
             background: {CARD_BG};
             border: 1px solid {BORDER};
@@ -85,20 +93,19 @@ def inject_css():
             margin-top: 6px;
         }}
 
+        /* Tabs */
         button[data-baseweb="tab"] {{
-            font-weight: 800 !important;
+            font-weight: 850 !important;
             color: {TEXT} !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 3px solid {BLUES[0]} !important;
         }}
 
-        div[data-testid="stMetric"] {{
-            background: {CARD_BG};
-            border: 1px solid {BORDER};
-            padding: 12px 14px;
-            border-radius: 16px;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.05);
+        /* Dataframes */
+        .stDataFrame {{
+            border-radius: 14px;
+            overflow: hidden;
         }}
         </style>
         """,
@@ -133,7 +140,7 @@ SCOPES = [
 SPREADSHEET_KEY = st.secrets["GSHEETS_SPREADSHEET_KEY"]
 
 # ==============================
-# SECTION DEFINITIONS (titles only — no questions)
+# SECTION DEFINITIONS (titles only)
 # ==============================
 PAGES = {
     "Thought Leadership": {
@@ -340,15 +347,18 @@ def first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def safe_plot(fig, key: str):
+    # Non-white chart backgrounds
     fig.update_layout(
         template="plotly_white",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor=CHART_PAPER,
+        plot_bgcolor=CHART_PLOT,
         font=dict(color=TEXT),
-        title_font=dict(size=20, family="Arial", color=TEXT),
+        title_font=dict(size=18, family="Arial", color=TEXT),
         legend_font=dict(color=TEXT),
         margin=dict(l=10, r=10, t=60, b=10),
     )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", zeroline=False)
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 # ==============================
@@ -397,6 +407,13 @@ def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.D
         return pd.DataFrame()
     return pd.DataFrame(rows).set_index("Question")
 
+def maybe_table(df: pd.DataFrame, title: str):
+    if df is None or df.empty:
+        st.info("No data to show.")
+        return
+    st.markdown(f"**{title}**")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
 # ==============================
 # RENDER ONE PAGE
 # ==============================
@@ -418,10 +435,11 @@ def render_page(page_name: str):
         card("Columns", f"{len(df.columns):,}", "Dates/duration removed")
 
     st.write("")
+    tabs = st.tabs(cfg["sections"] + ["Overall"])
 
-    section_tabs = cfg["sections"] + ["Overall"]
-    tabs = st.tabs(section_tabs)
-
+    # --------------------------
+    # SECTION TABS
+    # --------------------------
     for i, section in enumerate(cfg["sections"]):
         with tabs[i]:
             st.subheader(section)
@@ -430,7 +448,6 @@ def render_page(page_name: str):
             rnk_col = f"{section}_RANK"
 
             m1, m2, m3, m4 = st.columns(4)
-
             if has(df, avg_col):
                 avg_vals = pd.to_numeric(df[avg_col], errors="coerce")
                 m1.metric("Mean Avg", f"{avg_vals.mean():.2f}" if avg_vals.notna().any() else "-")
@@ -449,6 +466,7 @@ def render_page(page_name: str):
 
             st.divider()
 
+            # Use BOTH chart + table for ranks
             if has(df, rnk_col):
                 r = _clean_series(df[rnk_col])
                 if len(r):
@@ -462,7 +480,9 @@ def render_page(page_name: str):
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
                     safe_plot(fig, key=f"{page_name}-{section}-rankbar")
+                    maybe_table(r_df, "Rank Table")
 
+            # Avg distribution
             if has(df, avg_col):
                 fig = px.histogram(
                     df, x=avg_col, nbins=10,
@@ -491,6 +511,7 @@ def render_page(page_name: str):
                 with left:
                     if has(df, score_col):
                         d = score_dist(df, score_col)
+                        # chart
                         fig = px.bar(
                             d, x="Score", y="Percent", text="Percent",
                             title="Score Distribution (%)",
@@ -500,6 +521,8 @@ def render_page(page_name: str):
                         fig.update_traces(texttemplate="%{text}%", textposition="outside")
                         fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
                         safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
+                        # table (always useful for clients)
+                        maybe_table(d[["Score", "Count", "Percent"]], "Score Table")
 
                 with right:
                     if has(df, rubric_col):
@@ -512,32 +535,35 @@ def render_page(page_name: str):
                                 color_discrete_sequence=[BLUES[2]]
                             )
                             safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
-                            with st.expander("See full rubric table"):
-                                st.dataframe(rf, use_container_width=True)
+                            with st.expander("Full rubric table"):
+                                st.dataframe(rf, use_container_width=True, hide_index=True)
 
                 st.divider()
 
+            # Heatmap
             st.markdown("### Heatmap (Score % by Question)")
             try:
                 h = section_heatmap(df, section, q_titles)
                 if not h.empty:
                     fig = px.imshow(
-                        h,
-                        labels=dict(x="Score", y="Question", color="%"),
+                        h, labels=dict(x="Score", y="Question", color="%"),
                         title=f"{section} Heatmap",
                         color_continuous_scale=HEAT_SCALE
                     )
                     safe_plot(fig, key=f"{page_name}-{section}-heatmap")
             except Exception:
-                pass
+                st.info("Heatmap skipped (missing columns or values).")
 
+    # --------------------------
+    # OVERALL TAB
+    # --------------------------
     with tabs[-1]:
         st.subheader("Overall")
 
         overall_total = cfg["overall_total_col"]
         overall_rank  = cfg["overall_rank_col"]
 
-        ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected"])
+        ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected", "AI_Suspected "])
         ai_maxscore_col = first_existing(df, [cfg.get("ai_maxscore_col"), "AI_MaxScore"])
 
         c1, c2, c3, c4 = st.columns(4)
@@ -560,6 +586,7 @@ def render_page(page_name: str):
 
         st.divider()
 
+        # Overall total distribution + table
         if has(df, overall_total):
             fig = px.histogram(
                 df, x=overall_total,
@@ -569,6 +596,17 @@ def render_page(page_name: str):
             fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-totaldist")
 
+            t = pd.to_numeric(df[overall_total], errors="coerce")
+            summary = pd.DataFrame([{
+                "Min": float(t.min()) if t.notna().any() else np.nan,
+                "Max": float(t.max()) if t.notna().any() else np.nan,
+                "Mean": float(t.mean()) if t.notna().any() else np.nan,
+                "Median": float(t.median()) if t.notna().any() else np.nan,
+                "N": int(t.notna().sum()),
+            }])
+            maybe_table(summary, "Overall Total Summary")
+
+        # Overall rank distribution + table
         if has(df, overall_rank):
             r = _clean_series(df[overall_rank])
             if len(r):
@@ -581,9 +619,11 @@ def render_page(page_name: str):
                 )
                 fig.update_layout(xaxis_title="", yaxis_title="Count")
                 safe_plot(fig, key=f"{page_name}-overall-rankbar")
+                maybe_table(r_df, "Overall Rank Table")
 
         st.divider()
 
+        # AI: donut only if 2 categories, else bar + table
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
@@ -600,7 +640,7 @@ def render_page(page_name: str):
                         )
                         safe_plot(fig, key=f"{page_name}-overall-ai-donut")
                     with right:
-                        st.dataframe(ai_df, use_container_width=True)
+                        maybe_table(ai_df, "AI Flag Table")
                 else:
                     fig = px.bar(
                         ai_df, x="AI_Flag", y="Count",
@@ -609,7 +649,9 @@ def render_page(page_name: str):
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
                     safe_plot(fig, key=f"{page_name}-overall-ai-bar")
+                    maybe_table(ai_df, "AI Flag Table")
 
+        # AI_MaxScore
         if ai_maxscore_col and has(df, ai_maxscore_col):
             fig = px.histogram(
                 df, x=ai_maxscore_col,
