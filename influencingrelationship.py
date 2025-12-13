@@ -1,32 +1,21 @@
-# influencingrelationship.py
-# ------------------------------------------------------------
-# Kobo → Exemplar-vote scoring (Option B++) + AI detection → Excel / Google Sheets
-# Exact layout preserved. Robust column resolution A1..H1.
-# Batched embeddings + caching. AI-suspect flag at the end.
-# Auto-run + auto-push options, stable widgets.
-# ------------------------------------------------------------
-
 from __future__ import annotations
-
 import json, re, unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from io import BytesIO
-
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-
 import gspread
 from google.oauth2.service_account import Credentials
 from rapidfuzz import fuzz, process
 from sentence_transformers import SentenceTransformer
 
 
-# =============================================================================
+
 # CSS
-# =============================================================================
+
 def inject_css():
     st.markdown("""
         <style>
@@ -229,17 +218,10 @@ PARENS_ACRONYMS_RX  = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+
 NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
 SLASH_PAIR_RX       = re.compile(r"\b\w+/\w+\b")
 
-AI_BUZZWORDS = {
-    "minimum viable", "feedback loop", "trade-off", "evidence-based",
-    "stakeholder alignment", "learners' agency", "learners’ agency",
-    "norm shifts", "quick win", "low-lift", "scalable",
-    "best practice", "pilot theatre", "timeboxed"
-}
 
 
-# =============================================================================
+
 # HELPERS
-# =============================================================================
 def clean(s):
     if s is None:
         return ""
@@ -282,10 +264,6 @@ def ai_signal_score(text: str, question_hint: str = "") -> float:
     if hits >= 3:
         score += 0.15
 
-    tl = t.lower()
-    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in tl)
-    if buzz_hits:
-        score += min(0.24, 0.08 * buzz_hits)
 
     if question_hint:
         overlap = qa_overlap(t, question_hint)
@@ -767,9 +745,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
     return res_df.reindex(columns=order_cols(list(res_df.columns)))
 
 
-# =============================================================================
+
 # EXPORTS / SHEETS
-# =============================================================================
+
 def _ensure_ai_last(df: pd.DataFrame, export_name: str = "AI-Suspected") -> pd.DataFrame:
     out = df.copy()
     if export_name not in out.columns:
@@ -873,19 +851,16 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"❌ {type(e).__name__}: {e}"
 
 
-# =============================================================================
+
 # MAIN
-# =============================================================================
+
 def main():
     inject_css()
 
     st.markdown("""
         <div class="app-header-card">
-            <div class="pill">Influencing Relationship • Option B++</div>
+            <div class="pill">Influencing Relationship Scoring and AI Detection</div>
             <h1>Influencing Relationship</h1>
-            <p class="app-header-subtitle">
-                Kobo → exemplar-vote scoring (per question_id) + AI detection → Excel / Google Sheets.
-            </p>
         </div>
     """, unsafe_allow_html=True)
 
