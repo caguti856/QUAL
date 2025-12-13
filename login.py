@@ -10,12 +10,11 @@ st.markdown("""
         padding: 0 !important;
         margin: 0 !important;
         height: 100vh !important;
-        overflow: hidden !important;
+        
     }
 
     /* Kill Streamlit header and toolbar spacing completely */
-    header, [data-testid="stHeader"], [data-testid="stToolbar"] {
-        display: none !important;
+    
     }
     /* Force full height for layout columns */
     [data-testid="column"] {
@@ -51,7 +50,7 @@ st.markdown("""
     max-width:100% !important;
     }
     [data-testid="stHeader"], [data-testid="stToolbar"], footer { display:none !important; }
-    [data-testid="stAppViewContainer"] { background:#0b0b2a; overflow:hidden; }
+    
     /* Form and input styling */
     h2{color:#0f2748 !important;font-weight:800 !important;text-align:center;margin-bottom:.4rem !important;}
     p{color:#475569 !important;text-align:center;margin-bottom:1.4rem !important;}
@@ -194,8 +193,7 @@ st.markdown("""
     /* Lock the main block to one viewport and prevent scroll */
     .block-container, [data-testid="stVerticalBlock"] {
     height: 100vh !important;
-    overflow: hidden !important;
-    padding: 0 !important;
+        padding: 0 !important;
     margin: 0 !important;
     }
     /* Reserve space for alerts so height doesn't change on rerun */
@@ -244,7 +242,6 @@ st.markdown("""
         top: 0; left: 0;
         width: 100vw !important;
         height: 100vh !important;
-        overflow: hidden !important;
         background: #0b0b2a !important;
     }
 
