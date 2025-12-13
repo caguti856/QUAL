@@ -5,6 +5,7 @@
 #  - Per-answer temperature selection (auto-picks best temp)
 #  - Scores ANSWER TEXT against exemplar TEXT per question_id (no centroids)
 #  - AI detection (rule-based PATTERNS ONLY) -> AI_Suspected column
+#  - Shading rows where AI_Suspected=True
 #  - No review flags, no best-match columns
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ def inject_css():
             --text-main: #111827;
             --text-muted: #6b7280;
             --border-subtle: #e5e7eb;
+
+            --ai-bg: rgba(250, 204, 21, 0.20);   /* soft amber */
+            --ai-border: rgba(250, 204, 21, 0.55);
         }
         [data-testid="stAppViewContainer"] {
             background: radial-gradient(circle at top left, #FFF7ED 0, #F9FAFB 40%, #F3F4F6 100%);
@@ -171,16 +175,15 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # Scoring defaults (automatic)
-TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))              # maximum top-K retrieved per question
-CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))    # keep within best_sim - CLOSE_DELTA
-CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))    # exemplar-to-exemplar coherence threshold
-MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))         # minimum items for thematic subset
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))
+CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))
 
-# per-answer temperature candidates
 TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
 
-# AI detection threshold
-AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
+# IMPORTANT: lowered default so it actually triggers; still overrideable via secrets
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.45))
 
 
 # =============================================================================
@@ -201,15 +204,15 @@ def clean(s) -> str:
 
 
 # =============================================================================
-# AI DETECTION (PATTERNS ONLY — no prompt overlap)
+# AI DETECTION (PATTERNS ONLY + shading support)
 # =============================================================================
 TRANSITION_OPEN_RX = re.compile(
-    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion|to summarize)\b",
     re.I,
 )
-LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally|overall|in summary)\b", re.I)
 BULLET_RX = re.compile(r"^[-*•]\s", re.M)
-LONG_DASH_HARD_RX = re.compile(r"[—–]")
+LONG_DASH_RX = re.compile(r"[—–]")
 SYMBOL_RX = re.compile(
     r"[—–\-_]{2,}"
     r"|[≥≤≧≦≈±×÷%]"
@@ -222,58 +225,107 @@ TIMEBOX_RX = re.compile(
     r"|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
     re.I,
 )
-AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b|as a language model\b)", re.I)
 DAY_RANGE_RX = re.compile(r"\bday\s*\d+\s*[-–]\s*\d+\b", re.I)
 PIPE_LIST_RX = re.compile(r"\s\|\s")
 PARENS_ACRONYMS_RX = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+).*?\)")
-NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
+NUMBERED_BULLETS_RX = re.compile(r"(?m)^\s*\d+\s*[\.\)]\s+")
 SLASH_PAIR_RX = re.compile(r"\b\w+/\w+\b")
+
+# “template-ish headings”
+HEADING_COLON_RX = re.compile(r"(?m)^(?:[A-Z][A-Za-z ]{2,25}|Key actions|Risks|Mitigation|Timeline|Success metrics)\s*:\s")
 
 AI_BUZZWORDS = {
     "minimum viable", "feedback loop", "trade-off", "evidence-based",
-    "stakeholder alignment", "learners' agency", "learners’ agency",
-    "norm shifts", "quick win", "low-lift", "scalable",
-    "best practice", "pilot theatre", "timeboxed"
+    "stakeholder alignment", "quick win", "low-lift", "scalable",
+    "best practice", "timeboxed", "north star", "operating model",
+    "value proposition", "go-to-market", "alignment", "synergies",
 }
+
+def _sentence_stats(t: str) -> Tuple[int, float]:
+    # returns (#sentences, avg sentence length in tokens)
+    sents = re.split(r"[.!?]+\s+", t.strip())
+    sents = [s for s in sents if len(s.strip()) >= 6]
+    if not sents:
+        return 0, 0.0
+    lens = [len(re.findall(r"\w+", s)) for s in sents]
+    return len(sents), float(np.mean(lens)) if lens else 0.0
 
 def ai_signal_score(text: str) -> float:
     """
-    Pattern-only heuristic. Intentionally ignores prompt hints / overlap
-    to avoid false positives on structured-but-human answers.
+    Pattern-only heuristic. Designed to produce a score in [0,1].
     """
     t = clean(text)
     if not t:
         return 0.0
-    if LONG_DASH_HARD_RX.search(t):
-        return 1.0
 
     score = 0.0
-    if SYMBOL_RX.search(t):               score += 0.35
-    if TIMEBOX_RX.search(t):              score += 0.15
-    if AI_RX.search(t):                   score += 0.35
-    if TRANSITION_OPEN_RX.search(t):      score += 0.12
-    if LIST_CUES_RX.search(t):            score += 0.12
-    if BULLET_RX.search(t):               score += 0.08
 
-    if DAY_RANGE_RX.search(t):            score += 0.15
-    if PIPE_LIST_RX.search(t):            score += 0.10
-    if PARENS_ACRONYMS_RX.search(t):      score += 0.10
-    if NUMBERED_BULLETS_RX.search(t):     score += 0.12
-    if SLASH_PAIR_RX.search(t):           score += 0.08
+    # direct self-identification
+    if AI_RX.search(t):
+        score += 0.85
 
-    hits = 0
-    for rx in (TIMEBOX_RX, DAY_RANGE_RX, PIPE_LIST_RX, NUMBERED_BULLETS_RX):
-        if rx.search(t):
-            hits += 1
-    if hits >= 2: score += 0.25
-    if hits >= 3: score += 0.15
+    # “over-structured” formatting cues
+    if BULLET_RX.search(t):          score += 0.12
+    if NUMBERED_BULLETS_RX.search(t):score += 0.18
+    if PIPE_LIST_RX.search(t):       score += 0.14
+    if HEADING_COLON_RX.search(t):   score += 0.18
 
+    # symbols / em-dashes / special glyphs
+    if SYMBOL_RX.search(t):          score += 0.25
+    if LONG_DASH_RX.search(t):       score += 0.10
+
+    # timeboxing patterns (often AI-ish, but not always)
+    if TIMEBOX_RX.search(t):         score += 0.16
+    if DAY_RANGE_RX.search(t):       score += 0.12
+
+    # transitions + list cues
+    if TRANSITION_OPEN_RX.search(t): score += 0.10
+    if LIST_CUES_RX.search(t):       score += 0.10
+    if SLASH_PAIR_RX.search(t):      score += 0.06
+    if PARENS_ACRONYMS_RX.search(t): score += 0.08
+
+    # buzzwords (small contributions)
     tl = t.lower()
     buzz_hits = sum(1 for b in AI_BUZZWORDS if b in tl)
     if buzz_hits:
-        score += min(0.24, 0.08 * buzz_hits)
+        score += min(0.22, 0.06 * buzz_hits)
 
-    return max(0.0, min(1.0, score))
+    # “template density” bonus: multiple structure cues co-occur
+    hits = 0
+    for rx in (NUMBERED_BULLETS_RX, HEADING_COLON_RX, PIPE_LIST_RX, TIMEBOX_RX):
+        if rx.search(t):
+            hits += 1
+    if hits >= 2: score += 0.18
+    if hits >= 3: score += 0.12
+
+    # short but highly formatted responses
+    tokens = re.findall(r"\w+", t)
+    n_tok = len(tokens)
+    if n_tok and n_tok < 40 and (NUMBERED_BULLETS_RX.search(t) or HEADING_COLON_RX.search(t) or PIPE_LIST_RX.search(t)):
+        score += 0.10
+
+    # long, very uniform multi-sentence responses (slight)
+    n_sent, avg_len = _sentence_stats(t)
+    if n_sent >= 4 and 10 <= avg_len <= 22 and TRANSITION_OPEN_RX.search(t):
+        score += 0.06
+
+    return float(max(0.0, min(1.0, score)))
+
+
+def style_ai_rows(df: pd.DataFrame, col: str = "AI_Suspected") -> "pd.io.formats.style.Styler":
+    df2 = df.copy()
+
+    def _row_style(r):
+        try:
+            flagged = bool(r.get(col, False))
+        except Exception:
+            flagged = False
+        if flagged:
+            return ["background-color: var(--ai-bg); border-left: 4px solid var(--ai-border);"] * len(r)
+        return [""] * len(r)
+
+    return df2.style.apply(_row_style, axis=1)
 
 
 # =============================================================================
@@ -418,13 +470,13 @@ def read_jsonl_path(path: Path) -> List[dict]:
 
 @dataclass
 class ExemplarPack:
-    vecs: np.ndarray       # (n, d) normalized
-    scores: np.ndarray     # (n,) int 0..3
-    texts: List[str]       # exemplar text
+    vecs: np.ndarray
+    scores: np.ndarray
+    texts: List[str]
 
 
 # =============================================================================
-# EMBEDDINGS (fast + cached)
+# EMBEDDINGS
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
@@ -868,7 +920,7 @@ def main():
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
                 Automatic scoring: <b>Top-K ≤ 40</b> → <b>thematic subset</b> → <b>per-answer temperature selection</b>.
-                AI detection is <b>pattern-only</b> and reported as <b>AI_Suspected</b> (no review workflow).
+                AI detection is <b>pattern-only</b> and shown as <b>AI_Suspected</b> with row shading.
             </p>
         </div>
         """,
@@ -917,11 +969,13 @@ def main():
             + (" …" if len(missing_qids) > 12 else "")
         )
 
-    st.success("✅ Scoring complete.")
+    # AI summary
+    ai_ct = int(scored["AI_Suspected"].fillna(False).astype(bool).sum()) if "AI_Suspected" in scored.columns else 0
+    st.success(f"✅ Scoring complete. AI_Suspected flagged: {ai_ct:,} row(s).")
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📊 Scored table")
-    st.dataframe(scored, use_container_width=True)
+    st.subheader("📊 Scored table (AI rows shaded)")
+    st.dataframe(style_ai_rows(scored, "AI_Suspected"), use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
