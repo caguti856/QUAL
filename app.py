@@ -16,14 +16,16 @@ import dashboard
 
 
 # --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
-st.markdown("""
-<style>
-html, body, [data-testid="stAppViewContainer"]{
-  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important; 
-}
-.block-container, section.main{ padding:0 !important; margin:0 !important; }
-</style>
-""", unsafe_allow_html=True)
+if st.session_state.get("show_cover", True):
+    st.markdown("""
+    <style>
+    html, body, [data-testid="stAppViewContainer"]{
+      height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
+    }
+    .block-container, section.main{ padding:0 !important; margin:0 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
 
 # --- No-scroll COVER (white/grey background, CARE orange accents) ---
 COVER_HTML = """
@@ -149,14 +151,21 @@ def main():
             login.show_auth_page()
         else:
           st.markdown("""
-          <style>
-          /* Force sidebar back on (override login.py global hide) */
-          [data-testid="stSidebar"] { 
-            display: block !important;
-            visibility: visible !important;
-          }
-          </style>
-          """, unsafe_allow_html=True)
+        <style>
+        /* Bring back sidebar + header (login page likely hid them) */
+        [data-testid="stSidebar"],
+        section[data-testid="stSidebar"]{
+          display: block !important;
+          visibility: visible !important;
+        }
+
+        [data-testid="stHeader"]{
+          display: block !important;
+          visibility: visible !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
 
             # Your sidebar navigation as before
           with st.sidebar:
