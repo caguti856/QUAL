@@ -1,4 +1,4 @@
-# advisory.py — Kobo → Exemplar-vote scoring (Option B++) + per-answer AI detection → Excel / Google Sheets
+
 from __future__ import annotations
 
 import json
@@ -21,9 +21,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
-# =============================================================================
-# UI / STYLING (same style)
-# =============================================================================
+
+# CSS
+
 def inject_css():
     st.markdown(
         """
@@ -101,9 +101,9 @@ def inject_css():
     )
 
 
-# =============================================================================
+
 # SECRETS / PATHS
-# =============================================================================
+
 KOBO_BASE     = st.secrets.get("KOBO_BASE", "https://kobo.care.org")
 KOBO_ASSET_ID = st.secrets.get("KOBO_ASSET_ID", "")
 KOBO_TOKEN    = st.secrets.get("KOBO_TOKEN", "")
@@ -160,9 +160,8 @@ MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))
 TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
 
 
-# =============================================================================
-# CLEANING
-# =============================================================================
+
+
 def clean(s) -> str:
     if s is None:
         return ""
@@ -177,9 +176,9 @@ def clean(s) -> str:
     return s
 
 
-# =============================================================================
+
 # AI DETECTION (same as Leadership)
-# =============================================================================
+
 AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
 TRANSITION_OPEN_RX = re.compile(
@@ -299,9 +298,9 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# =============================================================================
+
 # MAPPING
-# =============================================================================
+
 def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"mapping file not found: {path}")
@@ -426,9 +425,9 @@ def resolve_kobo_column_for_mapping(
     return None
 
 
-# =============================================================================
+
 # EXEMPLARS (JSONL)
-# =============================================================================
+
 def read_jsonl_path(path: Path) -> List[dict]:
     if not path.exists():
         raise FileNotFoundError(f"exemplars file not found: {path}")
@@ -889,9 +888,9 @@ def style_ai_rows(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     return df.style.apply(_row_style, axis=1)
 
 
-# =============================================================================
+
 # MAIN
-# =============================================================================
+
 def main():
     inject_css()
 
