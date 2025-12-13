@@ -20,9 +20,10 @@ st.markdown("""
 <style>
 html, body, [data-testid="stAppViewContainer"]{
   height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
- 
+  overflow:hidden !important;
 }
 .block-container, section.main{ padding:0 !important; margin:0 !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
