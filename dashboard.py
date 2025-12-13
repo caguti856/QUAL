@@ -1,83 +1,72 @@
-# dashboard.py
+# dashboard_tabs.py
 # ------------------------------------------------------------
-# PowerBI-like Dashboard (5 pages) reading scored data directly
-# from Google Sheets worksheets using service account secrets.
-# Thought Leadership page: loops through ALL 7 sections, then Overall.
-# Charts: column, bar, histogram, heatmap, donut/pie.
+# Thought Leadership Dashboard (PowerBI-style tabs)
+# Pulls scored data DIRECTLY from Google Sheets worksheet:
+#   GSHEETS_WORKSHEET_NAME1 = "Thought Leadership"
+# Uses: column charts, bar charts, donut/pie, histogram, heatmap
+# EXCLUDES: dates, duration, AI_MaxScore (not used)
 # ------------------------------------------------------------
 
-import re
-import numpy as np
 import pandas as pd
+import numpy as np
 import streamlit as st
 import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ==============================
-# CONFIG / SHEETS
+# PAGE CONFIG
 # ==============================
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+st.set_page_config(page_title="Thought Leadership Dashboard", layout="wide")
 
-GSHEETS_SPREADSHEET_KEY = st.secrets.get("GSHEETS_SPREADSHEET_KEY", "")
-
+# ==============================
+# SHEET NAMES (as you stated)
+# ==============================
 GSHEETS_WORKSHEET_NAME  = "Advisory"
 GSHEETS_WORKSHEET_NAME1 = "Thought Leadership"
 GSHEETS_WORKSHEET_NAME2 = "Growth Mindset"
 GSHEETS_WORKSHEET_NAME3 = "Networking"
 GSHEETS_WORKSHEET_NAME4 = "Influencingrelationship"
 
-PAGES = {
-    "Thought Leadership": GSHEETS_WORKSHEET_NAME1,
-    "Growth Mindset": GSHEETS_WORKSHEET_NAME2,
-    "Networking & Advocacy": GSHEETS_WORKSHEET_NAME3,
-    "Advisory Skills": GSHEETS_WORKSHEET_NAME,
-    "Influencing Relationship": GSHEETS_WORKSHEET_NAME4,
-}
+# We are building THIS page from Thought Leadership:
+TARGET_WORKSHEET = GSHEETS_WORKSHEET_NAME1
 
-# Short titles only (NO QUESTIONS) for Thought Leadership
-THOUGHT_LEADERSHIP_TITLES = {
-    ("Locally Anchored Visioning", 1): "Vision with Roots",
-    ("Locally Anchored Visioning", 2): "Hard-wire Local Leadership",
-    ("Locally Anchored Visioning", 3): "Safeguard Community Voice",
-    ("Locally Anchored Visioning", 4): "Trade-off for Locally Led Scale",
+# ==============================
+# GOOGLE SHEETS CONFIG
+# ==============================
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-    ("Innovation and Insight", 1): "Field-First Learning Loop",
-    ("Innovation and Insight", 2): "Contradict HQ Assumptions",
-    ("Innovation and Insight", 3): "Avoid Pilot Theatre",
-    ("Innovation and Insight", 4): "Frugal Innovation Test",
+SPREADSHEET_KEY = st.secrets["GSHEETS_SPREADSHEET_KEY"]
 
-    ("Execution Planning", 1): "Execution Spine Ownership",
-    ("Execution Planning", 2): "90-Day Plan on a Page",
-    ("Execution Planning", 3): "Prevent Handoff Failure",
-    ("Execution Planning", 4): "Drop to Regain Clarity",
+def _normalize_sa_dict(raw: dict) -> dict:
+    sa = dict(raw)
+    if sa.get("private_key") and "\\n" in sa["private_key"]:
+        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
+    sa.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+    return sa
 
-    ("Cross-Functional Collaboration", 1): "One-Day Alignment Workshop",
-    ("Cross-Functional Collaboration", 2): "Resolve MEAL vs Gender Tension",
-    ("Cross-Functional Collaboration", 3): "Shared Principles & Adherence",
-    ("Cross-Functional Collaboration", 4): "Co-Owned Decision Design",
+@st.cache_resource(show_spinner=False)
+def gs_client():
+    sa = _normalize_sa_dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
+    return gspread.authorize(creds)
 
-    ("Follow-Through Discipline", 1): "Executable Promise",
-    ("Follow-Through Discipline", 2): "Light Dashboard & Escalation",
-    ("Follow-Through Discipline", 3): "Milestone Recovery Options",
-    ("Follow-Through Discipline", 4): "Stop Update Theatre",
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sheet_df(sheet_name: str) -> pd.DataFrame:
+    gc = gs_client()
+    ws = gc.open_by_key(SPREADSHEET_KEY).worksheet(sheet_name)
+    df = pd.DataFrame(ws.get_all_records())
+    # Clean column names (keep as-is but strip spaces)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
-    ("Learning-Driven Adjustment", 1): "Quarterly Pause-and-Reflect",
-    ("Learning-Driven Adjustment", 2): "Hypothesis & Evidence Shift",
-    ("Learning-Driven Adjustment", 3): "Handle Negative Findings",
-    ("Learning-Driven Adjustment", 4): "Stop to Fund Adaptation",
-
-    ("Result-Oriented Decision-Making", 1): "Ministry Alignment Trade-off",
-    ("Result-Oriented Decision-Making", 2): "Decide-by-Friday Data",
-    ("Result-Oriented Decision-Making", 3): "Socialize Hard Trade-off",
-    ("Result-Oriented Decision-Making", 4): "Coherence Decision Rule",
-}
-
-# Enforced order for Thought Leadership sections
-THOUGHT_LEADERSHIP_ORDER = [
+# ==============================
+# DASHBOARD SECTIONS (7 + Overall tab)
+# ==============================
+SECTIONS = [
     "Locally Anchored Visioning",
     "Innovation and Insight",
     "Execution Planning",
@@ -87,442 +76,238 @@ THOUGHT_LEADERSHIP_ORDER = [
     "Result-Oriented Decision-Making",
 ]
 
-# ==============================
-# CSS (PowerBI-like)
-# ==============================
-def inject_css():
-    st.markdown("""
-    <style>
-      :root{
-        --primary:#F26A21;
-        --bg:#0b1220;
-        --card:#0f172a;
-        --card2:#111b33;
-        --text:#e5e7eb;
-        --muted:#94a3b8;
-        --border:rgba(148,163,184,0.18);
-      }
-      [data-testid="stAppViewContainer"]{
-        background: radial-gradient(circle at top left, rgba(242,106,33,0.15) 0, rgba(15,23,42,1) 45%, rgba(2,6,23,1) 100%);
-        color: var(--text);
-      }
-      [data-testid="stSidebar"]{
-        background:#050a14;
-        border-right:1px solid rgba(148,163,184,0.12);
-      }
-      [data-testid="stSidebar"] *{ color: var(--text) !important; }
-      .block-container{ max-width: 1600px; padding-top: 1.1rem; padding-bottom: 3rem; }
-      .pb-card{
-        background: linear-gradient(180deg, rgba(17,27,51,0.95), rgba(15,23,42,0.95));
-        border:1px solid var(--border);
-        border-radius: 18px;
-        padding: 14px 16px;
-        box-shadow: 0 18px 45px rgba(0,0,0,0.28);
-      }
-      .pb-title{ font-size: 1.6rem; font-weight: 800; margin: 0; }
-      .pb-sub{ color: var(--muted); margin-top: 6px; font-size: 0.9rem; }
-      .kpi{
-        background: linear-gradient(135deg, rgba(242,106,33,0.22), rgba(17,27,51,0.95));
-        border:1px solid var(--border);
-        border-radius: 16px;
-        padding: 12px 14px;
-      }
-      .kpi .label{ color: var(--muted); font-size: 0.8rem; }
-      .kpi .value{ color: var(--text); font-size: 1.35rem; font-weight: 800; margin-top: 2px; }
-      .kpi .hint{ color: var(--muted); font-size: 0.75rem; margin-top: 4px; }
-      .divider{ height: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ==============================
-# GOOGLE SHEETS
-# ==============================
-def _normalize_sa_dict(raw: dict) -> dict:
-    if not raw:
-        raise ValueError("Missing st.secrets['gcp_service_account']")
-    sa = dict(raw)
-    if "token_ur" in sa and "token_uri" not in sa:
-        sa["token_uri"] = sa.pop("token_ur")
-    if sa.get("private_key") and "\\n" in sa["private_key"]:
-        sa["private_key"] = sa["private_key"].replace("\\n", "\n")
-    sa.setdefault("token_uri", "https://oauth2.googleapis.com/token")
-    sa.setdefault("auth_uri", "https://accounts.google.com/o/oauth2/auth")
-    sa.setdefault("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs")
-    required = ["type","project_id","private_key_id","private_key","client_email","client_id","token_uri"]
-    missing = [k for k in required if not sa.get(k)]
-    if missing:
-        raise ValueError(f"Service account missing fields: {', '.join(missing)}")
-    return sa
-
-@st.cache_resource(show_spinner=False)
-def gs_client():
-    sa = _normalize_sa_dict(st.secrets.get("gcp_service_account"))
-    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-@st.cache_data(ttl=120, show_spinner=False)
-def read_worksheet_df(spreadsheet_key: str, worksheet_name: str) -> pd.DataFrame:
-    if not spreadsheet_key:
-        return pd.DataFrame()
-    gc = gs_client()
-    sh = gc.open_by_key(spreadsheet_key)
-    ws = sh.worksheet(worksheet_name)
-    values = ws.get_all_values()
-    if not values or len(values) < 2:
-        return pd.DataFrame()
-    header = values[0]
-    rows = values[1:]
-    df = pd.DataFrame(rows, columns=header)
-    df = df.loc[:, ~df.columns.astype(str).str.match(r"^\s*$")]
-    return df
+# Titles for the 4 questions per section (NO question text shown)
+QUESTION_TITLES = {
+    "Locally Anchored Visioning": [
+        "Vision with Roots",
+        "Hard-wire Local Leadership",
+        "Safeguard Community Voice",
+        "Trade-off for Locally Led Scale",
+    ],
+    "Innovation and Insight": [
+        "Field-First Learning Loop",
+        "Surface Contradicting Insights",
+        "Balance Policy vs Experimentation",
+        "Frugal Innovation Test",
+    ],
+    "Execution Planning": [
+        "Execution Spine Ownership",
+        "90-Day Plan on a Page",
+        "Close Handoff Failure",
+        "Drop Activities to Regain Clarity",
+    ],
+    "Cross-Functional Collaboration": [
+        "Alignment Workshop Design",
+        "Resolve MEAL vs Gender Tension",
+        "Shared Principles & Adherence",
+        "Co-owned Decision Structure",
+    ],
+    "Follow-Through Discipline": [
+        "Executable Promise",
+        "Light Dashboard & Escalation",
+        "Partner Recovery Options",
+        "Stop Update Theatre",
+    ],
+    "Learning-Driven Adjustment": [
+        "Quarterly Pause & Reflect",
+        "Hypothesis + Evidence Shift",
+        "Handle Negative Findings",
+        "Stop to Fund Adaptations",
+    ],
+    "Result-Oriented Decision-Making": [
+        "Cost/Benefit Trade-off Call",
+        "Decide-by-Friday Data Needs",
+        "Socialize Hard Trade-off",
+        "Coherence Rule for Divergence",
+    ],
+}
 
 # ==============================
 # HELPERS
 # ==============================
-def clean_colname(c: str) -> str:
-    return re.sub(r"\s+", " ", str(c or "")).strip()
+def score_distribution_percent(df: pd.DataFrame, score_col: str) -> pd.DataFrame:
+    s = pd.to_numeric(df[score_col], errors="coerce")
+    counts = s.value_counts().reindex([0, 1, 2, 3], fill_value=0)
+    total = counts.sum()
+    pct = (counts / total * 100).round(1) if total else counts.astype(float)
+    out = pd.DataFrame({"Score": [0, 1, 2, 3], "Percent": pct.values, "Count": counts.values})
+    return out
 
-def to_bool(x) -> bool:
-    if isinstance(x, bool):
-        return x
-    s = str(x).strip().lower()
-    return s in ("true","1","yes","y","t")
-
-def to_num_series(s: pd.Series):
-    return pd.to_numeric(
-        s.astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan}),
-        errors="coerce"
+def rubric_frequency(df: pd.DataFrame, rubric_col: str) -> pd.DataFrame:
+    x = (
+        df[rubric_col]
+        .astype(str)
+        .replace({"": np.nan, "nan": np.nan, "None": np.nan})
+        .dropna()
     )
-
-QCOL_RX = re.compile(r"^(?P<section>.+)_Qn(?P<qn>[1-9]\d*)$", re.I)
-RCOL_RX = re.compile(r"^(?P<section>.+)_Rubric_Qn(?P<qn>[1-9]\d*)$", re.I)
-AVG_RX  = re.compile(r"^(?P<section>.+)_Avg\s*\(0[–-]3\)$", re.I)
-RANK_RX = re.compile(r"^(?P<section>.+)_RANK$", re.I)
-
-def discover_sections(df: pd.DataFrame):
-    sections = {}
-    cols = [clean_colname(c) for c in df.columns]
-
-    for c in cols:
-        m = QCOL_RX.match(c)
-        if m:
-            sec = m.group("section").strip()
-            qn  = int(m.group("qn"))
-            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
-            sections[sec]["qcols"][qn] = c
-
-        m2 = RCOL_RX.match(c)
-        if m2:
-            sec = m2.group("section").strip()
-            qn  = int(m2.group("qn"))
-            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
-            sections[sec]["rcols"][qn] = c
-
-        m3 = AVG_RX.match(c)
-        if m3:
-            sec = m3.group("section").strip()
-            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
-            sections[sec]["avg_col"] = c
-
-        m4 = RANK_RX.match(c)
-        if m4:
-            sec = m4.group("section").strip()
-            sections.setdefault(sec, {"qcols": {}, "rcols": {}, "avg_col": None, "rank_col": None})
-            sections[sec]["rank_col"] = c
-
-    sections = {k:v for k,v in sections.items() if v.get("qcols")}
-    for sec in sections:
-        sections[sec]["qcols"] = dict(sorted(sections[sec]["qcols"].items()))
-        sections[sec]["rcols"] = dict(sorted(sections[sec]["rcols"].items()))
-    return sections
-
-def find_overall_cols(df: pd.DataFrame):
-    cols = {clean_colname(c).lower(): clean_colname(c) for c in df.columns}
-    overall_total = None
-    overall_rank  = None
-    ai_flag       = None
-
-    for low, orig in cols.items():
-        if overall_total is None and "overall total" in low:
-            overall_total = orig
-        if overall_rank is None and low == "overall rank":
-            overall_rank = orig
-        if ai_flag is None and ("ai_suspected" in low or "ai-suspected" in low or low == "ai suspected"):
-            ai_flag = orig
-
-    return overall_total, overall_rank, ai_flag
-
-def question_title(page_name: str, section: str, qn: int) -> str:
-    if page_name == "Thought Leadership":
-        t = THOUGHT_LEADERSHIP_TITLES.get((section, qn))
-        if t:
-            return t
-    return f"Qn{qn}"
-
-def score_pct_df(df: pd.DataFrame, score_col: str) -> pd.DataFrame:
-    s = to_num_series(df[score_col])
-    counts = s.value_counts(dropna=True).reindex([0,1,2,3], fill_value=0)
-    total = int(counts.sum()) if int(counts.sum()) > 0 else 1
-    pct = (counts / total * 100).round(1)
-    return pd.DataFrame({"Score": [0,1,2,3], "Percent": pct.values, "Count": counts.values})
-
-def rubric_freq_df(df: pd.DataFrame, rubric_col: str) -> pd.DataFrame:
-    s = df[rubric_col].astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan})
-    vc = s.value_counts(dropna=True)
-    out = vc.reset_index()
+    out = x.value_counts().reset_index()
     out.columns = ["Rubric", "Count"]
     return out
 
-def heatmap_matrix(df: pd.DataFrame, qcols: dict, page_name: str, section: str) -> pd.DataFrame:
+def section_heatmap_percent(df: pd.DataFrame, section: str) -> pd.DataFrame:
     rows = []
-    for qn, col in qcols.items():
-        title = question_title(page_name, section, qn)
-        dist = score_pct_df(df, col).set_index("Score")["Percent"]
+    for qn in range(1, 5):
+        score_col = f"{section}_Qn{qn}"
+        title = QUESTION_TITLES[section][qn - 1]
+        dist = score_distribution_percent(df, score_col)
         rows.append({
             "Question": title,
-            0: float(dist.loc[0]),
-            1: float(dist.loc[1]),
-            2: float(dist.loc[2]),
-            3: float(dist.loc[3]),
+            "0": dist.loc[dist["Score"] == 0, "Percent"].values[0],
+            "1": dist.loc[dist["Score"] == 1, "Percent"].values[0],
+            "2": dist.loc[dist["Score"] == 2, "Percent"].values[0],
+            "3": dist.loc[dist["Score"] == 3, "Percent"].values[0],
         })
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("Question")
+    h = pd.DataFrame(rows).set_index("Question")
+    return h
 
-def donut(df_counts: pd.DataFrame, names_col: str, values_col: str, title: str):
-    fig = px.pie(df_counts, names=names_col, values=values_col, hole=0.55, title=title)
-    fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
-    return fig
+def safe_col_exists(df: pd.DataFrame, col: str) -> bool:
+    return col in df.columns
 
 # ==============================
-# SECTION RENDERING
+# RENDER ONE SECTION TAB
 # ==============================
-def render_section_block(page_label: str, df: pd.DataFrame, section: str, pack: dict):
-    qcols = pack["qcols"]
-    rcols = pack["rcols"]
-    avg_col  = pack.get("avg_col")
-    rank_col = pack.get("rank_col")
+def render_section_tab(df: pd.DataFrame, section: str):
+    st.subheader(section)
 
-    st.markdown(f"<div class='pb-card'><b>{section}</b></div>", unsafe_allow_html=True)
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+    # --- Section summary visuals (Avg histogram + Rank donut) ---
+    avg_col  = f"{section}_Avg (0–3)"
+    rank_col = f"{section}_RANK"
 
-    # Section-level charts: Avg histogram + Rank donut
     c1, c2 = st.columns(2)
+
     with c1:
-        if avg_col and avg_col in df.columns:
-            av = to_num_series(df[avg_col]).dropna()
-            fig = px.histogram(av, nbins=12, title=f"{section} — Avg (0–3) distribution")
-            fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
+        if safe_col_exists(df, avg_col):
+            fig = px.histogram(
+                df, x=avg_col, nbins=10,
+                title="Section Average Distribution"
+            )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Avg column not found for this section.")
+            st.info(f"Missing column: {avg_col}")
 
     with c2:
-        if rank_col and rank_col in df.columns:
-            rk = df[rank_col].astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan})
-            tab = rk.value_counts(dropna=True).reset_index()
-            tab.columns = ["Rank", "Count"]
-            st.plotly_chart(donut(tab, "Rank", "Count", f"{section} — Rank (donut)"), use_container_width=True)
+        if safe_col_exists(df, rank_col):
+            rank_df = df[rank_col].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
+            rank_df = rank_df.value_counts().reset_index()
+            rank_df.columns = ["Rank", "Count"]
+            fig = px.pie(rank_df, names="Rank", values="Count", hole=0.55, title="Section Rank (Donut)")
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Rank column not found for this section.")
+            st.info(f"Missing column: {rank_col}")
 
-    # Heatmap: Question x Score%
-    mat = heatmap_matrix(df, qcols, page_label, section)
-    if not mat.empty:
-        fig_h = px.imshow(
-            mat.values,
-            x=[0,1,2,3],
-            y=mat.index.tolist(),
-            aspect="auto",
+    st.divider()
+
+    # --- For each question: Score % (column chart) + Rubric frequency (bar) ---
+    for qn in range(1, 5):
+        score_col  = f"{section}_Qn{qn}"
+        rubric_col = f"{section}_Rubric_Qn{qn}"
+        q_title    = QUESTION_TITLES[section][qn - 1]
+
+        st.markdown(f"### {q_title}")
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            if safe_col_exists(df, score_col):
+                dist = score_distribution_percent(df, score_col)
+                fig = px.bar(
+                    dist, x="Score", y="Percent",
+                    text="Percent",
+                    title="Score Distribution (%)"
+                )
+                fig.update_traces(texttemplate="%{text}%", textposition="outside")
+                fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"Missing score column: {score_col}")
+
+        with colB:
+            if safe_col_exists(df, rubric_col):
+                rf = rubric_frequency(df, rubric_col)
+                fig = px.bar(
+                    rf, x="Count", y="Rubric",
+                    orientation="h",
+                    title="Rubric Frequency"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"Missing rubric column: {rubric_col}")
+
+        st.divider()
+
+    # --- Heatmap for this section (Question x Score% 0–3) ---
+    st.markdown("### Section Heatmap (Score % by Question)")
+    try:
+        h = section_heatmap_percent(df, section)
+        fig = px.imshow(
+            h,
             labels=dict(x="Score", y="Question", color="%"),
+            title=f"{section} Heatmap"
         )
-        fig_h.update_layout(
-            title=f"{section} — Score distribution heatmap (%)",
-            margin=dict(l=10, r=10, t=55, b=10),
-            height=320 + 18*len(mat.index),
-        )
-        st.plotly_chart(fig_h, use_container_width=True)
-
-    # Per-question charts (Qn1–Qn4): Score% + Rubric freq
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-    qnums = list(qcols.keys())
-
-    for j in range(0, len(qnums), 2):
-        row = st.columns(2)
-        for k, qn in enumerate(qnums[j:j+2]):
-            with row[k]:
-                score_col = qcols[qn]
-                rubric_col = rcols.get(qn)
-                title = question_title(page_label, section, qn)
-
-                # Score % (column)
-                dist = score_pct_df(df, score_col)
-                fig1 = px.bar(dist, x="Score", y="Percent", text="Percent",
-                              title=f"{title} — Scores (0–3) %")
-                fig1.update_traces(texttemplate="%{text}%", textposition="outside", cliponaxis=False)
-                fig1.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
-                st.plotly_chart(fig1, use_container_width=True)
-
-                # Rubric freq (bar)
-                if rubric_col and rubric_col in df.columns:
-                    rf = rubric_freq_df(df, rubric_col)
-                    fig2 = px.bar(rf, x="Count", y="Rubric", orientation="h",
-                                  title=f"{title} — Rubric frequency")
-                    fig2.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
-                    st.plotly_chart(fig2, use_container_width=True)
-                else:
-                    st.info("Rubric column not found for this question.")
-
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-
-# ==============================
-# OVERALL RENDERING (WHOLE SHEET)
-# ==============================
-def render_overall_block(df: pd.DataFrame):
-    overall_total_col, overall_rank_col, ai_col = find_overall_cols(df)
-
-    st.markdown("<div class='pb-card'><b>Overall (entire page)</b></div>", unsafe_allow_html=True)
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        if overall_total_col and overall_total_col in df.columns:
-            ot = to_num_series(df[overall_total_col]).dropna()
-            fig = px.histogram(ot, nbins=14, title=f"{overall_total_col} — distribution")
-            fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Overall Total column not found.")
-
-    with c2:
-        if overall_rank_col and overall_rank_col in df.columns:
-            rk = df[overall_rank_col].astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan})
-            tab = rk.value_counts(dropna=True).reset_index()
-            tab.columns = ["Overall Rank", "Count"]
-            st.plotly_chart(donut(tab, "Overall Rank", "Count", "Overall Rank — donut"), use_container_width=True)
-        else:
-            st.info("Overall Rank column not found.")
-
-    with c3:
-        if ai_col and ai_col in df.columns:
-            ai = df[ai_col].apply(to_bool)
-            tab = pd.DataFrame({"AI_Suspected": ["TRUE","FALSE"], "Count": [int(ai.sum()), int((~ai).sum())]})
-            st.plotly_chart(donut(tab, "AI_Suspected", "Count", "AI_Suspected — donut"), use_container_width=True)
-        else:
-            st.info("AI_Suspected column not found.")
-
-    # Also show Overall Rank bar (requested mix: donut + bar)
-    if overall_rank_col and overall_rank_col in df.columns:
-        rk = df[overall_rank_col].astype(str).str.strip().replace({"": np.nan, "None": np.nan, "nan": np.nan})
-        tab = rk.value_counts(dropna=True).reset_index()
-        tab.columns = ["Overall Rank", "Count"]
-        fig = px.bar(tab, x="Count", y="Overall Rank", orientation="h", title="Overall Rank — bar")
-        fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), height=320)
         st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Heatmap failed: {e}")
 
 # ==============================
-# PAGE RENDER
+# OVERALL TAB
 # ==============================
-def render_page(page_label: str, worksheet_name: str):
-    with st.spinner(f"Loading: {worksheet_name} ..."):
-        df_raw = read_worksheet_df(GSHEETS_SPREADSHEET_KEY, worksheet_name)
+def render_overall_tab(df: pd.DataFrame):
+    st.subheader("Overall Analysis")
 
-    if df_raw.empty:
-        st.error(f"No data found in worksheet '{worksheet_name}'.")
-        st.stop()
+    # Overall Total histogram
+    if safe_col_exists(df, "Overall Total (0–21)"):
+        fig = px.histogram(df, x="Overall Total (0–21)", nbins=15, title="Overall Total Distribution")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Missing: Overall Total (0–21)")
 
-    df = df_raw.copy()
-    df.columns = [clean_colname(c) for c in df.columns]
+    # Overall Rank donut + bar
+    if safe_col_exists(df, "Overall Rank"):
+        rank_df = df["Overall Rank"].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
+        rank_df = rank_df.value_counts().reset_index()
+        rank_df.columns = ["Rank", "Count"]
 
-    sections = discover_sections(df)
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.pie(rank_df, names="Rank", values="Count", hole=0.55, title="Overall Rank (Donut)")
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            fig = px.bar(rank_df, x="Count", y="Rank", orientation="h", title="Overall Rank (Bar)")
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Missing: Overall Rank")
 
-    st.markdown(f"""
-      <div class="pb-card">
-        <div class="pb-title">{page_label}</div>
-        <div class="pb-sub">Source worksheet: <b>{worksheet_name}</b></div>
-      </div>
-      <div class="divider"></div>
-    """, unsafe_allow_html=True)
-
-    # KPI row
-    n = len(df)
-    overall_total_col, overall_rank_col, ai_col = find_overall_cols(df)
-
-    ai_rate = None
-    if ai_col and ai_col in df.columns:
-        ai_rate = round(df[ai_col].apply(to_bool).mean() * 100, 1)
-
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.markdown(f"<div class='kpi'><div class='label'>Respondents</div><div class='value'>{n:,}</div><div class='hint'>Rows in worksheet</div></div>", unsafe_allow_html=True)
-    with k2:
-        if overall_total_col and overall_total_col in df.columns:
-            ot = to_num_series(df[overall_total_col])
-            st.markdown(f"<div class='kpi'><div class='label'>Avg Overall Total</div><div class='value'>{np.nanmean(ot):.1f}</div><div class='hint'>{overall_total_col}</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='kpi'><div class='label'>Avg Overall Total</div><div class='value'>—</div></div>", unsafe_allow_html=True)
-    with k3:
-        if overall_rank_col and overall_rank_col in df.columns:
-            top = df[overall_rank_col].astype(str).str.strip().replace({"": np.nan}).value_counts().head(1)
-            top_label = top.index[0] if len(top) else "—"
-            st.markdown(f"<div class='kpi'><div class='label'>Most common overall rank</div><div class='value'>{top_label}</div><div class='hint'>{int(top.iloc[0]) if len(top) else 0} respondents</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='kpi'><div class='label'>Most common overall rank</div><div class='value'>—</div></div>", unsafe_allow_html=True)
-    with k4:
-        if ai_rate is not None:
-            st.markdown(f"<div class='kpi'><div class='label'>AI suspected</div><div class='value'>{ai_rate:.1f}%</div><div class='hint'>{ai_col}</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown("<div class='kpi'><div class='label'>AI suspected</div><div class='value'>—</div></div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-
-    if page_label == "Thought Leadership":
-        # Enforce the 7-part flow in order, then Overall
-        available = set(sections.keys())
-        ordered = [s for s in THOUGHT_LEADERSHIP_ORDER if s in available]
-        missing = [s for s in THOUGHT_LEADERSHIP_ORDER if s not in available]
-
-        if missing:
-            st.warning("Some expected Thought Leadership sections are missing in the sheet: " + ", ".join(missing))
-
-        for sec in ordered:
-            render_section_block(page_label, df, sec, sections[sec])
-
-        render_overall_block(df)
-        return
-
-    # For other pages: user selects section (still PowerBI-like)
-    if not sections:
-        st.warning("No section question columns found (expected columns like 'Section_Qn1').")
-        st.dataframe(df.head(30), use_container_width=True)
-        st.stop()
-
-    sec_names = list(sections.keys())
-    section = st.selectbox("Section", sec_names, index=0, key=f"sec_{worksheet_name}")
-    render_section_block(page_label, df, section, sections[section])
-    render_overall_block(df)
-
-    with st.expander("Preview data (first 20 rows)"):
-        hide = {"date", "duration_min", "ai_maxscore", "ai_score_max"}
-        cols_show = [c for c in df.columns if c.lower() not in hide]
-        st.dataframe(df[cols_show].head(20), use_container_width=True)
+    # AI Suspected (donut)
+    if safe_col_exists(df, "AI_Suspected"):
+        ai_df = df["AI_Suspected"].astype(str).replace({"": np.nan, "nan": np.nan}).dropna()
+        ai_df = ai_df.value_counts().reset_index()
+        ai_df.columns = ["AI_Suspected", "Count"]
+        fig = px.pie(ai_df, names="AI_Suspected", values="Count", hole=0.55, title="AI Suspected (Donut)")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Missing: AI_Suspected")
 
 # ==============================
-# MAIN
+# MAIN APP
 # ==============================
 def main():
-    st.set_page_config(page_title="Scoring Dashboard", layout="wide")
-    inject_css()
+    st.title("Thought Leadership Dashboard")
 
-    st.sidebar.markdown("## Dashboard Pages")
-    page = st.sidebar.radio("Select page", list(PAGES.keys()), index=0)
+    with st.spinner(f"Loading Google Sheet: {TARGET_WORKSHEET} ..."):
+        df = load_sheet_df(TARGET_WORKSHEET)
 
-    if not GSHEETS_SPREADSHEET_KEY:
-        st.error("Missing GSHEETS_SPREADSHEET_KEY in st.secrets.")
-        st.stop()
+    # We keep Care_Staff if present; we DO NOT use Date/Duration/AI_MaxScore anyway.
+    # (No need to drop columns; visuals only reference what we need.)
 
-    render_page(page, PAGES[page])
+    # Tabs: 7 sections + Overall
+    tabs = st.tabs(SECTIONS + ["Overall"])
+
+    for i, section in enumerate(SECTIONS):
+        with tabs[i]:
+            render_section_tab(df, section)
+
+    with tabs[-1]:
+        render_overall_tab(df)
 
 if __name__ == "__main__":
     main()
