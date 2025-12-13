@@ -1,25 +1,5 @@
-# dashboard.py
-# ------------------------------------------------------------
-# Streamlit "PowerBI-style" dashboard with 5 PAGE-TABS:
-# 1) Thought Leadership
-# 2) Growth Mindset
-# 3) Networking & Advocacy
-# 4) Advisory Skills
-# 5) Influencing Relationships
-#
-# Each page pulls its OWN worksheet from the SAME Google Sheet,
-# then shows: section tabs (inside the page) + an Overall tab.
-#
-# Rules respected:
-# - Pull from Google Sheets using gcp_service_account + GSHEETS_SPREADSHEET_KEY
-# - DO NOT show original questions (only titles you define)
-# - NO Date / Duration fields
-# - AI_Suspected / AI-Suspected supported + AI_MaxScore supported
-# - Heatmaps + donut (2-cat only) + bar/column + (separate) distributions
-# - Missing data/columns: skip safely (no app crash)
-# - Unique keys for all Streamlit chart elements (prevents DuplicateElementId)
-# ------------------------------------------------------------
 
+st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -59,7 +39,7 @@ def inject_css():
 
         /* Cards */
         .card {{
-            background: white;
+            background: #F9F6F4;
             border: 1px solid rgba(36, 30, 78, 0.12);
             border-radius: 18px;
             padding: 16px 18px;
@@ -69,7 +49,7 @@ def inject_css():
             font-size: 13px;
             letter-spacing: .3px;
             text-transform: uppercase;
-            color: rgba(36,30,78,.70);
+            color: #FFD1D3;
             margin-bottom: 6px;
         }}
         .card-value {{
@@ -114,7 +94,7 @@ def card(title: str, value: str, sub: str = ""):
 # ==============================
 # CONFIG
 # ==============================
-st.set_page_config(page_title="Scoring Dashboard", layout="wide")
+
 
 WS_THOUGHT   = "Thought Leadership"
 WS_GROWTH    = "Growth Mindset"
@@ -647,7 +627,7 @@ def render_page(page_name: str):
 # ==============================
 def main():
     inject_css()
-    st.title("PowerBI-style Scoring Dashboard")
+    st.title("ANALYTICS DASHBOARD")
 
     page = st.sidebar.radio(
         "Dashboard Pages",
