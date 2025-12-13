@@ -4,6 +4,7 @@
 #  - Thematic subset selection (cluster/filter)
 #  - Per-answer temperature selection (auto-picks best temp)
 #  - Scores ANSWER TEXT against exemplar TEXT per question_id (no centroids)
+#  - AI detection (rule-based PATTERNS ONLY) -> AI_Suspected column
 #  - No review flags, no best-match columns
 
 from __future__ import annotations
@@ -156,7 +157,6 @@ OVERALL_BANDS = [
     ("Needs Capacity Support", 0, 7),
 ]
 
-# Kobo column resolution helpers
 _QID_PREFIX_TO_SECTION = {"LAV": "A1", "II": "A2", "EP": "A3", "CFC": "A4", "FTD": "A5", "LDA": "A6", "RDM": "A7"}
 
 PASSTHROUGH_HINTS = [
@@ -171,15 +171,16 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 }
 
 # Scoring defaults (automatic)
-TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))          # maximum top-K retrieved per question
-CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))  # keep within best_sim - CLOSE_DELTA
-CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))  # exemplar-to-exemplar coherence threshold
-MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))       # minimum items for thematic subset
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))              # maximum top-K retrieved per question
+CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))    # keep within best_sim - CLOSE_DELTA
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))    # exemplar-to-exemplar coherence threshold
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))         # minimum items for thematic subset
 
-# Try these temperatures per answer; auto-select best for that answer
-TEMP_CANDIDATES = [
-    0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00
-]
+# per-answer temperature candidates
+TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
+
+# AI detection threshold
+AI_SUSPECT_THRESHOLD = float(st.secrets.get("AI_SUSPECT_THRESHOLD", 0.60))
 
 
 # =============================================================================
@@ -197,6 +198,82 @@ def clean(s) -> str:
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+# =============================================================================
+# AI DETECTION (PATTERNS ONLY — no prompt overlap)
+# =============================================================================
+TRANSITION_OPEN_RX = re.compile(
+    r"^(?:first|second|third|finally|moreover|additionally|furthermore|however|therefore|in conclusion)\b",
+    re.I,
+)
+LIST_CUES_RX = re.compile(r"\b(?:first|second|third|finally)\b", re.I)
+BULLET_RX = re.compile(r"^[-*•]\s", re.M)
+LONG_DASH_HARD_RX = re.compile(r"[—–]")
+SYMBOL_RX = re.compile(
+    r"[—–\-_]{2,}"
+    r"|[≥≤≧≦≈±×÷%]"
+    r"|[→←⇒↔↑↓]"
+    r"|[•●◆▶✓✔✗❌§†‡]",
+    re.U,
+)
+TIMEBOX_RX = re.compile(
+    r"(?:\bday\s*\d+\b|\bweek\s*\d+\b|\bmonth\s*\d+\b|\bquarter\s*\d+\b"
+    r"|\b\d+\s*(?:days?|weeks?|months?|quarters?)\b|\bby\s+day\s*\d+\b)",
+    re.I,
+)
+AI_RX = re.compile(r"(?:as an ai\b|i am an ai\b)", re.I)
+DAY_RANGE_RX = re.compile(r"\bday\s*\d+\s*[-–]\s*\d+\b", re.I)
+PIPE_LIST_RX = re.compile(r"\s\|\s")
+PARENS_ACRONYMS_RX = re.compile(r"\(([A-Z]{2,}(?:s)?(?:\s*,\s*[A-Z]{2,}(?:s)?)+).*?\)")
+NUMBERED_BULLETS_RX = re.compile(r"\b\d+\s*[\.\)]\s*")
+SLASH_PAIR_RX = re.compile(r"\b\w+/\w+\b")
+
+AI_BUZZWORDS = {
+    "minimum viable", "feedback loop", "trade-off", "evidence-based",
+    "stakeholder alignment", "learners' agency", "learners’ agency",
+    "norm shifts", "quick win", "low-lift", "scalable",
+    "best practice", "pilot theatre", "timeboxed"
+}
+
+def ai_signal_score(text: str) -> float:
+    """
+    Pattern-only heuristic. Intentionally ignores prompt hints / overlap
+    to avoid false positives on structured-but-human answers.
+    """
+    t = clean(text)
+    if not t:
+        return 0.0
+    if LONG_DASH_HARD_RX.search(t):
+        return 1.0
+
+    score = 0.0
+    if SYMBOL_RX.search(t):               score += 0.35
+    if TIMEBOX_RX.search(t):              score += 0.15
+    if AI_RX.search(t):                   score += 0.35
+    if TRANSITION_OPEN_RX.search(t):      score += 0.12
+    if LIST_CUES_RX.search(t):            score += 0.12
+    if BULLET_RX.search(t):               score += 0.08
+
+    if DAY_RANGE_RX.search(t):            score += 0.15
+    if PIPE_LIST_RX.search(t):            score += 0.10
+    if PARENS_ACRONYMS_RX.search(t):      score += 0.10
+    if NUMBERED_BULLETS_RX.search(t):     score += 0.12
+    if SLASH_PAIR_RX.search(t):           score += 0.08
+
+    hits = 0
+    for rx in (TIMEBOX_RX, DAY_RANGE_RX, PIPE_LIST_RX, NUMBERED_BULLETS_RX):
+        if rx.search(t):
+            hits += 1
+    if hits >= 2: score += 0.25
+    if hits >= 3: score += 0.15
+
+    tl = t.lower()
+    buzz_hits = sum(1 for b in AI_BUZZWORDS if b in tl)
+    if buzz_hits:
+        score += min(0.24, 0.08 * buzz_hits)
+
+    return max(0.0, min(1.0, score))
 
 
 # =============================================================================
@@ -244,7 +321,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
 
-    # normalize expected columns
     if "prompt_hint" not in df.columns and "column" in df.columns:
         df = df.rename(columns={"column": "prompt_hint"})
 
@@ -252,7 +328,6 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not required.issubset(set(df.columns)):
         raise ValueError(f"mapping.csv must include: {', '.join(sorted(required))}")
 
-    # snap attribute names to ORDERED_ATTRS
     norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
     target = {norm(a): a for a in ORDERED_ATTRS}
 
@@ -285,10 +360,6 @@ def _score_kobo_header(col: str, token: str) -> int:
 
 
 def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: str) -> Optional[str]:
-    """
-    Maps question_id -> Kobo column in the fetched dataframe.
-    Works with tokens like A1_1, A2_3, etc and fuzzy fallback to prompt_hint.
-    """
     qid = (qid or "").strip()
     if not qid:
         return None
@@ -357,7 +428,6 @@ class ExemplarPack:
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
-    # Small & fast semantic model
     return SentenceTransformer(st.secrets.get("EMBED_MODEL", "all-MiniLM-L6-v2"))
 
 
@@ -389,10 +459,6 @@ def embed_map(texts: List[str]) -> Dict[str, np.ndarray]:
 
 
 def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
-    """
-    Build pack per question_id using exemplar 'text' ONLY.
-    No centroids. Every answer matches to real exemplar texts.
-    """
     by_qid: Dict[str, Dict[str, list]] = {}
     all_texts: List[str] = []
 
@@ -433,7 +499,7 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
             packs[qid] = ExemplarPack(
                 vecs=np.zeros((0, 384), dtype=np.float32),
                 scores=np.array([], dtype=np.int32),
-                texts=[]
+                texts=[],
             )
         else:
             packs[qid] = ExemplarPack(
@@ -441,7 +507,6 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
                 scores=np.array(scores, dtype=np.int32),
                 texts=texts,
             )
-
     return packs
 
 
@@ -463,39 +528,28 @@ def _topk_sorted(sims: np.ndarray, k: int) -> np.ndarray:
 
 
 def select_thematic_subset(pack: ExemplarPack, top_idx: np.ndarray, sims: np.ndarray) -> np.ndarray:
-    """
-    Thematic subset = items close to best + coherent with seed exemplar meaning.
-    This makes Top-K behave like “same theme”.
-    """
     if top_idx.size == 0:
         return top_idx
 
     best_i = int(top_idx[0])
     best_sim = float(sims[best_i])
 
-    # 1) keep items close to the best match
     close = [i for i in top_idx.tolist() if float(sims[i]) >= best_sim - CLOSE_DELTA]
     if len(close) < MIN_CLUSTER:
         close = top_idx[:max(MIN_CLUSTER, min(12, top_idx.size))].tolist()
 
-    # 2) coherence gate: exemplar_i must be similar to the best exemplar
     seed_vec = pack.vecs[best_i]
     close_vecs = pack.vecs[np.array(close, dtype=np.int64)]
     sim_to_seed = (close_vecs @ seed_vec).astype(np.float32)
 
     thematic = [i for i, s in zip(close, sim_to_seed.tolist()) if s >= CLUSTER_SIM]
     if len(thematic) < MIN_CLUSTER:
-        # fallback: keep the close set (still stable)
         thematic = close
 
     return np.array(thematic, dtype=np.int64)
 
 
 def vote_with_temp(pack: ExemplarPack, idx: np.ndarray, sims: np.ndarray, temp: float) -> Tuple[int, float, float]:
-    """
-    Vote among idx exemplars using softmax weights over similarity.
-    Returns: (pred, conf=max class weight, margin=top - second)
-    """
     if idx.size == 0:
         return 1, 0.0, 0.0
 
@@ -512,7 +566,6 @@ def vote_with_temp(pack: ExemplarPack, idx: np.ndarray, sims: np.ndarray, temp: 
     pred = int(class_w.argmax())
     conf = float(class_w.max())
 
-    # margin for stability
     sorted_w = np.sort(class_w)
     second = float(sorted_w[-2]) if sorted_w.size >= 2 else 0.0
     margin = conf - second
@@ -520,13 +573,6 @@ def vote_with_temp(pack: ExemplarPack, idx: np.ndarray, sims: np.ndarray, temp: 
 
 
 def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
-    """
-    Full automatic scoring for ONE answer:
-      - retrieve Top-K<=40
-      - thematic subset selection
-      - per-answer temperature selection
-      - return final predicted score
-    """
     if pack is None or pack.vecs.size == 0 or ans_vec is None:
         return None
 
@@ -534,14 +580,9 @@ def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
     if sims.size == 0:
         return None
 
-    # Retrieve up to 40 (or less if fewer exemplars)
     top_idx = _topk_sorted(sims, k=min(TOPK_MAX, sims.size))
-
-    # Thematic subset (same meaning)
     thematic_idx = select_thematic_subset(pack, top_idx, sims)
 
-    # Per-answer temperature selection:
-    # choose the temp with highest margin; tie-breaker by higher conf.
     best = None  # (margin, conf, pred)
     for t in TEMP_CANDIDATES:
         pred, conf, margin = vote_with_temp(pack, thematic_idx, sims, temp=float(t))
@@ -551,18 +592,25 @@ def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
 
     if best is None:
         return None
-
-    _, _, pred = best
-    return int(pred)
+    return int(best[2])
 
 
 # =============================================================================
 # DATAFRAME SCORING
 # =============================================================================
+def _ensure_ai_last(df: pd.DataFrame, name: str = "AI_Suspected") -> pd.DataFrame:
+    out = df.copy()
+    if name not in out.columns:
+        out[name] = ""
+    cols = [c for c in out.columns if c != name] + [name]
+    return out[cols]
+
+
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    df_out = _ensure_ai_last(df, "AI_Suspected")
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
+        df_out.to_excel(w, index=False)
     return bio.getvalue()
 
 
@@ -592,13 +640,11 @@ def score_dataframe(
 
     n_rows = len(df)
 
-    # Parse date
     dt_series = (
         pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce")
         if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
     )
 
-    # Duration
     if start_col:
         start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
@@ -611,7 +657,6 @@ def score_dataframe(
 
     duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
 
-    # Resolve mapping -> Kobo columns
     rows = [r for r in mapping.to_dict(orient="records") if clean(r.get("attribute", "")) in ORDERED_ATTRS]
 
     resolved_for_qid: Dict[str, str] = {}
@@ -625,7 +670,7 @@ def score_dataframe(
         else:
             missing_qids.append(qid)
 
-    # Batch-embed ALL unique answers across df (speed)
+    # Batch-embed ALL unique answers
     all_answers = []
     for _, rec in df.iterrows():
         for r in rows:
@@ -650,7 +695,6 @@ def score_dataframe(
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(rec.get(who_col)) if who_col else ""
 
-        # passthrough columns
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
@@ -660,15 +704,16 @@ def score_dataframe(
             row[c] = rec.get(c, "")
 
         per_attr: Dict[str, List[int]] = {}
+        any_ai = False
 
         for r in rows:
             qid = clean(r.get("question_id", ""))
             attr = clean(r.get("attribute", ""))
+
             col = resolved_for_qid.get(qid)
             if not col or col not in df.columns:
                 continue
 
-            # only Q1..Q4
             qn = None
             if "_Q" in qid:
                 try:
@@ -682,6 +727,10 @@ def score_dataframe(
             if not ans:
                 continue
 
+            # AI detection (PATTERN ONLY)
+            if ai_signal_score(ans) >= AI_SUSPECT_THRESHOLD:
+                any_ai = True
+
             cache_key = (qid, ans)
             if cache_key in exact_cache:
                 sc = exact_cache[cache_key]
@@ -690,7 +739,7 @@ def score_dataframe(
                 pack = packs_by_qid.get(qid)
                 sc2 = score_answer_auto(pack, vec)
                 if sc2 is None:
-                    sc2 = 1  # safe default if something missing
+                    sc2 = 1
                 sc = int(sc2)
                 exact_cache[cache_key] = sc
 
@@ -698,13 +747,11 @@ def score_dataframe(
             row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
             per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill blanks for consistency
         for attr in ORDERED_ATTRS:
             for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
-        # attribute averages + total
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -720,11 +767,12 @@ def score_dataframe(
 
         row["Overall Total (0–21)"] = overall_total
         row["Overall Rank"] = next((label for (label, lo, hi) in OVERALL_BANDS if lo <= overall_total <= hi), "")
+        row["AI_Suspected"] = bool(any_ai)
+
         out_rows.append(row)
 
     res = pd.DataFrame(out_rows)
 
-    # column ordering
     ordered = [c for c in ["Date", "Duration", "Care_Staff"] if c in res.columns]
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
     source_cols = [c for c in source_cols if c not in ("Date", "Duration", "Care_Staff")]
@@ -744,6 +792,8 @@ def score_dataframe(
     ordered += [c for c in ["Overall Total (0–21)", "Overall Rank"] if c in res.columns]
     res = res.reindex(columns=[c for c in ordered if c in res.columns])
 
+    res = _ensure_ai_last(res, "AI_Suspected")
+
     if missing_qids:
         st.session_state["missing_qids"] = sorted(set(missing_qids))
 
@@ -755,7 +805,6 @@ def score_dataframe(
 # =============================================================================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 DEFAULT_WS_NAME = st.secrets.get("GSHEETS_WORKSHEET_NAME1", "Thought Leadership")
-
 
 def _normalize_sa_dict(raw: dict) -> dict:
     if not raw:
@@ -774,13 +823,11 @@ def _normalize_sa_dict(raw: dict) -> dict:
         raise ValueError(f"gcp_service_account missing fields: {', '.join(missing)}")
     return sa
 
-
 @st.cache_resource(show_spinner=False)
 def gs_client():
     sa = _normalize_sa_dict(st.secrets.get("gcp_service_account"))
     creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     return gspread.authorize(creds)
-
 
 def _open_ws_by_key() -> gspread.Worksheet:
     key = st.secrets.get("GSHEETS_SPREADSHEET_KEY")
@@ -793,12 +840,12 @@ def _open_ws_by_key() -> gspread.Worksheet:
     except gspread.WorksheetNotFound:
         return sh.add_worksheet(title=DEFAULT_WS_NAME, rows="20000", cols="200")
 
-
 def upload_df_to_gsheets(df: pd.DataFrame) -> Tuple[bool, str]:
     try:
         ws = _open_ws_by_key()
-        header = df.columns.astype(str).tolist()
-        values = df.astype(object).where(pd.notna(df), "").values.tolist()
+        df_out = _ensure_ai_last(df, "AI_Suspected")
+        header = df_out.columns.astype(str).tolist()
+        values = df_out.astype(object).where(pd.notna(df_out), "").values.tolist()
         ws.clear()
         ws.spreadsheet.values_batch_update(
             body={"valueInputOption": "USER_ENTERED", "data": [{"range": f"'{ws.title}'!A1", "values": [header] + values}]}
@@ -817,18 +864,17 @@ def main():
     st.markdown(
         """
         <div class="app-header-card">
-            <div class="pill">Thought Leadership • Meaning Scoring (Auto)</div>
+            <div class="pill">Thought Leadership • Meaning Scoring (Auto + AI Detection)</div>
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
-                Fully automatic scoring: <b>Top-K ≤ 40</b> → <b>thematic subset</b> → <b>per-answer temperature selection</b>.
-                Scores each response by comparing the <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>.
+                Automatic scoring: <b>Top-K ≤ 40</b> → <b>thematic subset</b> → <b>per-answer temperature selection</b>.
+                AI detection is <b>pattern-only</b> and reported as <b>AI_Suspected</b> (no review workflow).
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Load mapping + exemplars
     try:
         mapping = load_mapping_from_path(MAPPING_PATH)
     except Exception as e:
@@ -860,7 +906,7 @@ def main():
     st.dataframe(df, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.spinner("Scoring (Auto meaning vote per question)…"):
+    with st.spinner("Scoring (Auto meaning vote per question + AI detection)…"):
         scored = score_dataframe(df=df, mapping=mapping, packs_by_qid=packs_by_qid)
 
     missing_qids = st.session_state.get("missing_qids", [])
@@ -892,7 +938,7 @@ def main():
     with c2:
         st.download_button(
             "Download CSV",
-            data=scored.to_csv(index=False).encode("utf-8"),
+            data=_ensure_ai_last(scored, "AI_Suspected").to_csv(index=False).encode("utf-8"),
             file_name="ThoughtLeadership_Scored.csv",
             mime="text/csv",
             use_container_width=True,
