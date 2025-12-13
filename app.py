@@ -21,7 +21,7 @@ html, body, [data-testid="stAppViewContainer"]{
   padding:0 !important; margin:0 !important;
 }
 .block-container, section.main{ padding:0 !important; margin:0 !important; }
-
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -40,7 +40,7 @@ COVER_HTML = """
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 
   /* full viewport, absolutely no scroll */
-  height:100vh; width:100vw; overflow:hidden;
+  height:100vh; width:100vw;
   display:grid; grid-template-rows: auto 1fr auto;
   background:var(--bg);
   color:var(--text);
@@ -148,67 +148,9 @@ def main():
     if st.session_state['show_cover']:
         show_cover_page()
     else:
-      if not st.session_state['user_email']:
-          login.show_auth_page()
-      else:
-          # ✅ Inject toggle button ONLY here (logged-in pages)
-          components.html("""
-          <script>
-          (function () {
-            if (parent.document.getElementById("sidebarToggleBtn")) return;
-
-            const btn = parent.document.createElement("button");
-            btn.id = "sidebarToggleBtn";
-            btn.innerHTML = "☰ Menu";
-            btn.style.position = "fixed";
-            btn.style.top = "12px";
-            btn.style.left = "12px";
-            btn.style.zIndex = "999999";
-            btn.style.padding = "8px 12px";
-            btn.style.borderRadius = "999px";
-            btn.style.border = "1px solid #E6E7EB";
-            btn.style.background = "white";
-            btn.style.fontWeight = "700";
-            btn.style.cursor = "pointer";
-
-            function clickFirst(selectors) {
-              for (const sel of selectors) {
-                const el = parent.document.querySelector(sel);
-                if (el) { el.click(); return true; }
-              }
-              return false;
-            }
-
-            btn.onclick = function () {
-              const didClose = clickFirst([
-                'button[aria-label="Close sidebar"]',
-                'button[title="Close sidebar"]',
-                '[data-testid="stSidebar"] button[aria-label="Close sidebar"]',
-                '[data-testid="stSidebar"] button[title="Close sidebar"]'
-              ]);
-              if (didClose) return;
-
-              clickFirst([
-                '[data-testid="collapsedControl"]',
-                '[data-testid="stSidebarCollapsedControl"]',
-                'button[aria-label="Open sidebar"]',
-                'button[title="Open sidebar"]'
-              ]);
-            };
-
-            parent.document.body.appendChild(btn);
-          })();
-          </script>
-          """, height=0)
-
-          with st.sidebar:
-              selected = st.selectbox(
-                  "Navigation",
-                  ["Advisory", "Thought Leadership","Growth Mindset","Networking",
-                  "Influencing Relationship","Dashboard","Logout"]
-              )
-
-
+        if not st.session_state['user_email']:
+            login.show_auth_page()
+        else:
             # Your sidebar navigation as before
           with st.sidebar:
                 selected = st.selectbox(
@@ -234,7 +176,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
