@@ -2,7 +2,8 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Thematic Analytics",  layout="wide")
+st.set_page_config(page_title="Thematic Analytics", layout="wide", initial_sidebar_state="expanded")
+
 
 # === PAGES (make sure advisory.py exists in the same folder or is importable)
 import advisory  # must define advisory.main()
@@ -21,52 +22,22 @@ html, body, [data-testid="stAppViewContainer"]{
   padding:0 !important; margin:0 !important; overflow:hidden !important;
 }
 .block-container, section.main{ padding:0 !important; margin:0 !important; }
-
-/* ✅ keep header in DOM (so sidebar toggle exists), but hide it visually */
-header, [data-testid="stHeader"]{
-  visibility:hidden !important;
-  height:0 !important;
-  margin:0 !important;
-  padding:0 !important;
-}
-
-/* you can still hide toolbar/footer */
-[data-testid="stToolbar"], footer{ display:none !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-
-# ✅ KEEP SIDEBAR TOGGLE ALWAYS VISIBLE (works across Streamlit versions)
+# --- Global no-scroll for Streamlit chrome (keep if you haven't already) ---
 st.markdown("""
 <style>
-/* Match ALL common Streamlit sidebar toggle buttons */
-[data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"],
-button[title="Open sidebar"],
-button[aria-label="Open sidebar"],
-button[title="Close sidebar"],
-button[aria-label="Close sidebar"]{
-  display:block !important;
-  visibility:visible !important;
-  opacity:1 !important;
-  position:fixed !important;
-  top:12px !important;
-  left:12px !important;
-  z-index:999999 !important;
+html, body, [data-testid="stAppViewContainer"]{
+  height:100vh !important; width:100vw !important; margin:0 !important; padding:0 !important;
+  overflow:hidden !important;
 }
-
-/* Also ensure the sidebar itself isn't hidden behind your full-bleed styles */
-section[data-testid="stSidebar"]{
-  display:block !important;
-  visibility:visible !important;
-  transform:none !important;
-  margin-left:0 !important;
-  z-index:999998 !important;
-}
+.block-container, section.main{ padding:0 !important; margin:0 !important; }
+header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
-
 
 # --- No-scroll COVER (white/grey background, CARE orange accents) ---
 COVER_HTML = """
@@ -191,6 +162,43 @@ def main():
         if not st.session_state['user_email']:
             login.show_auth_page()
         else:
+          components.html("""
+          <script>
+          (function () {
+            if (parent.document.getElementById("openSidebarBtn")) return;
+
+            const btn = parent.document.createElement("button");
+            btn.id = "openSidebarBtn";
+            btn.innerHTML = "☰ Menu";
+            btn.style.position = "fixed";
+            btn.style.top = "12px";
+            btn.style.left = "12px";
+            btn.style.zIndex = "999999";
+            btn.style.padding = "8px 12px";
+            btn.style.borderRadius = "999px";
+            btn.style.border = "1px solid #E6E7EB";
+            btn.style.background = "white";
+            btn.style.fontWeight = "700";
+            btn.style.cursor = "pointer";
+
+            btn.onclick = function () {
+              const candidates = [
+                '[data-testid="collapsedControl"]',
+                '[data-testid="stSidebarCollapsedControl"]',
+                'button[aria-label="Open sidebar"]',
+                'button[title="Open sidebar"]'
+              ];
+              for (const sel of candidates) {
+                const el = parent.document.querySelector(sel);
+                if (el) { el.click(); break; }
+              }
+            };
+
+            parent.document.body.appendChild(btn);
+          })();
+          </script>
+          """, height=0)
+
             # Your sidebar navigation as before
           with st.sidebar:
                 selected = st.selectbox(
