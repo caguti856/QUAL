@@ -1,8 +1,10 @@
-# thoughtleadership.py — Kobo mapping + Meaning scoring (Option B: Adaptive Top-K + Adaptive Temperature)
-# Scores ANSWER TEXT against exemplar TEXT per question_id (no centroid, no review flags, no best-match columns)
-# - Per-answer adaptive Top-K (up to 40) using a similarity margin from top1
-# - Per-answer adaptive Temperature chosen to match an effective number of neighbors (n_eff)
-# - Lightweight model: all-MiniLM-L6-v2 by default
+# thoughtleadership.py — Kobo mapping + Meaning scoring (Option B++)
+# Fully automatic:
+#  - Top-K up to 40 (per question_id)
+#  - Thematic subset selection (cluster/filter)
+#  - Per-answer temperature selection (auto-picks best temp)
+#  - Scores ANSWER TEXT against exemplar TEXT per question_id (no centroids)
+#  - No review flags, no best-match columns
 
 from __future__ import annotations
 
@@ -117,11 +119,12 @@ DATASETS_DIR = Path("DATASETS")
 MAPPING_PATH = DATASETS_DIR / "mapping1.csv"
 EXEMPLARS_PATH = DATASETS_DIR / "thought_leadership.cleaned.jsonl"
 
-# local fallbacks (helpful in dev)
+# local fallbacks (dev)
 if not MAPPING_PATH.exists():
     alt = Path("/mnt/data/mapping1.csv")
     if alt.exists():
         MAPPING_PATH = alt
+
 if not EXEMPLARS_PATH.exists():
     alt1 = Path("/mnt/data/thought_leadership.cleaned.jsonl")
     alt2 = Path("/mnt/data/thought_leadership.jsonl")
@@ -161,33 +164,22 @@ PASSTHROUGH_HINTS = [
     "submissiondate", "submission_date", "start", "_start", "end", "_end", "today", "date", "deviceid",
     "username", "enumerator", "submitted_via_web", "_xform_id_string", "formid", "assetid"
 ]
+
 _EXCLUDE_SOURCE_COLS_LOWER = {
     "_id", "formhub/uuid", "start", "end", "today", "staff_id", "meta/instanceid",
     "_xform_id_string", "_uuid", "meta/rootuuid", "_submission_time", "_validation_status"
 }
 
-WORD_RX = re.compile(r"\w+")
+# Scoring defaults (automatic)
+TOPK_MAX = int(st.secrets.get("TOPK_MAX", 40))          # maximum top-K retrieved per question
+CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))  # keep within best_sim - CLOSE_DELTA
+CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))  # exemplar-to-exemplar coherence threshold
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))       # minimum items for thematic subset
 
-
-# =============================================================================
-# ADAPTIVE SCORING CONTROLS (AUTO)
-# =============================================================================
-# Top-K selection (per answer)
-KMAX = int(st.secrets.get("KMAX", 40))
-KMIN = int(st.secrets.get("KMIN", 10))
-TOP_MARGIN = float(st.secrets.get("TOP_MARGIN", 0.04))  # keep neighbors within (top1 - margin)
-
-# Temperature auto-tuning using effective neighbor count (per answer)
-NEFF_MIN = float(st.secrets.get("NEFF_MIN", 4.0))
-NEFF_MAX = float(st.secrets.get("NEFF_MAX", 18.0))
-SPREAD_REF = float(st.secrets.get("SPREAD_REF", 0.08))  # similarity spread at which we consider evidence "sharp"
-T_LO = float(st.secrets.get("TEMP_LO", 0.05))
-T_HI = float(st.secrets.get("TEMP_HI", 3.0))
-T_ITERS = int(st.secrets.get("TEMP_ITERS", 20))
-
-# Safety: if nearest similarity is very low, default to 1 to avoid random 0s
-LOW_SIM_DEFAULT = float(st.secrets.get("LOW_SIM_DEFAULT", 0.32))
-LOW_SIM_SCORE = int(st.secrets.get("LOW_SIM_SCORE", 1))
+# Try these temperatures per answer; auto-select best for that answer
+TEMP_CANDIDATES = [
+    0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00
+]
 
 
 # =============================================================================
@@ -239,7 +231,6 @@ def fetch_kobo_dataframe() -> pd.DataFrame:
         except Exception as e:
             st.error(f"Kobo fetch failed: {type(e).__name__}: {e}")
             return pd.DataFrame()
-
     return pd.DataFrame()
 
 
@@ -253,6 +244,7 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
     df.columns = [c.strip() for c in df.columns]
 
+    # normalize expected columns
     if "prompt_hint" not in df.columns and "column" in df.columns:
         df = df.rename(columns={"column": "prompt_hint"})
 
@@ -260,6 +252,7 @@ def load_mapping_from_path(path: Path) -> pd.DataFrame:
     if not required.issubset(set(df.columns)):
         raise ValueError(f"mapping.csv must include: {', '.join(sorted(required))}")
 
+    # snap attribute names to ORDERED_ATTRS
     norm = lambda s: re.sub(r"\s+", " ", str(s).strip().lower())
     target = {norm(a): a for a in ORDERED_ATTRS}
 
@@ -292,6 +285,10 @@ def _score_kobo_header(col: str, token: str) -> int:
 
 
 def resolve_kobo_column_for_mapping(df_cols: List[str], qid: str, prompt_hint: str) -> Optional[str]:
+    """
+    Maps question_id -> Kobo column in the fetched dataframe.
+    Works with tokens like A1_1, A2_3, etc and fuzzy fallback to prompt_hint.
+    """
     qid = (qid or "").strip()
     if not qid:
         return None
@@ -352,7 +349,7 @@ def read_jsonl_path(path: Path) -> List[dict]:
 class ExemplarPack:
     vecs: np.ndarray       # (n, d) normalized
     scores: np.ndarray     # (n,) int 0..3
-    texts: List[str]       # exemplar text (kept for completeness; not exported)
+    texts: List[str]       # exemplar text
 
 
 # =============================================================================
@@ -360,6 +357,7 @@ class ExemplarPack:
 # =============================================================================
 @st.cache_resource(show_spinner=False)
 def get_embedder() -> SentenceTransformer:
+    # Small & fast semantic model
     return SentenceTransformer(st.secrets.get("EMBED_MODEL", "all-MiniLM-L6-v2"))
 
 
@@ -391,6 +389,10 @@ def embed_map(texts: List[str]) -> Dict[str, np.ndarray]:
 
 
 def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
+    """
+    Build pack per question_id using exemplar 'text' ONLY.
+    No centroids. Every answer matches to real exemplar texts.
+    """
     by_qid: Dict[str, Dict[str, list]] = {}
     all_texts: List[str] = []
 
@@ -431,7 +433,7 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
             packs[qid] = ExemplarPack(
                 vecs=np.zeros((0, 384), dtype=np.float32),
                 scores=np.array([], dtype=np.int32),
-                texts=[],
+                texts=[]
             )
         else:
             packs[qid] = ExemplarPack(
@@ -444,73 +446,63 @@ def build_packs_by_question(exemplars: List[dict]) -> Dict[str, ExemplarPack]:
 
 
 # =============================================================================
-# OPTION B: Adaptive Top-K + Adaptive Temperature vote (meaning-based)
+# MEANING SELECTION + PER-ANSWER TEMP SELECTION
 # =============================================================================
-def softmax(x: np.ndarray, temp: float) -> np.ndarray:
+def _softmax_temp(x: np.ndarray, temp: float) -> np.ndarray:
     t = float(max(1e-6, temp))
-    z = (x - x.max()) / t
+    z = (x - float(x.max())) / t
     ex = np.exp(z).astype(np.float32)
     return ex / (ex.sum() + 1e-9)
 
 
-def effective_neighbors(w: np.ndarray) -> float:
-    return float(1.0 / (np.sum(w * w) + 1e-9))
+def _topk_sorted(sims: np.ndarray, k: int) -> np.ndarray:
+    k = int(max(1, min(k, sims.size)))
+    idx = np.argpartition(-sims, k - 1)[:k]
+    idx = idx[np.argsort(-sims[idx])]
+    return idx
 
 
-def choose_topk_idx(sims: np.ndarray, kmax: int, kmin: int, margin: float) -> np.ndarray:
-    order = np.argsort(-sims)
-    sims_sorted = sims[order]
-    top1 = float(sims_sorted[0])
+def select_thematic_subset(pack: ExemplarPack, top_idx: np.ndarray, sims: np.ndarray) -> np.ndarray:
+    """
+    Thematic subset = items close to best + coherent with seed exemplar meaning.
+    This makes Top-K behave like “same theme”.
+    """
+    if top_idx.size == 0:
+        return top_idx
 
-    keep = np.where(sims_sorted >= (top1 - margin))[0]
-    kk = int(np.clip(len(keep), kmin, min(kmax, sims.size)))
-    return order[:kk]
+    best_i = int(top_idx[0])
+    best_sim = float(sims[best_i])
+
+    # 1) keep items close to the best match
+    close = [i for i in top_idx.tolist() if float(sims[i]) >= best_sim - CLOSE_DELTA]
+    if len(close) < MIN_CLUSTER:
+        close = top_idx[:max(MIN_CLUSTER, min(12, top_idx.size))].tolist()
+
+    # 2) coherence gate: exemplar_i must be similar to the best exemplar
+    seed_vec = pack.vecs[best_i]
+    close_vecs = pack.vecs[np.array(close, dtype=np.int64)]
+    sim_to_seed = (close_vecs @ seed_vec).astype(np.float32)
+
+    thematic = [i for i, s in zip(close, sim_to_seed.tolist()) if s >= CLUSTER_SIM]
+    if len(thematic) < MIN_CLUSTER:
+        # fallback: keep the close set (still stable)
+        thematic = close
+
+    return np.array(thematic, dtype=np.int64)
 
 
-def solve_temp_for_neff(
-    top_sims: np.ndarray,
-    target_neff: float,
-    t_lo: float,
-    t_hi: float,
-    iters: int,
-) -> float:
-    lo, hi = float(t_lo), float(t_hi)
-    for _ in range(int(iters)):
-        mid = (lo + hi) / 2.0
-        w = softmax(top_sims.astype(np.float32), temp=mid)
-        neff = effective_neighbors(w)
-        if neff < target_neff:
-            lo = mid
-        else:
-            hi = mid
-    return float((lo + hi) / 2.0)
+def vote_with_temp(pack: ExemplarPack, idx: np.ndarray, sims: np.ndarray, temp: float) -> Tuple[int, float, float]:
+    """
+    Vote among idx exemplars using softmax weights over similarity.
+    Returns: (pred, conf=max class weight, margin=top - second)
+    """
+    if idx.size == 0:
+        return 1, 0.0, 0.0
 
+    top_sims = sims[idx].astype(np.float32)
+    top_scores = pack.scores[idx].astype(np.int32)
 
-def score_against_pack_adaptive(pack: ExemplarPack, ans_vec: np.ndarray) -> Tuple[Optional[int], float]:
-    if pack is None or pack.vecs.size == 0 or ans_vec is None:
-        return None, 0.0
-
-    sims = pack.vecs @ ans_vec
-    if sims.size == 0:
-        return None, 0.0
-
-    top1 = float(np.max(sims))
-    if top1 < LOW_SIM_DEFAULT:
-        return int(LOW_SIM_SCORE), 0.0
-
-    idx = choose_topk_idx(sims, kmax=KMAX, kmin=KMIN, margin=TOP_MARGIN)
-    top_sims = sims[idx]
-    top_scores = pack.scores[idx]
-
-    spread = float(top_sims.max() - top_sims.min())
-    sharpness = min(1.0, spread / max(1e-6, SPREAD_REF))
-    # sharp -> lower neff (sharper weights), mixed -> higher neff (flatter weights)
-    target_neff = NEFF_MIN + (NEFF_MAX - NEFF_MIN) * (1.0 - sharpness)
-    target_neff = float(np.clip(target_neff, NEFF_MIN, min(NEFF_MAX, float(len(top_sims)))))
-
-    temp = solve_temp_for_neff(top_sims, target_neff=target_neff, t_lo=T_LO, t_hi=T_HI, iters=T_ITERS)
-
-    w = softmax(top_sims.astype(np.float32), temp=temp)
+    w = _softmax_temp(top_sims, temp=temp)
 
     class_w = np.zeros(4, dtype=np.float32)
     for sc, wi in zip(top_scores.tolist(), w.tolist()):
@@ -519,11 +511,53 @@ def score_against_pack_adaptive(pack: ExemplarPack, ans_vec: np.ndarray) -> Tupl
 
     pred = int(class_w.argmax())
     conf = float(class_w.max())
-    return pred, conf
+
+    # margin for stability
+    sorted_w = np.sort(class_w)
+    second = float(sorted_w[-2]) if sorted_w.size >= 2 else 0.0
+    margin = conf - second
+    return pred, conf, margin
+
+
+def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
+    """
+    Full automatic scoring for ONE answer:
+      - retrieve Top-K<=40
+      - thematic subset selection
+      - per-answer temperature selection
+      - return final predicted score
+    """
+    if pack is None or pack.vecs.size == 0 or ans_vec is None:
+        return None
+
+    sims = (pack.vecs @ ans_vec).astype(np.float32)
+    if sims.size == 0:
+        return None
+
+    # Retrieve up to 40 (or less if fewer exemplars)
+    top_idx = _topk_sorted(sims, k=min(TOPK_MAX, sims.size))
+
+    # Thematic subset (same meaning)
+    thematic_idx = select_thematic_subset(pack, top_idx, sims)
+
+    # Per-answer temperature selection:
+    # choose the temp with highest margin; tie-breaker by higher conf.
+    best = None  # (margin, conf, pred)
+    for t in TEMP_CANDIDATES:
+        pred, conf, margin = vote_with_temp(pack, thematic_idx, sims, temp=float(t))
+        cand = (margin, conf, pred)
+        if best is None or cand[0] > best[0] + 1e-9 or (abs(cand[0] - best[0]) < 1e-9 and cand[1] > best[1] + 1e-9):
+            best = cand
+
+    if best is None:
+        return None
+
+    _, _, pred = best
+    return int(pred)
 
 
 # =============================================================================
-# EXPORTS
+# DATAFRAME SCORING
 # =============================================================================
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
@@ -532,9 +566,6 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.getvalue()
 
 
-# =============================================================================
-# DATAFRAME SCORING
-# =============================================================================
 def score_dataframe(
     df: pd.DataFrame,
     mapping: pd.DataFrame,
@@ -561,11 +592,13 @@ def score_dataframe(
 
     n_rows = len(df)
 
-    dt_series = pd.to_datetime(
-        df[date_col].astype(str).str.strip().str.lstrip(","),
-        errors="coerce"
-    ) if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
+    # Parse date
+    dt_series = (
+        pd.to_datetime(df[date_col].astype(str).str.strip().str.lstrip(","), errors="coerce")
+        if date_col in df.columns else pd.Series([pd.NaT] * n_rows)
+    )
 
+    # Duration
     if start_col:
         start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce")
     else:
@@ -578,6 +611,7 @@ def score_dataframe(
 
     duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
 
+    # Resolve mapping -> Kobo columns
     rows = [r for r in mapping.to_dict(orient="records") if clean(r.get("attribute", "")) in ORDERED_ATTRS]
 
     resolved_for_qid: Dict[str, str] = {}
@@ -591,7 +625,7 @@ def score_dataframe(
         else:
             missing_qids.append(qid)
 
-    # Batch-embed ALL unique answers across df
+    # Batch-embed ALL unique answers across df (speed)
     all_answers = []
     for _, rec in df.iterrows():
         for r in rows:
@@ -604,8 +638,8 @@ def score_dataframe(
 
     ans_emb = embed_map(list(set(all_answers)))
 
-    # cache exact same (qid, answer) scoring
-    exact_cache: Dict[Tuple[str, str], Tuple[int, float]] = {}
+    # Cache exact same (qid, answer) scoring
+    exact_cache: Dict[Tuple[str, str], int] = {}
 
     out_rows = []
     for i, rec in df.iterrows():
@@ -616,6 +650,7 @@ def score_dataframe(
         who_col = care_staff_col or staff_id_col
         row["Care_Staff"] = str(rec.get(who_col)) if who_col else ""
 
+        # passthrough columns
         for c in passthrough_cols:
             lc = c.strip().lower()
             if lc in _EXCLUDE_SOURCE_COLS_LOWER:
@@ -633,10 +668,7 @@ def score_dataframe(
             if not col or col not in df.columns:
                 continue
 
-            ans = clean(rec.get(col, ""))
-            if not ans:
-                continue
-
+            # only Q1..Q4
             qn = None
             if "_Q" in qid:
                 try:
@@ -646,28 +678,33 @@ def score_dataframe(
             if qn not in (1, 2, 3, 4):
                 continue
 
+            ans = clean(rec.get(col, ""))
+            if not ans:
+                continue
+
             cache_key = (qid, ans)
             if cache_key in exact_cache:
-                sc, conf = exact_cache[cache_key]
+                sc = exact_cache[cache_key]
             else:
                 vec = ans_emb.get(ans)
                 pack = packs_by_qid.get(qid)
-                sc, conf = score_against_pack_adaptive(pack=pack, ans_vec=vec)
-                if sc is None:
-                    sc = 1
-                    conf = 0.0
-                exact_cache[cache_key] = (int(sc), float(conf))
+                sc2 = score_answer_auto(pack, vec)
+                if sc2 is None:
+                    sc2 = 1  # safe default if something missing
+                sc = int(sc2)
+                exact_cache[cache_key] = sc
 
-            row[f"{attr}_Qn{qn}"] = int(sc)
+            row[f"{attr}_Qn{qn}"] = sc
             row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
             per_attr.setdefault(attr, []).append(int(sc))
 
-        # fill blanks
+        # fill blanks for consistency
         for attr in ORDERED_ATTRS:
             for qn in (1, 2, 3, 4):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
+        # attribute averages + total
         overall_total = 0
         for attr in ORDERED_ATTRS:
             scores = per_attr.get(attr, [])
@@ -687,6 +724,7 @@ def score_dataframe(
 
     res = pd.DataFrame(out_rows)
 
+    # column ordering
     ordered = [c for c in ["Date", "Duration", "Care_Staff"] if c in res.columns]
     source_cols = [c for c in df.columns if c.strip().lower() not in _EXCLUDE_SOURCE_COLS_LOWER]
     source_cols = [c for c in source_cols if c not in ("Date", "Duration", "Care_Staff")]
@@ -779,22 +817,16 @@ def main():
     st.markdown(
         """
         <div class="app-header-card">
-            <div class="pill">Thought Leadership • Meaning Scoring (Adaptive Option B)</div>
+            <div class="pill">Thought Leadership • Meaning Scoring (Auto)</div>
             <h1>Thought Leadership</h1>
             <p style="color:#6b7280;margin:0;">
-                Scores each response by comparing the <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>,
-                using <b>adaptive Top-K</b> and <b>adaptive temperature</b>. No centroids. No review flags. No best-match columns.
+                Fully automatic scoring: <b>Top-K ≤ 40</b> → <b>thematic subset</b> → <b>per-answer temperature selection</b>.
+                Scores each response by comparing the <b>answer text</b> to exemplar <b>text</b> per <b>question_id</b>.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    with st.sidebar:
-        st.subheader("Scoring (auto)")
-        st.caption(f"Top-K: auto (Kmin={KMIN}, Kmax={KMAX}, margin={TOP_MARGIN})")
-        st.caption(f"Temp: auto (neff {NEFF_MIN}–{NEFF_MAX}, spread_ref={SPREAD_REF})")
-        st.caption(f"Low similarity default: if top1 < {LOW_SIM_DEFAULT} → score {LOW_SIM_SCORE}")
 
     # Load mapping + exemplars
     try:
@@ -817,6 +849,7 @@ def main():
 
     with st.spinner("Fetching Kobo submissions…"):
         df = fetch_kobo_dataframe()
+
     if df.empty:
         st.warning("No Kobo submissions found (or Kobo credentials missing).")
         return
@@ -824,10 +857,10 @@ def main():
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("📥 Fetched dataset")
     st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns):,}")
-    st.dataframe(df, width="stretch")
+    st.dataframe(df, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.spinner("Scoring (adaptive Top-K vote per question)…"):
+    with st.spinner("Scoring (Auto meaning vote per question)…"):
         scored = score_dataframe(df=df, mapping=mapping, packs_by_qid=packs_by_qid)
 
     missing_qids = st.session_state.get("missing_qids", [])
@@ -842,7 +875,7 @@ def main():
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("📊 Scored table")
-    st.dataframe(scored, width="stretch")
+    st.dataframe(scored, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -854,7 +887,7 @@ def main():
             data=to_excel_bytes(scored),
             file_name="ThoughtLeadership_Scored.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
+            use_container_width=True,
         )
     with c2:
         st.download_button(
@@ -862,7 +895,7 @@ def main():
             data=scored.to_csv(index=False).encode("utf-8"),
             file_name="ThoughtLeadership_Scored.csv",
             mime="text/csv",
-            width="stretch",
+            use_container_width=True,
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
