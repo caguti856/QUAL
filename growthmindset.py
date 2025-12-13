@@ -117,7 +117,7 @@ AUTO_PUSH      = bool(st.secrets.get("AUTO_PUSH", False))
 
 DATASETS_DIR   = Path("DATASETS")
 MAPPING_PATH   = DATASETS_DIR / "mapping2.csv"
-EXEMPLARS_PATH = DATASETS_DIR / "growthmindset.cleaned.jsonl"  # recommended name
+EXEMPLARS_PATH = DATASETS_DIR / "growthmindset.jsonl"  
 
 
 
