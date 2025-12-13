@@ -11,6 +11,7 @@ import growthmindset
 import networking
 import influencingrelationship
 import login
+import dashboard
 # ----- optional cover -----
 # Full-bleed, true viewport cover (no scroll, no padding)
 st.markdown("""
@@ -164,7 +165,7 @@ def main():
           with st.sidebar:
                 selected = st.selectbox(
                 "Navigation",
-                ["Advisory", "Thought Leadership","Growth Mindset","Networking","Influencing Relationship","Logout"]
+                ["Advisory", "Thought Leadership","Growth Mindset","Networking","Influencing Relationship","Dashboard","Logout"]
             )
           if selected == "Advisory":
               advisory.main()
@@ -175,7 +176,9 @@ def main():
           elif selected == "Networking":
               networking.main() 
           elif selected == "Influencing Relationship":
-             influencingrelationship.main()  
+             influencingrelationship.main() 
+          elif selected == "Dashboard":
+             dashboard.main()  
           elif selected == "Logout":
              st.session_state.user_email = None
              st.session_state['show_cover'] = True
