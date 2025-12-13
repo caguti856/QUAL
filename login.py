@@ -232,7 +232,75 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+    <style>
+    /* === FINAL LAYOUT STABILITY FIX === */
 
+    /* Fix both halves to the viewport (no jump or scroll on rerun) */
+    [data-testid="stAppViewContainer"] > div:first-child {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 100vw !important;
+        height: 100vh !important;
+        background: #0b0b2a !important;
+    }
+
+    /* Left side image locked */
+    .image-container, .image-container img {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 55vw !important;
+        height: 100vh !important;
+        object-fit: cover !important;
+        filter: brightness(78%);
+        z-index: 1 !important;
+    }
+
+    /* Right glass panel locked next to image */
+    [data-testid="column"]:nth-child(2) {
+        position: fixed !important;
+        right: 0; top: 0;
+        width: 45vw !important;
+        height: 100vh !important;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        backdrop-filter: blur(20px) saturate(180%) !important;
+        -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+        border-left: 1px solid rgba(255,255,255,0.15) !important;
+        box-shadow: inset 0 0 25px rgba(255,255,255,0.05);
+        z-index: 2 !important;
+    }
+
+    /* Slight glow edge between halves */
+    [data-testid="column"]:nth-child(2)::before {
+        content: "";
+        position: absolute;
+        left: 0; top: 0;
+        width: 6px;
+        height: 100%;
+        background: linear-gradient(180deg, #ffffff40, #ffffff10);
+        box-shadow: 0 0 20px rgba(255,255,255,0.2);
+    }
+
+    /* Prevent Streamlit default column gap on rerun */
+    [data-testid="stHorizontalBlock"] {
+        margin: 0 !important;
+        gap: 0 !important;
+    }
+
+    /* Responsive layout: below 900px -> full width form */
+    @media (max-width: 900px) {
+        .image-container { display: none !important; }
+        [data-testid="column"]:nth-child(2) {
+            width: 100vw !important;
+            border-left: none !important;
+            background: rgba(255,255,255,0.1);
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
 # -----------------------------
 # Session defaults & helpers
 # -----------------------------
@@ -244,7 +312,7 @@ def _ensure_defaults():
     if "show_cover" not in st.session_state:
         st.session_state["show_cover"] = True
 
-
+_ensure_defaults()  # ensure defaults at import time
 
 # -----------------------------
 # Config: use Streamlit secrets
@@ -417,15 +485,7 @@ def _left_image_block():
 
 def show_auth_page():
     _ensure_defaults()
-    st.markdown("""
-    <style>
-    /* login-only styling: DO NOT touch stAppViewContainer > div:first-child */
-    [data-testid="stHorizontalBlock"] { margin:0 !important; gap:0 !important; }
 
-    /* If you want to hide sidebar/header ONLY on login: */
-    [data-testid="stSidebar"], [data-testid="stHeader"] { display:none !important; }
-    </style>
-    """, unsafe_allow_html=True)
     # Handle query params for signup/verify/reset deep-links
     qp = st.query_params
     mode = qp.get("mode", "")
