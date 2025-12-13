@@ -1,23 +1,6 @@
 # dashboard.py
 # ------------------------------------------------------------
-# ONE Streamlit "PowerBI-style" dashboard with 5 PAGE-TABS:
-# 1) Thought Leadership
-# 2) Growth Mindset
-# 3) Networking & Advocacy
-# 4) Advisory Skills
-# 5) Influencing Relationships
-#
-# Each page pulls its OWN worksheet from the SAME Google Sheet,
-# then shows: section tabs (inside the page) + an Overall tab.
-#
-# Rules:
-# - Pull from Google Sheets using gcp_service_account + GSHEETS_SPREADSHEET_KEY
-# - DO NOT show questions (only short titles you define)
-# - NO Date / Duration fields
-# - Uses AI_Suspected (and AI_MaxScore where present)
-# - Heatmaps + donut/pie (only when 2 cats) + bar/column + histograms
-# - Avoid StreamlitDuplicateElementId by unique keys
-# - Safe when data missing: skip quietly (no crash)
+# Grey background, charts in shades of blue, words in black
 # ------------------------------------------------------------
 
 import pandas as pd
@@ -27,41 +10,26 @@ import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ==============================
-# PAGE CONFIG
-# ==============================
 st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 
 # ==============================
-# THEME / COLORS (Cute + Professional)
+# THEME / COLORS (Grey + Blues + Black text)
 # ==============================
-BRAND_ORANGE = "#EB7100"
-BRAND_PURPLE = "#241E4E"
-BRAND_CREAM  = "#FFF8EE"
-BRAND_SOFT   = "#F9F6F4"
+BG_GREY_1 = "#F2F4F7"
+BG_GREY_2 = "#E6E9EF"
+CARD_BG   = "#EEF1F6"
+BORDER    = "rgba(0,0,0,0.10)"
+TEXT      = "#0B0F19"      # near-black
+MUTED     = "rgba(11,15,25,0.65)"
 
-ACCENT_GOLD = "#D4AF37"
-ACCENT_ROSE = "#FF5C8A"
-ACCENT_TEAL = "#17BEBB"
-ACCENT_SKY  = "#4EA8FF"
-ACCENT_LIME = "#8FD14F"
-
-DISCRETE_SEQ = [
-    BRAND_ORANGE,
-    BRAND_PURPLE,
-    ACCENT_TEAL,
-    ACCENT_SKY,
-    ACCENT_ROSE,
-    ACCENT_GOLD,
-    ACCENT_LIME,
-]
-
+# Blue palette (used for all charts)
+BLUES = ["#0B5FFF", "#1D7AFC", "#3B8EF5", "#5AA2F2", "#7BB6F3", "#A6CEFF", "#0A2E6B"]
 HEAT_SCALE = [
     [0.00, "#FFFFFF"],
-    [0.20, BRAND_SOFT],
-    [0.45, "#FFE3C8"],
-    [0.70, BRAND_ORANGE],
-    [1.00, BRAND_PURPLE],
+    [0.20, "#EAF2FF"],
+    [0.45, "#BBD7FF"],
+    [0.70, "#4E9BFF"],
+    [1.00, "#0B5FFF"],
 ]
 
 def inject_css():
@@ -69,78 +37,68 @@ def inject_css():
         f"""
         <style>
         .stApp {{
-            background: radial-gradient(circle at 15% 0%, #FFFFFF 0%, {BRAND_SOFT} 45%, {BRAND_CREAM} 100%);
+            background: linear-gradient(180deg, {BG_GREY_1} 0%, {BG_GREY_2} 100%);
+            color: {TEXT};
         }}
         .block-container {{
             padding-top: 1.2rem;
         }}
 
-        /* Shiny main title */
-        h1 {{
+        /* Titles / headings in black */
+        h1, h2, h3, h4, h5, h6 {{
+            color: {TEXT} !important;
             font-weight: 900 !important;
-            letter-spacing: .6px !important;
-            background: linear-gradient(90deg, {ACCENT_GOLD}, #FFD86B, {ACCENT_GOLD});
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0px 10px 25px rgba(212,175,55,.18);
         }}
-        h2, h3, h4 {{
-            font-weight: 850 !important;
-            color: {BRAND_PURPLE} !important;
+        p, li, span, label, div {{
+            color: {TEXT};
         }}
 
         section[data-testid="stSidebar"] {{
-            background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_SOFT} 100%);
-            border-right: 1px solid rgba(36, 30, 78, 0.10);
+            background: linear-gradient(180deg, #FFFFFF 0%, {BG_GREY_1} 100%);
+            border-right: 1px solid {BORDER};
         }}
 
         .card {{
-            background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_SOFT} 100%);
-            border: 1px solid rgba(36, 30, 78, 0.10);
-            border-radius: 20px;
+            background: {CARD_BG};
+            border: 1px solid {BORDER};
+            border-radius: 18px;
             padding: 16px 18px;
-            box-shadow: 0 12px 30px rgba(36,30,78,0.10);
+            box-shadow: 0 10px 24px rgba(0,0,0,0.06);
         }}
         .card-title {{
             font-size: 12px;
             letter-spacing: .4px;
             text-transform: uppercase;
-            font-weight: 800;
-            color: rgba(36,30,78,.70);
+            font-weight: 900;
+            color: {MUTED};
             margin-bottom: 6px;
         }}
         .card-value {{
             font-size: 30px;
             font-weight: 900;
-            color: {BRAND_PURPLE};
+            color: {TEXT};
             line-height: 1.05;
         }}
         .card-sub {{
             font-size: 12px;
-            color: rgba(36,30,78,.60);
+            color: {MUTED};
             margin-top: 6px;
         }}
 
         button[data-baseweb="tab"] {{
             font-weight: 800 !important;
-            color: rgba(36,30,78,.80) !important;
+            color: {TEXT} !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
-            color: {BRAND_PURPLE} !important;
-            border-bottom: 3px solid {BRAND_ORANGE} !important;
-        }}
-
-        .stDataFrame {{
-            border-radius: 14px;
-            overflow: hidden;
+            border-bottom: 3px solid {BLUES[0]} !important;
         }}
 
         div[data-testid="stMetric"] {{
-            background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_SOFT} 100%);
-            border: 1px solid rgba(36, 30, 78, 0.10);
+            background: {CARD_BG};
+            border: 1px solid {BORDER};
             padding: 12px 14px;
             border-radius: 16px;
-            box-shadow: 0 10px 24px rgba(36,30,78,0.08);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.05);
         }}
         </style>
         """,
@@ -382,11 +340,13 @@ def first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def safe_plot(fig, key: str):
-    """Unique key avoids StreamlitDuplicateElementId."""
     fig.update_layout(
         template="plotly_white",
-        title_font=dict(size=20, family="Arial", color=BRAND_PURPLE),
-        legend_title_text="",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT),
+        title_font=dict(size=20, family="Arial", color=TEXT),
+        legend_font=dict(color=TEXT),
         margin=dict(l=10, r=10, t=60, b=10),
     )
     st.plotly_chart(fig, use_container_width=True, key=key)
@@ -449,7 +409,6 @@ def render_page(page_name: str):
 
     df = drop_date_duration_cols(df)
 
-    # Header cards
     cA, cB, cC = st.columns([1.2, 1.2, 1.6])
     with cA:
         card("Worksheet", ws_name, "Source: Google Sheets")
@@ -463,9 +422,6 @@ def render_page(page_name: str):
     section_tabs = cfg["sections"] + ["Overall"]
     tabs = st.tabs(section_tabs)
 
-    # ======================
-    # SECTION TABS
-    # ======================
     for i, section in enumerate(cfg["sections"]):
         with tabs[i]:
             st.subheader(section)
@@ -493,7 +449,6 @@ def render_page(page_name: str):
 
             st.divider()
 
-            # Rank distribution (BAR only — multi category)
             if has(df, rnk_col):
                 r = _clean_series(df[rnk_col])
                 if len(r):
@@ -502,19 +457,17 @@ def render_page(page_name: str):
                     fig = px.bar(
                         r_df, x="Rank", y="Count",
                         title="Section Rank Distribution",
-                        color="Rank", color_discrete_sequence=DISCRETE_SEQ
+                        color="Rank",
+                        color_discrete_sequence=BLUES
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
                     safe_plot(fig, key=f"{page_name}-{section}-rankbar")
-                else:
-                    st.info("Section rank has no values (skipped).")
 
-            # Avg distribution (histogram)
             if has(df, avg_col):
                 fig = px.histogram(
                     df, x=avg_col, nbins=10,
                     title="Section Average Distribution",
-                    color_discrete_sequence=[BRAND_ORANGE]
+                    color_discrete_sequence=[BLUES[0]]
                 )
                 fig.update_layout(xaxis_title="Average (0–3)", yaxis_title="Count")
                 safe_plot(fig, key=f"{page_name}-{section}-avgdist")
@@ -535,7 +488,6 @@ def render_page(page_name: str):
 
                 left, right = st.columns(2)
 
-                # Score distribution (column chart)
                 with left:
                     if has(df, score_col):
                         d = score_dist(df, score_col)
@@ -543,15 +495,12 @@ def render_page(page_name: str):
                             d, x="Score", y="Percent", text="Percent",
                             title="Score Distribution (%)",
                             color="Score",
-                            color_discrete_sequence=DISCRETE_SEQ
+                            color_discrete_sequence=BLUES
                         )
                         fig.update_traces(texttemplate="%{text}%", textposition="outside")
                         fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
                         safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
-                    else:
-                        st.info("Score column missing (skipped).")
 
-                # Rubric frequency (bar + table)
                 with right:
                     if has(df, rubric_col):
                         rf = rubric_freq(df, rubric_col)
@@ -560,20 +509,14 @@ def render_page(page_name: str):
                                 rf.head(12),
                                 x="Count", y="Rubric", orientation="h",
                                 title="Rubric Frequency (Top 12)",
-                                color_discrete_sequence=[BRAND_PURPLE]
+                                color_discrete_sequence=[BLUES[2]]
                             )
                             safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
-
                             with st.expander("See full rubric table"):
                                 st.dataframe(rf, use_container_width=True)
-                        else:
-                            st.info("Rubric has no values (skipped).")
-                    else:
-                        st.info("Rubric column missing (skipped).")
 
                 st.divider()
 
-            # Heatmap (Score % by question)
             st.markdown("### Heatmap (Score % by Question)")
             try:
                 h = section_heatmap(df, section, q_titles)
@@ -585,14 +528,9 @@ def render_page(page_name: str):
                         color_continuous_scale=HEAT_SCALE
                     )
                     safe_plot(fig, key=f"{page_name}-{section}-heatmap")
-                else:
-                    st.info("Heatmap skipped (missing Qn columns or no values).")
             except Exception:
-                st.info("Heatmap skipped.")
+                pass
 
-    # ======================
-    # OVERALL TAB
-    # ======================
     with tabs[-1]:
         st.subheader("Overall")
 
@@ -622,19 +560,15 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # Overall Total distribution
         if has(df, overall_total):
             fig = px.histogram(
                 df, x=overall_total,
                 title="Overall Total Distribution",
-                color_discrete_sequence=[BRAND_ORANGE]
+                color_discrete_sequence=[BLUES[0]]
             )
             fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-totaldist")
-        else:
-            st.info("Overall Total not available (skipped).")
 
-        # Overall Rank distribution (bar)
         if has(df, overall_rank):
             r = _clean_series(df[overall_rank])
             if len(r):
@@ -643,21 +577,13 @@ def render_page(page_name: str):
                 fig = px.bar(
                     r_df, x="Rank", y="Count",
                     title="Overall Rank Distribution",
-                    color="Rank", color_discrete_sequence=DISCRETE_SEQ
+                    color="Rank", color_discrete_sequence=BLUES
                 )
                 fig.update_layout(xaxis_title="", yaxis_title="Count")
                 safe_plot(fig, key=f"{page_name}-overall-rankbar")
 
-                with st.expander("See Overall Rank table"):
-                    st.dataframe(r_df, use_container_width=True)
-            else:
-                st.info("Overall Rank has no values (skipped).")
-        else:
-            st.info("Overall Rank not available (skipped).")
-
         st.divider()
 
-        # AI flag: donut only when EXACTLY 2 categories, else bar
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
@@ -670,7 +596,7 @@ def render_page(page_name: str):
                         fig = px.pie(
                             ai_df, names="AI_Flag", values="Count", hole=0.55,
                             title="AI Flag (Donut)",
-                            color_discrete_sequence=[BRAND_ORANGE, BRAND_PURPLE]
+                            color_discrete_sequence=[BLUES[0], BLUES[3]]
                         )
                         safe_plot(fig, key=f"{page_name}-overall-ai-donut")
                     with right:
@@ -679,21 +605,16 @@ def render_page(page_name: str):
                     fig = px.bar(
                         ai_df, x="AI_Flag", y="Count",
                         title="AI Flag Distribution",
-                        color="AI_Flag", color_discrete_sequence=DISCRETE_SEQ
+                        color="AI_Flag", color_discrete_sequence=BLUES
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
                     safe_plot(fig, key=f"{page_name}-overall-ai-bar")
-            else:
-                st.info("AI flag exists but no values (skipped).")
-        else:
-            st.info("AI flag column not available (skipped).")
 
-        # AI_MaxScore distribution (if present)
         if ai_maxscore_col and has(df, ai_maxscore_col):
             fig = px.histogram(
                 df, x=ai_maxscore_col,
                 title="AI_MaxScore Distribution",
-                color_discrete_sequence=[BRAND_PURPLE]
+                color_discrete_sequence=[BLUES[2]]
             )
             fig.update_layout(xaxis_title="AI_MaxScore", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
@@ -705,12 +626,7 @@ def main():
     inject_css()
     st.title("ANALYTICS DASHBOARD")
 
-    page = st.sidebar.radio(
-        "Dashboard Pages",
-        list(PAGES.keys()),
-        index=0
-    )
-
+    page = st.sidebar.radio("Dashboard Pages", list(PAGES.keys()), index=0)
     render_page(page)
 
 if __name__ == "__main__":
