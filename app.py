@@ -37,19 +37,36 @@ html, body, [data-testid="stAppViewContainer"]{
 header, [data-testid="stHeader"], [data-testid="stToolbar"], footer{ display:none !important; }
 </style>
 """, unsafe_allow_html=True)
-# ✅ KEEP SIDEBAR TOGGLE ALWAYS VISIBLE (so you can reopen sidebar after expand)
+# ✅ KEEP SIDEBAR TOGGLE ALWAYS VISIBLE (works across Streamlit versions)
 st.markdown("""
 <style>
-/* Streamlit's sidebar reopen button */
-[data-testid="collapsedControl"]{
+/* Match ALL common Streamlit sidebar toggle buttons */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+button[title="Open sidebar"],
+button[aria-label="Open sidebar"],
+button[title="Close sidebar"],
+button[aria-label="Close sidebar"]{
   display:block !important;
+  visibility:visible !important;
+  opacity:1 !important;
   position:fixed !important;
-  top:12px;
-  left:12px;
-  z-index:999999;
+  top:12px !important;
+  left:12px !important;
+  z-index:999999 !important;
+}
+
+/* Also ensure the sidebar itself isn't hidden behind your full-bleed styles */
+section[data-testid="stSidebar"]{
+  display:block !important;
+  visibility:visible !important;
+  transform:none !important;
+  margin-left:0 !important;
+  z-index:999998 !important;
 }
 </style>
 """, unsafe_allow_html=True)
+
 
 # --- No-scroll COVER (white/grey background, CARE orange accents) ---
 COVER_HTML = """
