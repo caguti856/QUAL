@@ -148,6 +148,16 @@ def main():
         if not st.session_state['user_email']:
             login.show_auth_page()
         else:
+          st.markdown("""
+          <style>
+          /* Force sidebar back on (override login.py global hide) */
+          [data-testid="stSidebar"] { 
+            display: block !important;
+            visibility: visible !important;
+          }
+          </style>
+          """, unsafe_allow_html=True)
+
             # Your sidebar navigation as before
           with st.sidebar:
                 selected = st.selectbox(
