@@ -32,7 +32,7 @@ TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 
 # Chart backgrounds (very light, but readable)
-CHART_PAPER = "#777F7B"
+CHART_PAPER = "#E8EDF1"
 CHART_PLOT = "#A7B2C9"
 
 # High-contrast blues
@@ -447,6 +447,7 @@ def render_page(page_name: str):
         df = load_sheet_df(ws_name)
     df = drop_date_duration_cols(df)
 
+    # Header cards
     cA, cB, cC = st.columns([1.2, 1.2, 1.6])
     with cA:
         card("Worksheet", ws_name, "Source: Google Sheets")
@@ -458,9 +459,9 @@ def render_page(page_name: str):
     st.write("")
     tabs = st.tabs(cfg["sections"] + ["Overall"])
 
-    # --------------------------
-    # SECTION TABS
-    # --------------------------
+    # ==========================
+    # SECTION TABS (NO SPILL)
+    # ==========================
     for i, section in enumerate(cfg["sections"]):
         with tabs[i]:
             st.subheader(section)
@@ -468,24 +469,19 @@ def render_page(page_name: str):
             avg_col = f"{section}_Avg (0–3)"
             rnk_col = f"{section}_RANK"
 
-            # ============================
-            # SECTION SUMMARY (CHART + TABLE)
-            # - Average distribution: CHART
-            # - Rank distribution: TABLE
-            # ============================
+            # Avg = chart ; Rank = table (your rule)
             t1, t2 = st.columns(2)
 
             with t1:
                 st.markdown("#### Section Average Distribution")
-
                 if has(df, avg_col):
                     s = pd.to_numeric(df[avg_col], errors="coerce").dropna()
                     if len(s):
                         avg_df = (
                             s.round(2)
-                            .value_counts()
-                            .sort_index()
-                            .reset_index()
+                             .value_counts()
+                             .sort_index()
+                             .reset_index()
                         )
                         avg_df.columns = ["Avg (0–3)", "Count"]
 
@@ -494,18 +490,9 @@ def render_page(page_name: str):
                             x="Avg (0–3)",
                             y="Count",
                             title="Average Score Distribution",
-                            color_discrete_sequence=BLUES,
+                            color_discrete_sequence=[BLUES[2]],
                         )
-                        fig.update_layout(
-                            xaxis_title="Average (0–3)",
-                            yaxis_title="Count",
-                            font=dict(color="black", size=16),
-                            title_font=dict(color="black", size=20),
-                            plot_bgcolor="#F7F7FD",
-                            paper_bgcolor="#F9F6F4",
-                        )
-                        fig.update_xaxes(tickfont=dict(color="black", size=14))
-                        fig.update_yaxes(tickfont=dict(color="black", size=14))
+                        fig.update_layout(xaxis_title="Average (0–3)", yaxis_title="Count")
                         safe_plot(fig, key=f"{page_name}-{section}-avg-chart")
                     else:
                         st.info("No average values.")
@@ -514,21 +501,13 @@ def render_page(page_name: str):
 
             with t2:
                 st.markdown("#### Section Rank Distribution (Table)")
-
                 if has(df, rnk_col):
                     r = _clean_series(df[rnk_col])
                     if len(r):
                         r_tbl = r.value_counts().reset_index()
                         r_tbl.columns = ["Rank", "Count"]
-
-                        # add percent for readability
                         r_tbl["Percent"] = (r_tbl["Count"] / r_tbl["Count"].sum() * 100).round(1)
-
-                        st.dataframe(
-                            r_tbl,
-                            use_container_width=True,
-                            hide_index=True,
-                        )
+                        st.dataframe(r_tbl, use_container_width=True, hide_index=True)
                     else:
                         st.info("No rank values.")
                 else:
@@ -536,102 +515,77 @@ def render_page(page_name: str):
 
             st.divider()
 
-        # ============================
-        # Qn blocks (Charts + Tables)
-        # ============================
-        q_titles = cfg.get("question_titles", {}).get(section, [])
+            # Qn blocks (inside this tab only)
+            q_titles = cfg.get("question_titles", {}).get(section, [])
 
-        for qn in range(1, 5):
-            score_col  = f"{section}_Qn{qn}"
-            rubric_col = f"{section}_Rubric_Qn{qn}"
+            for qn in range(1, 5):
+                score_col  = f"{section}_Qn{qn}"
+                rubric_col = f"{section}_Rubric_Qn{qn}"
 
-            if (not has(df, score_col)) and (not has(df, rubric_col)):
-                continue
+                if (not has(df, score_col)) and (not has(df, rubric_col)):
+                    continue
 
-            title = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
-            st.markdown(f"### {title}")
+                title = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
+                st.markdown(f"### {title}")
 
-            left, right = st.columns(2)
+                left, right = st.columns(2)
 
-            # ---- SCORE (Chart + Table)
-            with left:
-                if has(df, score_col):
-                    d = score_dist(df, score_col)
-
-                    fig = px.bar(
-                        d,
-                        x="Score",
-                        y="Percent",
-                        text="Percent",
-                        title="Score Distribution (%)",
-                        color="Score",
-                        color_discrete_sequence=BLUES,
-                    )
-                    fig.update_traces(texttemplate="%{text}%", textposition="outside")
-                    fig.update_layout(
-                        yaxis_title="Percent",
-                        xaxis_title="Score (0–3)",
-                        font=dict(color="black", size=16),
-                        title_font=dict(color="black", size=20),
-                        plot_bgcolor="#F7F7FD",
-                        paper_bgcolor="#F9F6F4",
-                    )
-                    fig.update_xaxes(tickfont=dict(color="black", size=14))
-                    fig.update_yaxes(tickfont=dict(color="black", size=14))
-                    safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
-
-                    st.markdown("**Score Table**")
-                    st.dataframe(
-                        d[["Score", "Count", "Percent"]],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                else:
-                    st.info("Score column missing.")
-
-            # ---- RUBRIC (Chart + Table)
-            with right:
-                if has(df, rubric_col):
-                    rf = rubric_freq(df, rubric_col)
-                    if len(rf):
+                # Score: chart + table
+                with left:
+                    if has(df, score_col):
+                        d = score_dist(df, score_col)
                         fig = px.bar(
-                            rf.head(12),
-                            x="Count",
-                            y="Rubric",
-                            orientation="h",
-                            title="Rubric Frequency (Top 12)",
-                            color_discrete_sequence=[BLUES[1]],
+                            d,
+                            x="Score",
+                            y="Percent",
+                            text="Percent",
+                            title="Score Distribution (%)",
+                            color="Score",
+                            color_discrete_sequence=BLUES,
                         )
-                        fig.update_layout(
-                            xaxis_title="Count",
-                            yaxis_title="",
-                            font=dict(color="black", size=16),
-                            title_font=dict(color="black", size=20),
-                            plot_bgcolor="#F7F7FD",
-                            paper_bgcolor="#F9F6F4",
-                        )
-                        fig.update_xaxes(tickfont=dict(color="black", size=14))
-                        fig.update_yaxes(tickfont=dict(color="black", size=14))
-                        safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
+                        fig.update_traces(texttemplate="%{text}%", textposition="outside")
+                        fig.update_layout(yaxis_title="Percent", xaxis_title="Score (0–3)")
+                        safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-score")
 
-                        with st.expander("Full rubric table"):
-                            st.dataframe(rf, use_container_width=True, hide_index=True)
+                        st.markdown("**Score Table**")
+                        st.dataframe(d[["Score", "Count", "Percent"]], use_container_width=True, hide_index=True)
                     else:
-                        st.info("Rubric has no values.")
-                else:
-                    st.info("Rubric column missing.")
+                        st.info("Score column missing.")
 
-            st.divider()
+                # Rubric: chart + expander table
+                with right:
+                    if has(df, rubric_col):
+                        rf = rubric_freq(df, rubric_col)
+                        if len(rf):
+                            fig = px.bar(
+                                rf.head(12),
+                                x="Count",
+                                y="Rubric",
+                                orientation="h",
+                                title="Rubric Frequency (Top 12)",
+                                color_discrete_sequence=[BLUES[1]],
+                            )
+                            safe_plot(fig, key=f"{page_name}-{section}-qn{qn}-rubricbar")
 
-            # Heatmap (chart ok)
+                            with st.expander("Full rubric table"):
+                                st.dataframe(rf, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Rubric has no values.")
+                    else:
+                        st.info("Rubric column missing.")
+
+                st.divider()
+
+            # Heatmap ONCE per section
             st.markdown("### Heatmap (Score % by Question)")
             try:
                 h = section_heatmap(df, section, q_titles)
                 if not h.empty:
                     fig = px.imshow(
-                        h, labels=dict(x="Score", y="Question", color="%"),
+                        h,
+                        labels=dict(x="Score", y="Question", color="%"),
                         title=f"{section} Heatmap",
-                        color_continuous_scale=HEAT_SCALE
+                        color_continuous_scale=HEAT_SCALE,
                     )
                     safe_plot(fig, key=f"{page_name}-{section}-heatmap")
                 else:
@@ -639,9 +593,9 @@ def render_page(page_name: str):
             except Exception:
                 st.info("Heatmap skipped.")
 
-    # --------------------------
+    # ==========================
     # OVERALL TAB
-    # --------------------------
+    # ==========================
     with tabs[-1]:
         st.subheader("Overall")
 
@@ -650,7 +604,7 @@ def render_page(page_name: str):
         ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected"])
         ai_maxscore_col = first_existing(df, [cfg.get("ai_maxscore_col"), "AI_MaxScore"])
 
-        # Cards
+        # Overall cards
         c1, c2, c3, c4 = st.columns(4)
         if has(df, overall_total):
             tot = pd.to_numeric(df[overall_total], errors="coerce")
@@ -670,13 +624,10 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # Overall Total chart + table
+        # Overall Total: chart + summary table
         if has(df, overall_total):
-            fig = px.histogram(
-                df, x=overall_total,
-                title="Overall Total Distribution",
-                color_discrete_sequence=[BLUES[0]]
-            )
+            fig = px.histogram(df, x=overall_total, title="Overall Total Distribution",
+                               color_discrete_sequence=[BLUES[2]])
             fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-totaldist")
 
@@ -698,6 +649,7 @@ def render_page(page_name: str):
             if len(r):
                 r_df = r.value_counts().reset_index()
                 r_df.columns = ["Rank", "Count"]
+
                 fig = px.bar(
                     r_df, x="Rank", y="Count",
                     title="Overall Rank Distribution",
@@ -711,7 +663,7 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # AI: donut only if exactly 2 categories; else bar + table
+        # AI Flag: donut ONLY if exactly 2 categories; else bar + table
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
@@ -724,7 +676,7 @@ def render_page(page_name: str):
                         fig = px.pie(
                             ai_df, names="AI_Flag", values="Count", hole=0.55,
                             title="AI Flag (Donut)",
-                            color_discrete_sequence=[BLUES[0], BLUES[3]]
+                            color_discrete_sequence=[BLUES[2], BLUES[0]]
                         )
                         safe_plot(fig, key=f"{page_name}-overall-ai-donut")
                     with right:
@@ -742,13 +694,10 @@ def render_page(page_name: str):
                     st.markdown("**AI Flag Table**")
                     st.dataframe(ai_df, use_container_width=True, hide_index=True)
 
-        # AI_MaxScore distribution
+        # AI_MaxScore
         if ai_maxscore_col and has(df, ai_maxscore_col):
-            fig = px.histogram(
-                df, x=ai_maxscore_col,
-                title="AI_MaxScore Distribution",
-                color_discrete_sequence=[BLUES[1]]
-            )
+            fig = px.histogram(df, x=ai_maxscore_col, title="AI_MaxScore Distribution",
+                               color_discrete_sequence=[BLUES[1]])
             fig.update_layout(xaxis_title="AI_MaxScore", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
 
