@@ -31,6 +31,10 @@ MUTED = "rgba(0,0,0,0.70)"
 BLA="#090015"
 CHART_PAPER = "#313132"
 CHART_PLOT  = "#D7D6D4"
+METRIC_LABEL_SIZE = 26
+METRIC_VALUE_SIZE = 22
+METRIC_LABEL_COLOR = "#090015"   # example: your BLA (dark)
+METRIC_VALUE_COLOR = "#F4D7D7"   # example: your TEXT
 
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
 HEAT_SCALE = [
@@ -56,7 +60,7 @@ def inject_css():
         /* Global text */
         html, body, [class*="css"] {{
             color: {TEXT} !important;
-            font-size: 20 !important;
+            font-size: 20px !important;
         }}
 
         /* Headings */
@@ -139,30 +143,25 @@ def inject_css():
             background: {CARD_BG};
         }}
 
-        /* Metric label (e.g., Mean Total) */
+        /* Metric label (Mean Total etc.) */
         div[data-testid="stMetricLabel"] > div {{
-            font-size: 36px !important;
-            color:{CARD_BG} !important;  
+            font-size: {METRIC_LABEL_SIZE}px !important;
+            color: {METRIC_LABEL_COLOR} !important;
             font-weight: 800 !important;
         }}
 
-        /* Metric value (e.g., 8.3) */
-        div[data-testid="stMetricValue"] {{
-            font-size: 20px !important;               
-            color: {CARD_BG} !important;                 
+        /* Metric value (13.4 etc.) */
+        div[data-testid="stMetricValue"] > div {{
+            font-size: {METRIC_VALUE_SIZE}px !important;
+            color: {METRIC_VALUE_COLOR} !important;
             font-weight: 900 !important;
         }}
-
-        /* Metric delta (if you ever use it) */
-        div[data-testid="stMetricDelta"] {{
-            font-size: 32px !important;
-            color:{ TEXT} !important;
-        }}
-
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
 
 def card(title: str, value: str, sub: str = ""):
     st.markdown(
