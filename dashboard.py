@@ -72,7 +72,7 @@ def inject_css():
             color: {TEXT} !important;
         }}
         h3 {{
-            font-size: 22px !important;
+            font-size: 20px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
         }}
@@ -125,7 +125,7 @@ def inject_css():
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {CARD_BG} !important;
-            font-size: 28px !important;
+            font-size: 20px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 4px solid {BLUES[0]} !important;
