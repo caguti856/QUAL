@@ -115,7 +115,7 @@ def inject_css():
             line-height: 1.05;
         }}
         .card-sub {{
-            font-size: 30px !important;
+            font-size: 24px !important;
             color: {TEXT} !important;
             opacity: .85;
             margin-top: 6px;
@@ -125,10 +125,10 @@ def inject_css():
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {CARD_BG} !important;
-            font-size: 36px !important;
+            font-size: 28px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom: 8px solid {BLUES[0]} !important;
+            border-bottom: 4px solid {BLUES[0]} !important;
         }}
 
         /* Dataframes */
