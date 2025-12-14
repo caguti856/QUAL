@@ -489,7 +489,7 @@ def render_page(page_name: str):
         staff_ids = sorted(staff_ids, key=lambda x: (len(str(x)), str(x)))
 
         with st.sidebar:
-            selected_staff = st.selectbox("CARE Staff ID", ["All"] + list(staff_ids), index=0)
+            selected_staff = st.multiselect("CARE Staff ID", ["All"] + list(staff_ids), index=0)
 
         if selected_staff != "All":
             df = df[df[sid_col].astype(str) == str(selected_staff)]
