@@ -1,10 +1,12 @@
 # dashboard.py
 # ------------------------------------------------------------
 # Keeps your exact theme colors + layout rules
-# Removes staff filter (no multiselect)
-# Adds "Individual Profile" tab (select ONE staff and see charts)
+# Removes staff multiselect filter from the main dashboard
+# Adds "Individual Profile" tab:
+#   - Select ONE staff and see their own charts/tables only
+#   - Does NOT affect the overall/section tabs
 # Avoids tab spill: everything stays inside its tab
-# Unique keys for charts
+# Unique keys for plotly charts (avoids DuplicateElementId)
 # ------------------------------------------------------------
 
 import pandas as pd
@@ -34,7 +36,7 @@ CHART_PLOT = "#D7D6D4"
 METRIC_LABEL_SIZE = 26
 METRIC_VALUE_SIZE = 22
 METRIC_LABEL_COLOR = BLA
-METRIC_VALUE_COLOR = CARD_BG  # keep as you had (orange); change if you want
+METRIC_VALUE_COLOR = CARD_BG  # keep as you had
 
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
 HEAT_SCALE = [
@@ -146,14 +148,14 @@ def inject_css():
             background: {CARD_BG};
         }}
 
-        /* Metric label (Mean Total etc.) */
+        /* Metric label */
         div[data-testid="stMetricLabel"] > div {{
             font-size: {METRIC_LABEL_SIZE}px !important;
             color: {METRIC_LABEL_COLOR} !important;
             font-weight: 800 !important;
         }}
 
-        /* Metric value (13.4 etc.) */
+        /* Metric value */
         div[data-testid="stMetricValue"] > div {{
             font-size: {METRIC_VALUE_SIZE}px !important;
             color: {METRIC_VALUE_COLOR} !important;
@@ -163,7 +165,6 @@ def inject_css():
         """,
         unsafe_allow_html=True,
     )
-
 
 def card(title: str, value: str, sub: str = ""):
     st.markdown(
@@ -428,18 +429,15 @@ def safe_plot(fig, key: str):
 def staff_id_column(df: pd.DataFrame) -> str | None:
     candidates = [
         "Care_Staff",
-        "CARE Staff id",
-        "CARE Staff ID",
-        "CARE_Staff_ID",
-        "Staff ID",
-        "StaffID",
-        "Staff Id",
-        "CAREStaffID",
+        "CARE Staff id", "CARE Staff Id", "CARE Staff ID",
+        "CARE_Staff_ID", "CAREStaffID",
+        "Staff ID", "Staff Id", "StaffID",
+        "staff_id", "care_staff_id", "care staff id",
     ]
     return first_existing(df, candidates)
 
 # ==============================
-# TABLE + METRICS
+# TABLE + METRICS HELPERS
 # ==============================
 def top_value(series: pd.Series) -> tuple[str, int]:
     s = _clean_series(series)
@@ -465,7 +463,8 @@ def rubric_freq(df: pd.DataFrame, col: str) -> pd.DataFrame:
     out.columns = ["Rubric", "Count"]
     return out
 
-def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.DataFrame:
+def section_heatmap_percent(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.DataFrame:
+    # this is your original heatmap: % distribution by score for each question
     rows = []
     for qn in range(1, 5):
         col = f"{section}_Qn{qn}"
@@ -485,6 +484,57 @@ def section_heatmap(df: pd.DataFrame, section: str, q_titles: list[str]) -> pd.D
     return pd.DataFrame(rows).set_index("Question")
 
 # ==============================
+# INDIVIDUAL PROFILE BUILDERS
+# ==============================
+def build_individual_section_totals(df_staff: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    # Prefer section totals if present, else fall back to Avg * 4
+    out = []
+    for section in cfg["sections"]:
+        # try find a totals column if your sheet has one
+        total_candidates = [
+            f"{section}_Total",
+            f"{section}_TOTAL",
+            f"{section} Total",
+            f"{section} TOTAL",
+        ]
+        total_col = first_existing(df_staff, total_candidates)
+        avg_col = f"{section}_Avg (0–3)"
+
+        val = None
+        if total_col and has(df_staff, total_col):
+            s = pd.to_numeric(df_staff[total_col], errors="coerce").dropna()
+            if len(s):
+                val = float(s.mean())
+        elif has(df_staff, avg_col):
+            s = pd.to_numeric(df_staff[avg_col], errors="coerce").dropna()
+            if len(s):
+                val = float(s.mean() * 4)  # 4 questions per section
+
+        if val is not None:
+            out.append({"Section": section, "Section Total (0–12)": val})
+
+    return pd.DataFrame(out)
+
+def build_individual_question_scores(df_staff: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    rows = []
+    for section in cfg["sections"]:
+        q_titles = cfg.get("question_titles", {}).get(section, [])
+        for qn in range(1, 5):
+            score_col = f"{section}_Qn{qn}"
+            if not has(df_staff, score_col):
+                continue
+            vals = pd.to_numeric(df_staff[score_col], errors="coerce").dropna()
+            if not len(vals):
+                continue
+            qname = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
+            rows.append({
+                "Section": section,
+                "Question": qname,
+                "Score (0–3)": float(vals.mean()),
+            })
+    return pd.DataFrame(rows)
+
+# ==============================
 # RENDER ONE PAGE
 # ==============================
 def render_page(page_name: str):
@@ -495,13 +545,13 @@ def render_page(page_name: str):
         df = load_sheet_df(ws_name)
     df = drop_date_duration_cols(df)
 
-    # Sidebar (no staff filter anymore)
+    # Sidebar (no staff filter for the whole dashboard)
     with st.sidebar:
         st.markdown("## Dashboard")
-        st.caption("No staff filter here — all visuals show the full dataset.")
+        st.caption("Overall tabs show the full dataset. Individual Profile is filtered separately.")
         st.markdown("---")
 
-    # Header cards (2, balanced)
+    # Header cards (2)
     cA, cB = st.columns(2)
     with cA:
         card("SECTION", ws_name, "")
@@ -509,10 +559,12 @@ def render_page(page_name: str):
         card("Overall Responses", f"{len(df):,}", "")
 
     st.write("")
+
+    # Tabs: keep all section tabs + overall + individual profile
     tabs = st.tabs(cfg["sections"] + ["Overall Analysis", "Individual Profile"])
 
     # ==========================
-    # SECTION TABS
+    # SECTION TABS (unchanged)
     # ==========================
     for i, section in enumerate(cfg["sections"]):
         with tabs[i]:
@@ -560,7 +612,7 @@ def render_page(page_name: str):
 
             st.divider()
 
-            # Question blocks
+            # Qn blocks
             q_titles = cfg.get("question_titles", {}).get(section, [])
 
             for qn in range(1, 5):
@@ -622,7 +674,7 @@ def render_page(page_name: str):
             # Heatmap once per section
             st.markdown("### Heatmap (Score % by Question)")
             try:
-                h = section_heatmap(df, section, q_titles)
+                h = section_heatmap_percent(df, section, q_titles)
                 if not h.empty:
                     fig = px.imshow(
                         h,
@@ -637,7 +689,7 @@ def render_page(page_name: str):
                 st.info("Heatmap skipped.")
 
     # ==========================
-    # OVERALL ANALYSIS TAB
+    # OVERALL ANALYSIS TAB (unchanged)
     # ==========================
     with tabs[-2]:
         st.subheader("Overall Analysis")
@@ -742,14 +794,15 @@ def render_page(page_name: str):
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
 
     # ==========================
-    # INDIVIDUAL PROFILE TAB
+    # INDIVIDUAL PROFILE TAB (filtered ONLY here)
     # ==========================
     with tabs[-1]:
-        st.subheader("Individual Profile")
+        st.subheader("Individual Profile (Filter affects ONLY this tab)")
 
         sid_col = staff_id_column(df)
         if not sid_col:
-            st.info("No Staff ID column found on this sheet, so individual profile can't be shown.")
+            st.info("No Staff ID column found on this sheet. Add your staff column name to staff_id_column().")
+            st.write("Columns found:", list(df.columns))
             return
 
         staff_ids = (
@@ -766,64 +819,69 @@ def render_page(page_name: str):
             key=f"{page_name}-profile-staff",
         )
 
+        # FILTER ONLY HERE
         df_staff = df[df[sid_col].astype(str) == str(selected_staff)].copy()
 
         overall_total = cfg["overall_total_col"]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Staff ID", str(selected_staff))
-        c2.metric("Rows found", f"{len(df_staff):,}")
+        overall_rank = cfg["overall_rank_col"]
+
+        # Top metrics for that staff
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Staff ID", str(selected_staff))
+        m2.metric("Rows found", f"{len(df_staff):,}")
 
         if has(df_staff, overall_total):
             tot = pd.to_numeric(df_staff[overall_total], errors="coerce").dropna()
-            c3.metric("Overall Total (sum)", f"{tot.sum():.1f}" if len(tot) else "-")
+            m3.metric("Overall Total (Average)", f"{tot.mean():.1f}" if len(tot) else "-")
+            m4.metric("Overall Total (Sum)", f"{tot.sum():.1f}" if len(tot) else "-")
         else:
-            c3.metric("Overall Total (sum)", "-")
-
+            m3.metric("Overall Total (Average)", "-")
+            m4.metric("Overall Total (Sum)", "-")
 
         st.divider()
 
-        # Section averages profile
-        section_rows = []
-        for section in cfg["sections"]:
-            avg_col = f"{section}_Avg (0–3)"
-            if has(df_staff, avg_col):
-                vals = pd.to_numeric(df_staff[avg_col], errors="coerce").dropna()
-                if len(vals):
-                    section_rows.append({"Section": section, "Avg (0–3)": float(vals.mean())})
+        # Individual: overall rank (if present)
+        if has(df_staff, overall_rank):
+            r = _clean_series(df_staff[overall_rank])
+            if len(r):
+                st.markdown("#### This Staff: Overall Rank(s) found")
+                r_tbl = r.value_counts().reset_index()
+                r_tbl.columns = ["Rank", "Count"]
+                st.dataframe(r_tbl, use_container_width=True, hide_index=True)
 
-        if section_rows:
-            prof = pd.DataFrame(section_rows).sort_values("Avg (0–3)", ascending=False)
+        st.divider()
+
+        # (A) Individual section totals (preferred) — shown as chart + table
+        st.markdown("### Section Performance (Totals)")
+        sec_tot = build_individual_section_totals(df_staff, cfg)
+
+        if len(sec_tot):
+            sec_tot = sec_tot.sort_values("Section Total (0–12)", ascending=False)
+
             fig = px.bar(
-                prof,
+                sec_tot,
                 x="Section",
-                y="Avg (0–3)",
-                title="Section Averages for Selected Staff",
-                text="Avg (0–3)",
+                y="Section Total (0–12)",
+                title="Section Totals (Selected Staff)",
+                text="Section Total (0–12)",
             )
             fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-            fig.update_layout(xaxis_title="", yaxis_title="Average (0–3)")
-            safe_plot(fig, key=f"{page_name}-profile-section-avg")
+            fig.update_layout(xaxis_title="", yaxis_title="Total (0–12)")
+            safe_plot(fig, key=f"{page_name}-profile-section-totals")
+
+            st.markdown("**Section Totals Table**")
+            st.dataframe(sec_tot, use_container_width=True, hide_index=True)
         else:
-            st.info("No section average columns found for this staff on this sheet.")
+            st.info("No section totals/avg columns found for this staff on this sheet.")
 
         st.divider()
 
-        # Question heatmap profile
-        q_rows = []
-        for section in cfg["sections"]:
-            q_titles = cfg.get("question_titles", {}).get(section, [])
-            for qn in range(1, 5):
-                score_col = f"{section}_Qn{qn}"
-                if has(df_staff, score_col):
-                    vals = pd.to_numeric(df_staff[score_col], errors="coerce").dropna()
-                    if len(vals):
-                        label = q_titles[qn - 1] if (q_titles and len(q_titles) >= qn) else f"Qn{qn}"
-                        q_rows.append({"Section": section, "Question": label, "Score": float(vals.mean())})
+        # (B) Individual question scores heatmap + table
+        st.markdown("### Question-Level Profile")
+        qdf = build_individual_question_scores(df_staff, cfg)
 
-        if q_rows:
-            qdf = pd.DataFrame(q_rows)
-            pivot = qdf.pivot_table(index="Section", columns="Question", values="Score", aggfunc="mean")
-
+        if len(qdf):
+            pivot = qdf.pivot_table(index="Section", columns="Question", values="Score (0–3)", aggfunc="mean")
             fig = px.imshow(
                 pivot,
                 title="Question Scores Heatmap (Selected Staff)",
@@ -833,7 +891,7 @@ def render_page(page_name: str):
             )
             safe_plot(fig, key=f"{page_name}-profile-q-heatmap")
 
-            with st.expander("Show profile table"):
+            with st.expander("Show question-level table"):
                 st.dataframe(qdf, use_container_width=True, hide_index=True)
         else:
             st.info("No question score columns found for this staff on this sheet.")
