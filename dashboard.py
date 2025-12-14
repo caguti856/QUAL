@@ -26,7 +26,7 @@ APP_BG = "#E5C7AB"       # your "grey" background choice
 CARD_BG = "#EB7100"      # your card color choice
 BORDER = "rgba(0,0,0,0.12)"
 CT ="#D8D5E9"
-TEXT = "#F4D7D7"
+TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 BLA="#090015"
 CHART_PAPER = "#313132"
@@ -34,7 +34,7 @@ CHART_PLOT  = "#D7D6D4"
 METRIC_LABEL_SIZE = 26
 METRIC_VALUE_SIZE = 22
 METRIC_LABEL_COLOR = "#090015"   # example: your BLA (dark)
-METRIC_VALUE_COLOR = "#F4D7D7"   # example: your TEXT
+METRIC_VALUE_COLOR = "#EB7100"   # example: your TEXT
 
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
 HEAT_SCALE = [
