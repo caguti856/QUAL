@@ -28,7 +28,7 @@ BORDER = "rgba(0,0,0,0.12)"
 CT ="#241E4E"
 TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
-
+BLA="#090015"
 CHART_PAPER = "#313132"
 CHART_PLOT  = "#D7D6D4"
 
@@ -56,7 +56,7 @@ def inject_css():
         /* Global text */
         html, body, [class*="css"] {{
             color: {TEXT} !important;
-            font-size: 18 !important;
+            font-size: 20 !important;
         }}
 
         /* Headings */
@@ -72,12 +72,12 @@ def inject_css():
             color: {TEXT} !important;
         }}
         h3 {{
-            font-size: 18px !important;
+            font-size: 20px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
         }}
         h4 {{
-            font-size: 16px !important;
+            font-size: 20px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
         }}
@@ -100,7 +100,7 @@ def inject_css():
             box-shadow: 0 10px 22px rgba(0,0,0,0.06);
         }}
         .card-title {{
-            font-size: 12px !important;
+            font-size: 28px !important;
             letter-spacing: .45px;
             text-transform: uppercase;
             font-weight: 900;
@@ -124,8 +124,8 @@ def inject_css():
         /* Tabs */
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
-            color: {CARD_BG} !important;
-            font-size: 18px !important;
+            color: {BLA} !important;
+            font-size: 20px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 4px solid {BLUES[0]} !important;
