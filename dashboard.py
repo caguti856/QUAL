@@ -141,8 +141,8 @@ def inject_css():
 
         /* Metric label (e.g., Mean Total) */
         div[data-testid="stMetricLabel"] > div {{
-            font-size: 36px !important;
-            color:{CARD_BG} !important;  
+            font-size: 40px !important;
+            color:{BLA} !important;  
             font-weight: 800 !important;
         }}
 
@@ -156,7 +156,7 @@ def inject_css():
         /* Metric delta (if you ever use it) */
         div[data-testid="stMetricDelta"] {{
             font-size: 32px !important;
-            color:{ TEXT} !important;
+            color:{ BLA} !important;
         }}
 
         </style>
