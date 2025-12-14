@@ -33,7 +33,7 @@ MUTED = "rgba(0,0,0,0.70)"
 
 # Chart backgrounds (very light, but readable)
 CHART_PAPER = "#ABABAC"
-CHART_PLOT = "#595A5C"
+CHART_PLOT = "#0D1015"
 
 # High-contrast blues
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
@@ -124,7 +124,7 @@ def inject_css():
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {TEXT} !important;
-            font-size: 15px !important;
+            font-size: 32px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 4px solid {BLUES[0]} !important;
