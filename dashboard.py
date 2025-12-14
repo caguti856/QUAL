@@ -123,7 +123,7 @@ def inject_css():
         /* Tabs: readable */
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
-            color: {TEXT} !important;
+            color: {CARD_BG} !important;
             font-size: 32px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
@@ -453,8 +453,7 @@ def render_page(page_name: str):
         card("Worksheet", ws_name, "Source: Google Sheets")
     with cB:
         card("Rows", f"{len(df):,}", "Total responses")
-    with cC:
-        card("Columns", f"{len(df.columns):,}", "Dates/duration removed")
+    
 
     st.write("")
     tabs = st.tabs(cfg["sections"] + ["Overall"])
