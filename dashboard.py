@@ -32,7 +32,7 @@ TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 
 # Chart backgrounds (very light, but readable)
-CHART_PAPER = "#EBE5FA"
+CHART_PAPER = "#020103"
 CHART_PLOT = "#0D1015"
 
 # High-contrast blues
