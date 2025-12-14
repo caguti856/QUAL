@@ -207,7 +207,7 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–21)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",
+        "ai_col": "AI Suspected",
         "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {
             "Locally Anchored Visioning": [
@@ -260,7 +260,7 @@ PAGES = {
         "sections": ["Learning Agility", "Digital Savvy", "Innovation", "Contextual Intelligence"],
         "overall_total_col": "Overall Total (0–12)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",
+        "ai_col": "AI Suspected",
         "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {
             "Learning Agility": [
@@ -304,7 +304,7 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",
+        "ai_col": "AI Suspected",
         "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {},
     },
@@ -323,7 +323,7 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",
+        "ai_col": "AI Suspected",
         "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {},
     },
@@ -342,7 +342,7 @@ PAGES = {
         ],
         "overall_total_col": "Overall Total (0–24)",
         "overall_rank_col": "Overall Rank",
-        "ai_col": "AI_Suspected",
+        "ai_col": "AI Suspected",
         "ai_maxscore_col": "AI_MaxScore",
         "question_titles": {},
     },
@@ -535,13 +535,13 @@ def render_page(page_name: str):
     # Header cards (only 2, balanced)
     cA, cB = st.columns(2)
     with cA:
-        sub = f"Staff: {selected_staff}" if selected_staff != "All" else "Staff: All"
-        card("Worksheet", ws_name, sub)
+        sub = f"Staff: {selected_staff}" if selected_staff != "All" else ""
+        card("SECTION", ws_name, sub)
     with cB:
-        card("Rows", f"{len(df):,}", "Total responses (after filters)")
+        card("Total Responses", f"{len(df):,}")
 
     st.write("")
-    tabs = st.tabs(cfg["sections"] + ["Overall"])
+    tabs = st.tabs(cfg["sections"] + ["SUMMARY"])
 
     # ==========================
     # SECTION TABS (NO SPILL)
