@@ -25,7 +25,7 @@ st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 APP_BG = "#E5C7AB"       # your "grey" background choice
 CARD_BG = "#EB7100"      # your card color choice
 BORDER = "rgba(0,0,0,0.12)"
-
+CT ="#241E4E"
 TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 
@@ -111,7 +111,7 @@ def inject_css():
         .card-value {{
             font-size: 26px !important;
             font-weight: 900;
-            color: {TEXT} !important;
+            color: {CT} !important;
             line-height: 1.05;
         }}
         .card-sub {{
@@ -138,6 +138,27 @@ def inject_css():
             border: 1px solid {BORDER};
             background: {CARD_BG};
         }}
+
+        /* Metric label (e.g., Mean Total) */
+        div[data-testid="stMetricLabel"] > div {{
+            font-size: 18px !important;
+            color: rgba(255,255,255,0.85) !important;  /* change label colour */
+            font-weight: 800 !important;
+        }}
+
+        /* Metric value (e.g., 8.3) */
+        div[data-testid="stMetricValue"] {{
+            font-size: 20px !important;               
+            color: {TEXT} !important;                 
+            font-weight: 900 !important;
+        }}
+
+        /* Metric delta (if you ever use it) */
+        div[data-testid="stMetricDelta"] {{
+            font-size: 12px !important;
+            color: rgba(255,255,255,0.75) !important;
+        }}
+
         </style>
         """,
         unsafe_allow_html=True,
