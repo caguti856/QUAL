@@ -555,8 +555,7 @@ def render_page(page_name: str):
     # Sidebar (no global staff filter)
     with st.sidebar:
         st.markdown("## Dashboard")
-        st.caption("This view shows the full dataset. Staff selection happens inside Staff Summary / Individual Profile.")
-        st.markdown("---")
+       
 
     # Header cards (2, balanced)
     cA, cB = st.columns(2)
@@ -801,7 +800,7 @@ def render_page(page_name: str):
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
 
     # ==========================
-    # STAFF SUMMARY TAB (NEW)
+    # STAFF SUMMARY TAB 
     # ==========================
     with tabs[-2]:
         st.subheader("Staff Summary")
@@ -824,16 +823,9 @@ def render_page(page_name: str):
 
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
-                if "Overall Total (mean)" in staff_summary.columns:
-                    topn = st.slider("Top N by Overall Total (mean)", 5, 50, 15)
-                    chart_df = staff_summary.sort_values("Overall Total (mean)", ascending=False).head(topn)
-
-                    fig = px.bar(chart_df, x=sid, y="Overall Total (mean)", title="Top Staff by Overall Total (mean)")
-                    fig.update_layout(xaxis_title="", yaxis_title="Overall Total (mean)")
-                    safe_plot(fig, key=f"{page_name}-staff-summary-top-overall")
-
-    # ==========================
-    # INDIVIDUAL PROFILE TAB (NEW)
+                
+    
+    # INDIVIDUAL PROFILE TAB 
     # ==========================
     with tabs[-1]:
         st.subheader("Individual Profile")
