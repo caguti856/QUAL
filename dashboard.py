@@ -56,12 +56,12 @@ def inject_css():
         /* Global text */
         html, body, [class*="css"] {{
             color: {TEXT} !important;
-            font-size: 26px !important;
+            font-size: 18 !important;
         }}
 
         /* Headings */
         h1 {{
-            font-size: 38px !important;
+            font-size: 32px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
             letter-spacing: .2px;
@@ -72,12 +72,12 @@ def inject_css():
             color: {TEXT} !important;
         }}
         h3 {{
-            font-size: 20px !important;
+            font-size: 18px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
         }}
         h4 {{
-            font-size: 18px !important;
+            font-size: 16px !important;
             font-weight: 900 !important;
             color: {TEXT} !important;
         }}
@@ -125,7 +125,7 @@ def inject_css():
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {CARD_BG} !important;
-            font-size: 20px !important;
+            font-size: 18px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 4px solid {BLUES[0]} !important;
@@ -141,22 +141,22 @@ def inject_css():
 
         /* Metric label (e.g., Mean Total) */
         div[data-testid="stMetricLabel"] > div {{
-            font-size: 28px !important;
-            color:{CARD_BG} !important;  /* change label colour */
+            font-size: 36px !important;
+            color:{CARD_BG} !important;  
             font-weight: 800 !important;
         }}
 
         /* Metric value (e.g., 8.3) */
         div[data-testid="stMetricValue"] {{
             font-size: 20px !important;               
-            color: {CT} !important;                 
+            color: {CARD_BG} !important;                 
             font-weight: 900 !important;
         }}
 
         /* Metric delta (if you ever use it) */
         div[data-testid="stMetricDelta"] {{
-            font-size: 12px !important;
-            color: rgba(255,255,255,0.75) !important;
+            font-size: 32px !important;
+            color:{ TEXT} !important;
         }}
 
         </style>
