@@ -535,13 +535,13 @@ def render_page(page_name: str):
     # Header cards (only 2, balanced)
     cA, cB = st.columns(2)
     with cA:
-        sub = f"{selected_staff}" if selected_staff != "" else ""
+        sub = f"Staff: {selected_staff}" if selected_staff != "All" else "Staff: All"
         card("SECTION", ws_name, sub)
     with cB:
-        card("Total Responses", f"{len(df):,}","")
+        card("Overall Responses", f"{len(df):,}", "Staff Members")
 
     st.write("")
-    tabs = st.tabs(cfg["sections"] + ["OVER ALL ANALYSIS"])
+    tabs = st.tabs(cfg["sections"] + ["Overall Analysis"])
 
     # ==========================
     # SECTION TABS (NO SPILL)
