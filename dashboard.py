@@ -33,7 +33,7 @@ MUTED = "rgba(0,0,0,0.70)"
 
 # Chart backgrounds (very light, but readable)
 CHART_PAPER = "#020103"
-CHART_PLOT = "#0D1015"
+CHART_PLOT = "#FFF8EE"
 
 # High-contrast blues
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
