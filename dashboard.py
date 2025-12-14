@@ -28,7 +28,7 @@ APP_BG = "#E5C7AB"       # grey background
 CARD_BG = "#EB7100"      # white cards (clean for clients)
 BORDER = "rgba(0,0,0,0.12)"
 
-TEXT = "#141010"         
+TEXT = "#FFFFFF"         
 MUTED = "rgba(0,0,0,0.70)"
 
 # Chart backgrounds (very light, but readable)
@@ -88,7 +88,7 @@ def inject_css():
 
         /* Sidebar */
         section[data-testid="stSidebar"] {{
-            background: #FFFFFF;
+            background: #241E4E;
             border-right: 1px solid {BORDER};
         }}
 
@@ -501,8 +501,8 @@ def render_page(page_name: str):
                             yaxis_title="Count",
                             font=dict(color="black", size=16),
                             title_font=dict(color="black", size=20),
-                            plot_bgcolor="#3F3F41",
-                            paper_bgcolor="#CFDFF0",
+                            plot_bgcolor="#F7F7FD",
+                            paper_bgcolor="#F9F6F4",
                         )
                         fig.update_xaxes(tickfont=dict(color="black", size=14))
                         fig.update_yaxes(tickfont=dict(color="black", size=14))
@@ -573,8 +573,8 @@ def render_page(page_name: str):
                         xaxis_title="Score (0–3)",
                         font=dict(color="black", size=16),
                         title_font=dict(color="black", size=20),
-                        plot_bgcolor="#3F3F41",
-                        paper_bgcolor="#CFDFF0",
+                        plot_bgcolor="#F7F7FD",
+                        paper_bgcolor="#F9F6F4",
                     )
                     fig.update_xaxes(tickfont=dict(color="black", size=14))
                     fig.update_yaxes(tickfont=dict(color="black", size=14))
@@ -607,8 +607,8 @@ def render_page(page_name: str):
                             yaxis_title="",
                             font=dict(color="black", size=16),
                             title_font=dict(color="black", size=20),
-                            plot_bgcolor="#3F3F41",
-                            paper_bgcolor="#CFDFF0",
+                            plot_bgcolor="#F7F7FD",
+                            paper_bgcolor="#F9F6F4",
                         )
                         fig.update_xaxes(tickfont=dict(color="black", size=14))
                         fig.update_yaxes(tickfont=dict(color="black", size=14))
