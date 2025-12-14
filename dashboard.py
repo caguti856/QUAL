@@ -1,15 +1,13 @@
 # dashboard.py
 # ------------------------------------------------------------
-# Updates per your feedback:
-# - ONLY the SECTION distributions (Avg + Rank) are TABLES (no charts there)
-# - All text forced BLACK and readable (bigger fonts)
-# - Cleaner, client-friendly theme:
-#   * Grey app background
-#   * White chart cards
-#   * Blue charts (high-contrast)
-#   * Plot background very light (not dull), text always black
-# - Keeps: heatmaps, donut/pie (only where valid), bar/column, histograms, tables (rubric + score tables)
-# - Fixes StreamlitDuplicateElementId via unique keys for every chart
+# Updates (locked to your color codes + your layout rules):
+# - Keeps your exact theme colors: APP_BG, CARD_BG, sidebar purple, chart bg, BLUES + HEAT_SCALE
+# - Adds CARE Staff ID filter in the sidebar (optional; auto-detects common column names)
+# - Fixes "tab spill/duplication": EVERYTHING for a section stays inside that section tab
+# - Avg = chart ; Rank = table (per your rule)
+# - Score = chart + table ; Rubric = chart + full table in expander
+# - Heatmap shown once per section
+# - Unique keys for all plotly charts (avoids StreamlitDuplicateElementId)
 # ------------------------------------------------------------
 
 import pandas as pd
@@ -22,20 +20,18 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="Scoring Dashboard", layout="wide")
 
 # ==============================
-# CLEAN PROFESSIONAL THEME (readable)
+# YOUR THEME / COLORS (kept)
 # ==============================
-APP_BG = "#E5C7AB"       # grey background
-CARD_BG = "#EB7100"      # white cards (clean for clients)
+APP_BG = "#E5C7AB"       # your "grey" background choice
+CARD_BG = "#EB7100"      # your card color choice
 BORDER = "rgba(0,0,0,0.12)"
 
-TEXT = "#FFFFFF"         
+TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 
-# Chart backgrounds (very light, but readable)
 CHART_PAPER = "#020103"
-CHART_PLOT = "#FFF8EE"
+CHART_PLOT  = "#FFF8EE"
 
-# High-contrast blues
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
 HEAT_SCALE = [
     [0.00, "#073072"],
@@ -57,13 +53,13 @@ def inject_css():
             padding-top: 1.1rem;
         }}
 
-        /* Force text black + bigger */
+        /* Global text */
         html, body, [class*="css"] {{
             color: {TEXT} !important;
             font-size: 16px !important;
         }}
 
-        /* Headings: bigger + bold */
+        /* Headings */
         h1 {{
             font-size: 38px !important;
             font-weight: 900 !important;
@@ -91,6 +87,9 @@ def inject_css():
             background: #241E4E;
             border-right: 1px solid {BORDER};
         }}
+        section[data-testid="stSidebar"] * {{
+            color: {TEXT} !important;
+        }}
 
         /* Cards */
         .card {{
@@ -105,8 +104,9 @@ def inject_css():
             letter-spacing: .45px;
             text-transform: uppercase;
             font-weight: 900;
-            color: {MUTED} !important;
+            color: {TEXT} !important;
             margin-bottom: 6px;
+            opacity: .85;
         }}
         .card-value {{
             font-size: 32px !important;
@@ -116,15 +116,16 @@ def inject_css():
         }}
         .card-sub {{
             font-size: 13px !important;
-            color: {MUTED} !important;
+            color: {TEXT} !important;
+            opacity: .85;
             margin-top: 6px;
         }}
 
-        /* Tabs: readable */
+        /* Tabs */
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {CARD_BG} !important;
-            font-size: 32px !important;
+            font-size: 22px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
             border-bottom: 4px solid {BLUES[0]} !important;
@@ -170,7 +171,7 @@ SCOPES = [
 SPREADSHEET_KEY = st.secrets["GSHEETS_SPREADSHEET_KEY"]
 
 # ==============================
-# SECTION DEFINITIONS (titles only)
+# SECTION DEFINITIONS
 # ==============================
 PAGES = {
     "Thought Leadership": {
@@ -385,9 +386,35 @@ def safe_plot(fig, key: str):
         legend_font=dict(color=TEXT, size=14),
         margin=dict(l=10, r=10, t=70, b=15),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)", zeroline=False, tickfont=dict(color=TEXT, size=14))
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)", zeroline=False, tickfont=dict(color=TEXT, size=14))
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.12)",
+        zeroline=False,
+        tickfont=dict(color=TEXT, size=14),
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.12)",
+        zeroline=False,
+        tickfont=dict(color=TEXT, size=14),
+    )
     st.plotly_chart(fig, use_container_width=True, key=key)
+
+# ==============================
+# STAFF ID FILTER (optional)
+# ==============================
+def staff_id_column(df: pd.DataFrame) -> str | None:
+    candidates = [
+        "Care_Staff",
+        "CARE Staff id",
+        "CARE Staff ID",
+        "CARE_Staff_ID",
+        "Staff ID",
+        "StaffID",
+        "Staff Id",
+        "CAREStaffID",
+    ]
+    return first_existing(df, candidates)
 
 # ==============================
 # TABLE + METRICS
@@ -447,13 +474,36 @@ def render_page(page_name: str):
         df = load_sheet_df(ws_name)
     df = drop_date_duration_cols(df)
 
-    # Header cards
-    cA, cB, cC = st.columns([1.2, 1.2, 1.6])
+    # Sidebar filters (page-scoped)
+    with st.sidebar:
+        st.markdown("## Filters")
+    sid_col = staff_id_column(df)
+    selected_staff = "All"
+    if sid_col:
+        staff_ids = (
+            df[sid_col].astype(str)
+            .replace({"nan": np.nan, "None": np.nan, "": np.nan})
+            .dropna()
+            .unique()
+        )
+        staff_ids = sorted(staff_ids, key=lambda x: (len(str(x)), str(x)))
+
+        with st.sidebar:
+            selected_staff = st.selectbox("CARE Staff ID", ["All"] + list(staff_ids), index=0)
+
+        if selected_staff != "All":
+            df = df[df[sid_col].astype(str) == str(selected_staff)]
+    else:
+        with st.sidebar:
+            st.caption("No Staff ID column found on this sheet.")
+
+    # Header cards (only 2, balanced)
+    cA, cB = st.columns(2)
     with cA:
-        card("Worksheet", ws_name, "Source: Google Sheets")
+        sub = f"Staff: {selected_staff}" if selected_staff != "All" else "Staff: All"
+        card("Worksheet", ws_name, sub)
     with cB:
-        card("Rows", f"{len(df):,}", "Total responses")
-    
+        card("Rows", f"{len(df):,}", "Total responses (after filters)")
 
     st.write("")
     tabs = st.tabs(cfg["sections"] + ["Overall"])
@@ -468,7 +518,7 @@ def render_page(page_name: str):
             avg_col = f"{section}_Avg (0–3)"
             rnk_col = f"{section}_RANK"
 
-            # Avg = chart ; Rank = table (your rule)
+            # Avg = chart ; Rank = table
             t1, t2 = st.columns(2)
 
             with t1:
@@ -514,7 +564,7 @@ def render_page(page_name: str):
 
             st.divider()
 
-            # Qn blocks (inside this tab only)
+            # Qn blocks (ONLY inside this section tab)
             q_titles = cfg.get("question_titles", {}).get(section, [])
 
             for qn in range(1, 5):
@@ -529,7 +579,6 @@ def render_page(page_name: str):
 
                 left, right = st.columns(2)
 
-                # Score: chart + table
                 with left:
                     if has(df, score_col):
                         d = score_dist(df, score_col)
@@ -551,7 +600,6 @@ def render_page(page_name: str):
                     else:
                         st.info("Score column missing.")
 
-                # Rubric: chart + expander table
                 with right:
                     if has(df, rubric_col):
                         rf = rubric_freq(df, rubric_col)
@@ -603,7 +651,6 @@ def render_page(page_name: str):
         ai_col = first_existing(df, [cfg.get("ai_col"), "AI_Suspected", "AI-Suspected"])
         ai_maxscore_col = first_existing(df, [cfg.get("ai_maxscore_col"), "AI_MaxScore"])
 
-        # Overall cards
         c1, c2, c3, c4 = st.columns(4)
         if has(df, overall_total):
             tot = pd.to_numeric(df[overall_total], errors="coerce")
@@ -623,10 +670,11 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # Overall Total: chart + summary table
         if has(df, overall_total):
-            fig = px.histogram(df, x=overall_total, title="Overall Total Distribution",
-                               color_discrete_sequence=[BLUES[2]])
+            fig = px.histogram(
+                df, x=overall_total, title="Overall Total Distribution",
+                color_discrete_sequence=[BLUES[2]]
+            )
             fig.update_layout(xaxis_title="Overall Total", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-totaldist")
 
@@ -642,16 +690,13 @@ def render_page(page_name: str):
                 st.markdown("**Overall Total Summary**")
                 st.dataframe(summary, use_container_width=True, hide_index=True)
 
-        # Overall Rank: bar + table
         if has(df, overall_rank):
             r = _clean_series(df[overall_rank])
             if len(r):
                 r_df = r.value_counts().reset_index()
                 r_df.columns = ["Rank", "Count"]
-
                 fig = px.bar(
-                    r_df, x="Rank", y="Count",
-                    title="Overall Rank Distribution",
+                    r_df, x="Rank", y="Count", title="Overall Rank Distribution",
                     color="Rank", color_discrete_sequence=BLUES
                 )
                 fig.update_layout(xaxis_title="", yaxis_title="Count")
@@ -662,7 +707,6 @@ def render_page(page_name: str):
 
         st.divider()
 
-        # AI Flag: donut ONLY if exactly 2 categories; else bar + table
         if ai_col and has(df, ai_col):
             ai = _clean_series(df[ai_col])
             if len(ai):
@@ -683,8 +727,7 @@ def render_page(page_name: str):
                         st.dataframe(ai_df, use_container_width=True, hide_index=True)
                 else:
                     fig = px.bar(
-                        ai_df, x="AI_Flag", y="Count",
-                        title="AI Flag Distribution",
+                        ai_df, x="AI_Flag", y="Count", title="AI Flag Distribution",
                         color="AI_Flag", color_discrete_sequence=BLUES
                     )
                     fig.update_layout(xaxis_title="", yaxis_title="Count")
@@ -693,10 +736,11 @@ def render_page(page_name: str):
                     st.markdown("**AI Flag Table**")
                     st.dataframe(ai_df, use_container_width=True, hide_index=True)
 
-        # AI_MaxScore
         if ai_maxscore_col and has(df, ai_maxscore_col):
-            fig = px.histogram(df, x=ai_maxscore_col, title="AI_MaxScore Distribution",
-                               color_discrete_sequence=[BLUES[1]])
+            fig = px.histogram(
+                df, x=ai_maxscore_col, title="AI_MaxScore Distribution",
+                color_discrete_sequence=[BLUES[1]]
+            )
             fig.update_layout(xaxis_title="AI_MaxScore", yaxis_title="Count")
             safe_plot(fig, key=f"{page_name}-overall-ai-maxscore")
 
