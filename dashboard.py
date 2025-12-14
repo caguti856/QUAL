@@ -29,8 +29,8 @@ BORDER = "rgba(0,0,0,0.12)"
 TEXT = "#FFFFFF"
 MUTED = "rgba(0,0,0,0.70)"
 
-CHART_PAPER = "#020103"
-CHART_PLOT  = "#FFF8EE"
+CHART_PAPER = "#313132"
+CHART_PLOT  = "#D7D6D4"
 
 BLUES = ["#031432", "#0B47A8", "#1D7AFC", "#3B8EF5", "#74A8FF", "#073072"]
 HEAT_SCALE = [
@@ -109,13 +109,13 @@ def inject_css():
             opacity: .85;
         }}
         .card-value {{
-            font-size: 32px !important;
+            font-size: 26px !important;
             font-weight: 900;
             color: {TEXT} !important;
             line-height: 1.05;
         }}
         .card-sub {{
-            font-size: 13px !important;
+            font-size: 30px !important;
             color: {TEXT} !important;
             opacity: .85;
             margin-top: 6px;
@@ -475,10 +475,13 @@ def render_page(page_name: str):
     df = drop_date_duration_cols(df)
 
     # Sidebar filters (page-scoped)
+    
     with st.sidebar:
         st.markdown("## Filters")
+
     sid_col = staff_id_column(df)
-    selected_staff = "All"
+    selected_staff = ["All"]  # multiselect returns a LIST
+
     if sid_col:
         staff_ids = (
             df[sid_col].astype(str)
@@ -488,14 +491,26 @@ def render_page(page_name: str):
         )
         staff_ids = sorted(staff_ids, key=lambda x: (len(str(x)), str(x)))
 
-        with st.sidebar:
-            selected_staff = st.multiselect("CARE Staff ID", ["All"] + list(staff_ids), index=0)
+        options = ["All"] + list(staff_ids)
 
-        if selected_staff != "All":
-            df = df[df[sid_col].astype(str) == str(selected_staff)]
+        with st.sidebar:
+            selected_staff = st.multiselect(
+                "CARE Staff ID",
+                options=options,
+                default=["All"],   # ✅ correct for multiselect
+                key=f"{page_name}-staff-filter",
+            )
+
+        # ---- filtering logic (robust)
+        if not selected_staff or "All" in selected_staff:
+            # no filtering if none selected or "All" chosen
+            pass
+        else:
+            df = df[df[sid_col].astype(str).isin([str(x) for x in selected_staff])]
     else:
         with st.sidebar:
             st.caption("No Staff ID column found on this sheet.")
+
 
     # Header cards (only 2, balanced)
     cA, cB = st.columns(2)
