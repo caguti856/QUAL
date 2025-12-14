@@ -56,7 +56,7 @@ def inject_css():
         /* Global text */
         html, body, [class*="css"] {{
             color: {TEXT} !important;
-            font-size: 16px !important;
+            font-size: 26px !important;
         }}
 
         /* Headings */
@@ -125,10 +125,10 @@ def inject_css():
         button[data-baseweb="tab"] {{
             font-weight: 900 !important;
             color: {CARD_BG} !important;
-            font-size: 22px !important;
+            font-size: 36px !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom: 4px solid {BLUES[0]} !important;
+            border-bottom: 8px solid {BLUES[0]} !important;
         }}
 
         /* Dataframes */
