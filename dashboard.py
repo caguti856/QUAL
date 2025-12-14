@@ -111,7 +111,7 @@ def inject_css():
         .card-value {{
             font-size: 26px !important;
             font-weight: 900;
-            color: {CT} !important;
+            color: {TEXT} !important;
             line-height: 1.05;
         }}
         .card-sub {{
@@ -141,15 +141,15 @@ def inject_css():
 
         /* Metric label (e.g., Mean Total) */
         div[data-testid="stMetricLabel"] > div {{
-            font-size: 18px !important;
-            color: rgba(255,255,255,0.85) !important;  /* change label colour */
+            font-size: 28px !important;
+            color:{CARD_BG} !important;  /* change label colour */
             font-weight: 800 !important;
         }}
 
         /* Metric value (e.g., 8.3) */
         div[data-testid="stMetricValue"] {{
             font-size: 20px !important;               
-            color: {TEXT} !important;                 
+            color: {CT} !important;                 
             font-weight: 900 !important;
         }}
 
