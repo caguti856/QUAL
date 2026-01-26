@@ -163,6 +163,8 @@ MIN_QA_OVERLAP  = 0.05
 
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
+# Advisory scoring scope
+SCORED_QNS = (1,2,3,4,5,6,7,8)
 
 
 TOPK_MAX    = int(st.secrets.get("TOPK_MAX", 30))
@@ -656,7 +658,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
                     qn = int(qid.split("_Q")[-1])
                 except Exception:
                     qn = None
-            if qn not in (1,2,3,4):
+            if qn not in SCORED_QNS:
                 continue
 
             col = resolved_for_qid.get(qid)
@@ -683,9 +685,10 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
 
         # fixed shape for blocks
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            for qn in SCORED_QNS:
                 out.setdefault(f"{attr}_Qn{qn}", "")
                 out.setdefault(f"{attr}_Rubric_Qn{qn}", "")
+
 
         # attribute averages + ranks + overall
         overall_total = 0
@@ -714,8 +717,9 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
     def order_cols(cols):
         ordered = ["Date","Staff ID","Duration_min"]
         for attr in ORDERED_ATTRS:
-            for qn in (1,2,3,4):
+            for qn in SCORED_QNS:
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
+
         for attr in ORDERED_ATTRS:
             ordered += [f"{attr}_Avg (0–3)", f"{attr}_RANK"]
         ordered += ["Overall Total (0–24)", "Overall Rank", "AI_MaxScore", "AI-Suspected"]
@@ -914,5 +918,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
