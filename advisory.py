@@ -799,7 +799,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
                     qn = int(qid.split("_Q")[-1])
                 except Exception:
                     qn = None
-            if qn not in (1, 2, 3, 4):
+            if qn not in (1, 2, 3, 4,5,6,7,8):
                 continue
 
             ans = clean(rec.get(col, ""))
@@ -828,7 +828,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
 
         # ensure blank columns exist consistently
         for attr in ORDERED_ATTRS:
-            for qn in (1, 2, 3, 4):
+            for qn in (1, 2, 3, 4,5,6,7,8):
                 row.setdefault(f"{attr}_Qn{qn}", "")
                 row.setdefault(f"{attr}_Rubric_Qn{qn}", "")
 
@@ -858,7 +858,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: Dict[
     ordered = ["Date", "Duration_min", "Staff ID"]
     q_cols = []
     for attr in ORDERED_ATTRS:
-        for qn in (1, 2, 3, 4):
+        for qn in (1, 2, 3, 4,5,6,7,8):
             q_cols += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
     ordered += q_cols
 
@@ -996,3 +996,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
