@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -798,4 +797,122 @@ def upload_df_to_gsheets(df: pd.DataFrame) -> tuple[bool, str]:
     try:
         ws = _open_ws_by_key()
         df = _ensure_ai_last(df)
-     
+        header = df.columns.astype(str).tolist()
+        values = df.astype(object).where(pd.notna(df), "").values.tolist()
+        all_rows = [header] + values
+        ws.clear()
+
+        col_end = _to_a1_col(len(header))
+        data_payload, start_row = [], 1
+        for rows in _chunk(all_rows, 10000):
+            end_row = start_row + len(rows) - 1
+            a1_range = f"'{ws.title}'!A{start_row}:{col_end}{end_row}"
+            data_payload.append({"range": a1_range, "values": rows})
+            start_row = end_row + 1
+
+        ws.spreadsheet.values_batch_update(body={"valueInputOption":"USER_ENTERED","data":data_payload})
+        _post_write_formatting(ws, len(header))
+        return True, f"✅ Wrote {len(values)} rows to '{ws.title}' via batch update"
+    except Exception as e:
+        return False, f"❌ {type(e).__name__}: {e}"
+
+
+def main():
+    inject_css()
+
+    st.markdown("""
+        <div class="app-header-card">
+            <div class="pill">Advisory Scoring and  AI Detection</div>
+            <h1>Advisory</h1>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.session_state.setdefault("scored_df_advisory", None)
+    st.session_state.setdefault("excel_bytes_advisory", b"")
+
+    def run_pipeline():
+        try:
+            mapping = load_mapping_from_path(MAPPING_PATH)
+        except Exception as e:
+            st.error(f"Failed to load mapping from {MAPPING_PATH}: {e}")
+            return
+
+        try:
+            exemplars = read_jsonl_path(EXEMPLARS_PATH)
+            if not exemplars:
+                st.error(f"Exemplars file is empty: {EXEMPLARS_PATH}")
+                return
+        except Exception as e:
+            st.error(f"Failed to read exemplars from {EXEMPLARS_PATH}: {e}")
+            return
+
+        with st.spinner("Building exemplar packs (cached)…"):
+            packs_by_qid = build_packs_by_question(exemplars)
+
+        with st.spinner("Fetching Kobo submissions…"):
+            df = fetch_kobo_dataframe()
+        if df.empty:
+            st.warning("No Kobo submissions found.")
+            return
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("📥 Fetched dataset")
+        st.caption(f"Rows: {len(df):,}  •  Columns: {len(df.columns):,}")
+        st.dataframe(df, use_container_width=True, height=360)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        with st.spinner("Scoring (Option B++) + AI detection…"):
+            scored_df = score_dataframe(df, mapping, packs_by_qid)
+
+        st.success("✅ Scoring complete.")
+
+        def _highlight_ai(row):
+            if "AI-Suspected" in row and row["AI-Suspected"]:
+                return ["background-color: #241E4E"] * len(row)
+            return [""] * len(row)
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("📊 Scored table")
+        st.dataframe(scored_df.style.apply(_highlight_ai, axis=1), use_container_width=True, height=420)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.session_state["scored_df_advisory"] = scored_df
+        st.session_state["excel_bytes_advisory"] = to_excel_bytes(scored_df)
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("⬇️ Export")
+        st.download_button(
+            "Download Excel",
+            data=st.session_state["excel_bytes_advisory"],
+            file_name="Advisory_Scoring.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_xlsx_advisory",
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if AUTO_PUSH:
+            with st.spinner("📤 Sending to Google Sheets..."):
+                ok, msg = upload_df_to_gsheets(scored_df)
+            (st.success if ok else st.error)(msg)
+
+    # Auto-run once per session
+    if AUTO_RUN and not st.session_state.get("advisory_auto_ran_once"):
+        st.session_state["advisory_auto_ran_once"] = True
+        run_pipeline()
+
+    if st.button("🚀 Fetch Kobo & Score", type="primary", use_container_width=True, key="btn_run_advisory"):
+        run_pipeline()
+
+    if (st.session_state.get("scored_df_advisory") is not None) and (not AUTO_PUSH):
+        with st.expander("Google Sheets export", expanded=True):
+            st.write("Spreadsheet key:", st.secrets.get("GSHEETS_SPREADSHEET_KEY") or "⚠️ Not set")
+            st.write("Worksheet name:", DEFAULT_WS_NAME)
+            if st.button("📤 Send scored table to Google Sheets", use_container_width=True, key="btn_push_advisory"):
+                ok, msg = upload_df_to_gsheets(st.session_state["scored_df_advisory"])
+                (st.success if ok else st.error)(msg)
+
+if __name__ == "__main__":
+    main()
+
+
