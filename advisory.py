@@ -164,9 +164,6 @@ MIN_QA_OVERLAP  = 0.05
 QNUM_RX = re.compile(r"_Q(\d+)$")
 
 # Advisory scoring scope
-S
-
-
 TOPK_MAX    = int(st.secrets.get("TOPK_MAX", 30))
 CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
