@@ -153,7 +153,7 @@ _EXCLUDE_SOURCE_COLS_LOWER = {
 TOPK_MAX    = int(st.secrets.get("TOPK_MAX", 30))
 CLOSE_DELTA = float(st.secrets.get("CLOSE_DELTA", 0.08))
 CLUSTER_SIM = float(st.secrets.get("CLUSTER_SIM", 0.78))
-MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 6))
+MIN_CLUSTER = int(st.secrets.get("MIN_CLUSTER", 10))
 
 TEMP_CANDIDATES = [0.04, 0.06, 0.08, 0.10, 0.14, 0.20, 0.30, 0.50, 1.00]
 
@@ -642,16 +642,23 @@ def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
     top_idx = _topk_sorted(sims, k=min(TOPK_MAX, sims.size))
     thematic_idx = select_thematic_subset(pack, top_idx, sims)
 
-    best = None  # (margin, conf, pred)
+    best = None  # (best_sim, margin, conf, pred)
+
+    best_sim = float(sims[thematic_idx].max())
+
     for t in TEMP_CANDIDATES:
         pred, conf, margin = vote_with_temp(pack, thematic_idx, sims, temp=float(t))
-        cand = (margin, conf, pred)
-        if best is None or cand[0] > best[0] + 1e-9 or (abs(cand[0] - best[0]) < 1e-9 and cand[1] > best[1] + 1e-9):
+        cand = (best_sim, margin, conf, pred)
+
+        if (
+            best is None
+            or cand[0] > best[0] + 1e-6
+            or (abs(cand[0] - best[0]) < 1e-6 and cand[3] > best[3])
+        ):
             best = cand
 
-    if best is None:
-        return None
-    return int(best[2])
+    return int(best[3]) if best else None
+
 
 
 # =============================================================================
@@ -815,14 +822,24 @@ def score_dataframe(
                 vec  = ans_emb.get(ans)
                 pack = packs_by_qid.get(qid)
                 sc2 = score_answer_auto(pack, vec)
+
+                # 🔴 Do NOT invent a score
                 if sc2 is None:
-                    sc2 = 1
-                sc = int(sc2)
+                    sc = None
+                else:
+                    sc = int(sc2)
+
+                # ✅ Write result safely
+                if sc is None:
+                    row[f"{attr}_Qn{qn}"] = ""
+                    row[f"{attr}_Rubric_Qn{qn}"] = ""
+                else:
+                    row[f"{attr}_Qn{qn}"] = sc
+                    row[f"{attr}_Rubric_Qn{qn}"] = BANDS[sc]
+                    per_attr.setdefault(attr, []).append(sc)
+
                 exact_cache[cache_key] = sc
 
-            row[f"{attr}_Qn{qn}"] = sc
-            row[f"{attr}_Rubric_Qn{qn}"] = BANDS[int(sc)]
-            per_attr.setdefault(attr, []).append(int(sc))
 
         # keep stable shape
         for attr in ORDERED_ATTRS:
