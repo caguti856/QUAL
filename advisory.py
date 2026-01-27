@@ -642,23 +642,16 @@ def score_answer_auto(pack: ExemplarPack, ans_vec: np.ndarray) -> Optional[int]:
     top_idx = _topk_sorted(sims, k=min(TOPK_MAX, sims.size))
     thematic_idx = select_thematic_subset(pack, top_idx, sims)
 
-    best = None  # (best_sim, margin, conf, pred)
-
-    best_sim = float(sims[thematic_idx].max())
-
+    best = None  # (margin, conf, pred)
     for t in TEMP_CANDIDATES:
         pred, conf, margin = vote_with_temp(pack, thematic_idx, sims, temp=float(t))
-        cand = (best_sim, margin, conf, pred)
-
-        if (
-            best is None
-            or cand[0] > best[0] + 1e-6
-            or (abs(cand[0] - best[0]) < 1e-6 and cand[3] > best[3])
-        ):
+        cand = (margin, conf, pred)
+        if best is None or cand[0] > best[0] + 1e-9 or (abs(cand[0] - best[0]) < 1e-9 and cand[1] > best[1] + 1e-9):
             best = cand
 
-    return int(best[3]) if best else None
-
+    if best is None:
+        return None
+    return int(best[2])
 
 
 # =============================================================================
@@ -805,7 +798,7 @@ def score_dataframe(
 
             ans = clean(raw_ans)
             if not ans:
-                sc = 0
+                sc = 1
                 row[f"{attr}_Qn{qn}"] = sc
                 row[f"{attr}_Rubric_Qn{qn}"] = BANDS[sc]
                 per_attr.setdefault(attr, []).append(int(sc))
@@ -825,7 +818,7 @@ def score_dataframe(
 
                 # 🔴 Do NOT invent a score
                 if sc2 is None:
-                    sc = None
+                    sc = 1
                 else:
                     sc = int(sc2)
 
