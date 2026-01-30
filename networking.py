@@ -647,7 +647,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
     start_dt = pd.to_datetime(df[start_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce") if start_col else pd.Series([pd.NaT]*n_rows)
     end_dt   = pd.to_datetime(df[end_col].astype(str).str.strip().str.lstrip(","), utc=True, errors="coerce") if end_col else pd.Series([pd.NaT]*n_rows)
 
-    duration_min = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
+    duration = ((end_dt - start_dt).dt.total_seconds() / 60.0).clip(lower=0)
 
     all_mapping = [r for r in mapping.to_dict(orient="records") if r["attribute"] in ORDERED_ATTRS]
 
@@ -689,8 +689,8 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
         out = {}
         out["Date"] = pd.to_datetime(dt_series.iloc[i]).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(dt_series.iloc[i]) else str(i)
         out["Staff ID"] = str(resp.get(staff_id_col)) if staff_id_col else ""
-        d_val = duration_min.iloc[i]
-        out["Duration_min"] = int(round(d_val)) if not pd.isna(d_val) else ""
+        d_val = duration.iloc[i]
+        out["Duration"] = int(round(d_val)) if not pd.isna(d_val) else ""
 
         per_attr: dict[str, list[int]] = {}
         ai_scores: list[float] = []
@@ -763,7 +763,7 @@ def score_dataframe(df: pd.DataFrame, mapping: pd.DataFrame, packs_by_qid: dict[
     res_df = pd.DataFrame(rows_out)
 
     def order_cols(cols):
-        ordered = ["Date","Staff ID","Duration_min"]
+        ordered = ["Date","Staff ID","Duration"]
         for attr in ORDERED_ATTRS:
             for qn in (1,2,3,4):
                 ordered += [f"{attr}_Qn{qn}", f"{attr}_Rubric_Qn{qn}"]
@@ -984,4 +984,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
