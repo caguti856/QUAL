@@ -183,7 +183,7 @@ QID_PREFIX_TO_SECTIONS = {
     "EAL": ["C1"],
     "CGC": ["D1"],
     "CCM": ["E1"],
-    "ELL": ["F1"],
+    "EEL": ["F1"],
     "IWA": ["G1"],
     "RMA": ["H1"],
 }
@@ -984,3 +984,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
